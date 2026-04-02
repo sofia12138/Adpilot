@@ -1,0 +1,70 @@
+# ============================================
+# Meta Web-to-App Sales 广告配置模板
+# 填写后可直接用于创建广告
+# ============================================
+
+campaign:
+  name: "sofia-test"
+  objective: "OUTCOME_SALES"
+  budget_type: "daily"          # daily / lifetime
+  budget_amount: 100
+  currency: "USD"
+  bid_strategy: "LOWEST_COST_WITHOUT_CAP"  # LOWEST_COST_WITHOUT_CAP / COST_CAP / BID_CAP
+  # cost_cap_amount: 10         # 仅 COST_CAP 时需要填
+
+adset:
+  name: "sofia-test-adset-01"
+  start_time: "2026-03-15T00:00:00"
+  end_time: ""                  # 留空则持续投放
+
+  # -- 转化追踪 --
+  pixel_id: ""                  # Meta Pixel ID，例如 "123456789"
+  conversion_event: "PURCHASE"  # PURCHASE / ADD_TO_CART / INITIATE_CHECKOUT / COMPLETE_REGISTRATION
+
+  # -- 应用信息（双平台投放） --
+  ios:
+    app_id: ""                  # Meta 开发者平台 iOS 应用 ID
+    app_store_url: ""           # App Store 链接，例如 "https://apps.apple.com/app/idXXXXXX"
+  android:
+    app_id: ""                  # Meta 开发者平台 Android 应用 ID
+    app_store_url: ""           # Google Play 链接，例如 "https://play.google.com/store/apps/details?id=com.xxx"
+
+  # -- 受众定向 --
+  targeting:
+    countries:                  # 国家代码列表
+      - "US"
+    age_min: 18
+    age_max: 65
+    gender: "all"               # all / male / female
+    interests: []               # 兴趣定向 ID 列表，可留空
+    custom_audiences: []        # 自定义受众 ID 列表，可留空
+    excluded_audiences: []      # 排除受众 ID 列表，可留空
+
+  # -- 版位 --
+  placement: "auto"             # auto / manual
+  # manual_placements:          # 仅 placement=manual 时需要
+  #   - "facebook_feed"
+  #   - "instagram_feed"
+  #   - "instagram_stories"
+  #   - "instagram_reels"
+
+ad:
+  name: "sofia-test-ad-01"
+  creative_type: "video"        # image / video / carousel
+
+  # -- 素材 --
+  media_url: ""                 # 视频/图片 URL 或本地文件路径
+  thumbnail_url: ""             # 视频封面图（可选）
+
+  # -- 文案 --
+  primary_text: ""              # 广告主文案，例如 "限时优惠，立即下载APP！"
+  headline: ""                  # 标题，例如 "春季大促"
+  description: ""               # 描述（可选）
+
+  # -- 链接 --
+  website_url: ""               # 落地页 URL（兜底网页链接）
+  deep_link_ios: ""             # iOS App 深度链接（可选），例如 "myapp://product/123"
+  deep_link_android: ""         # Android App 深度链接（可选），例如 "myapp://product/123"
+
+  # -- 行动号召 --
+  cta: "INSTALL_NOW"            # SHOP_NOW / INSTALL_NOW / LEARN_MORE / SIGN_UP / ORDER_NOW
