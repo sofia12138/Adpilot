@@ -25,6 +25,7 @@ frontend/dist/
 test_upload.mp4
 _check_diff.py
 _verify_3db.py
+.git_commit_msg.txt
 
 # IDE
 .idea/
