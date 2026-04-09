@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { PageHeader } from '@/components/common/PageHeader'
 import { SectionCard } from '@/components/common/SectionCard'
 import { DataTable, type Column } from '@/components/common/DataTable'
-import { Loader2, AlertCircle, Plus, Trash2, Pencil, X, LogIn, Shield, RotateCcw } from 'lucide-react'
+import { Loader2, AlertCircle, Plus, Trash2, Pencil, X, LogIn, Shield, RotateCcw, CreditCard } from 'lucide-react'
 import { useUsers, useCreateUser, useUpdateUser, useDeleteUser } from '@/hooks/use-users'
 import { usePanels, useUserPanels, useUpdateUserPanels, useResetUserPanels } from '@/hooks/use-panels'
+import { useAdAccounts } from '@/hooks/use-ad-accounts'
 import { AuthError } from '@/services/api'
 import type { UserInfo, CreateUserBody, UpdateUserBody } from '@/services/users'
 import { ROLE_LABELS } from '@/types/menu'
@@ -40,6 +41,38 @@ export default function UserMgmtPage() {
 
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<FormState>(emptyForm)
+
+  // Account authorization
+  const [acctEditUser, setAcctEditUser] = useState('')
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>([])
+  const [acctDirty, setAcctDirty] = useState(false)
+  const { data: allAccounts, isLoading: acctLoading } = useAdAccounts()
+
+  function openAcctEdit(u: UserInfo) {
+    setAcctEditUser(u.username)
+    setSelectedAccounts(u.assigned_accounts ?? [])
+    setAcctDirty(false)
+  }
+
+  function closeAcctEdit() {
+    setAcctEditUser('')
+    setSelectedAccounts([])
+    setAcctDirty(false)
+  }
+
+  function toggleAccount(accountId: string) {
+    setAcctDirty(true)
+    setSelectedAccounts(prev =>
+      prev.includes(accountId) ? prev.filter(id => id !== accountId) : [...prev, accountId]
+    )
+  }
+
+  function saveAccounts() {
+    const body: UpdateUserBody = { assigned_accounts: selectedAccounts }
+    updateMutation.mutate({ username: acctEditUser, body }, {
+      onSuccess: () => { setAcctDirty(false) },
+    })
+  }
 
   // Panel authorization
   const [panelEditUser, setPanelEditUser] = useState('')
@@ -125,6 +158,7 @@ export default function UserMgmtPage() {
     )},
     { key: 'actions', title: '', render: (r) => (
       <div className="flex items-center gap-2">
+        <button onClick={() => openAcctEdit(r)} className="text-gray-400 hover:text-green-500 transition-colors" title="账户授权"><CreditCard className="w-3.5 h-3.5" /></button>
         <button onClick={() => openPanelEdit(r)} className="text-gray-400 hover:text-purple-500 transition-colors" title="面板授权"><Shield className="w-3.5 h-3.5" /></button>
         <button onClick={() => openEdit(r)} className="text-gray-400 hover:text-blue-500 transition-colors" title="编辑"><Pencil className="w-3.5 h-3.5" /></button>
         <button onClick={() => handleDelete(r.username)} className="text-gray-400 hover:text-red-500 transition-colors" title="删除"><Trash2 className="w-3.5 h-3.5" /></button>
@@ -166,6 +200,58 @@ export default function UserMgmtPage() {
             <button onClick={handleSubmit} disabled={isPending} className="px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 disabled:opacity-50 transition">{isPending ? '提交中...' : form.mode === 'create' ? '创建' : '保存'}</button>
             <button onClick={() => setShowForm(false)} className="px-4 py-2 bg-gray-100 text-gray-600 text-sm rounded-lg hover:bg-gray-200 transition">取消</button>
           </div>
+        </div>
+      )}
+
+      {/* 账户授权编辑区 */}
+      {acctEditUser && (
+        <div className="bg-white rounded-xl border border-green-200 p-5 mb-4 relative">
+          <button onClick={closeAcctEdit} className="absolute top-3 right-3 text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+          <div className="flex items-center gap-3 mb-4">
+            <CreditCard className="w-5 h-5 text-green-500" />
+            <h3 className="text-sm font-medium text-gray-800">账户授权：{acctEditUser}</h3>
+            <span className="text-xs text-gray-400">已选 {selectedAccounts.length} 个账户</span>
+          </div>
+
+          {acctLoading ? (
+            <div className="flex items-center gap-2 py-6 text-gray-400"><Loader2 className="w-4 h-4 animate-spin" /><span className="text-sm">加载中...</span></div>
+          ) : (
+            <>
+              {(!allAccounts || allAccounts.length === 0) ? (
+                <p className="text-sm text-gray-400 py-4">暂无广告账号，请先在数据源中添加</p>
+              ) : (
+                <div className="space-y-4">
+                  {[...new Set(allAccounts.map(a => a.platform))].map(platform => (
+                    <div key={platform}>
+                      <p className="text-xs font-medium text-gray-500 mb-2 uppercase">{platform}</p>
+                      <div className="flex flex-wrap gap-2">
+                        {allAccounts.filter(a => a.platform === platform).map(acct => {
+                          const checked = selectedAccounts.includes(acct.account_id)
+                          return (
+                            <label key={acct.account_id} className={`flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition ${
+                              checked ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-gray-300'
+                            }`}>
+                              <input type="checkbox" checked={checked} onChange={() => toggleAccount(acct.account_id)}
+                                className="w-3.5 h-3.5 rounded border-gray-300 text-green-500 focus:ring-green-500/20" />
+                              <span className="text-xs text-gray-700">{acct.account_name || acct.account_id}</span>
+                              <span className="text-[10px] text-gray-400">{acct.account_id}</span>
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-4 flex gap-2">
+                <button onClick={saveAccounts} disabled={updateMutation.isPending || !acctDirty}
+                  className="px-4 py-2 bg-green-500 text-white text-sm rounded-lg hover:bg-green-600 disabled:opacity-50 transition">
+                  {updateMutation.isPending ? '保存中...' : '保存授权'}
+                </button>
+                <button onClick={closeAcctEdit} className="px-4 py-2 bg-gray-100 text-gray-600 text-sm rounded-lg hover:bg-gray-200 transition">关闭</button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
