@@ -58,7 +58,8 @@ async def _sync_tiktok_report_level(
     adgroup_name_lookup: {adgroup_id: adgroup_name}
     """
     metrics = ["spend", "impressions", "clicks", "conversion",
-               "complete_payment", "total_complete_payment_rate"]
+               "complete_payment", "total_complete_payment_rate",
+               "registration"]       # App 内注册数（注册优化目标 / 次级转化事件）
     all_rows: list[dict] = []
     parent_lookup = parent_lookup or {}
     campaign_name_lookup = campaign_name_lookup or {}
@@ -99,6 +100,7 @@ async def _sync_tiktok_report_level(
                     "installs": 0,
                     "conversions": int(m.get("conversion", 0) or 0),
                     "revenue": float(m.get("complete_payment", 0) or 0),
+                    "registrations": int(m.get("registration", 0) or 0),  # App 内注册数
                     "raw_json": item,
                 }
 
@@ -182,6 +184,7 @@ async def sync_tiktok_campaigns(advertiser_id: str,
     campaign_map = {str(c.get("campaign_id")): c.get("campaign_name", "") for c in all_campaigns}
 
     # 2) Campaign 日报
+    from repositories import returned_conversion_repository
     log_id = biz_sync_log_repository.create(task_name="sync_tiktok_campaign_daily", platform="tiktok", account_id=advertiser_id, sync_date=start_date)
     try:
         report_rows = await _sync_tiktok_report_level(
@@ -190,6 +193,13 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         affected = biz_daily_report_repository.upsert_batch(report_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"campaign 日报 {len(report_rows)} 条")
         logger.info(f"[TikTok] campaign 日报同步完成: {len(report_rows)} 条")
+        # 同步写入回传口径表（registrations_returned 固定为 0，TikTok 无 registration 字段）
+        for r in report_rows:
+            ret = _tiktok_row_to_returned_row(r, advertiser_id)
+            try:
+                returned_conversion_repository.upsert(**ret)
+            except Exception as e_ret:
+                logger.warning(f"[TikTok] returned_conversion upsert(campaign) 失败: {e_ret}")
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[TikTok] campaign 日报同步失败: {e}")
@@ -336,9 +346,43 @@ async def _fetch_meta_insights_paged(client, ad_account_id: str,
     return all_data
 
 
+def _parse_meta_actions(raw_list: list | None) -> dict[str, int]:
+    """
+    Meta actions / action_values 字段为数组结构，需按 action_type 精确提取。
+    返回 {action_type: int(value)} 字典。不要直接按 key 读取，避免漏值或解析错误。
+    """
+    if not raw_list:
+        return {}
+    result: dict[str, int] = {}
+    for entry in raw_list:
+        if isinstance(entry, dict):
+            atype = entry.get("action_type", "")
+            if atype:
+                result[atype] = int(float(entry.get("value", 0) or 0))
+    return result
+
+
+def _parse_meta_action_values(raw_list: list | None) -> dict[str, float]:
+    """
+    Meta action_values 字段为数组结构，按 action_type 精确提取金额（float）。
+    用于提取 purchase 金额（purchase_value_returned）。
+    """
+    if not raw_list:
+        return {}
+    result: dict[str, float] = {}
+    for entry in raw_list:
+        if isinstance(entry, dict):
+            atype = entry.get("action_type", "")
+            if atype:
+                result[atype] = float(entry.get("value", 0.0) or 0.0)
+    return result
+
+
 def _meta_insight_to_row(item: dict, ad_account_id: str, level: str) -> dict:
-    actions = {a["action_type"]: int(a.get("value", 0))
-               for a in (item.get("actions") or [])}
+    # actions / action_values 均为数组，必须通过 _parse_meta_* 函数提取
+    actions = _parse_meta_actions(item.get("actions"))
+    action_values = _parse_meta_action_values(item.get("action_values"))
+
     row = {
         "platform": "meta",
         "account_id": ad_account_id,
@@ -360,6 +404,102 @@ def _meta_insight_to_row(item: dict, ad_account_id: str, level: str) -> dict:
         row["ad_id"] = str(item.get("ad_id", ""))
         row["ad_name"] = item.get("ad_name", "")
     return row
+
+
+def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) -> dict:
+    """
+    将 Meta Insights 数据映射到 ad_returned_conversion_daily 回传口径行。
+
+    字段映射说明（对应 PLATFORM_FIELD_SUPPORT["meta"]）：
+    - registrations_returned:   actions 数组中 action_type=complete_registration 的 value
+    - purchase_value_returned:  action_values 数组中 action_type=purchase 的 value（金额，非次数）
+    - subscribe_value_returned: 0（Meta 无独立订阅价值字段）
+    - d1_value_returned:        0（Meta Insights 无 D1 cohort 拆分）
+    - installs:                 actions 数组中 action_type=mobile_app_install 的 value
+    """
+    actions = _parse_meta_actions(item.get("actions"))
+    action_values = _parse_meta_action_values(item.get("action_values"))
+
+    returned: dict = {
+        "stat_date":                item.get("date_start", ""),
+        "media_source":             "meta",
+        "account_id":               ad_account_id,
+        "campaign_id":              str(item.get("campaign_id", "")),
+        "campaign_name":            item.get("campaign_name", ""),
+        "adset_id":                 "",
+        "adset_name":               "",
+        "ad_id":                    "",
+        "ad_name":                  "",
+        "country":                  "",
+        "platform":                 "",
+        "impressions":              int(item.get("impressions", 0) or 0),
+        "clicks":                   int(item.get("clicks", 0) or 0),
+        "installs":                 actions.get("mobile_app_install", 0),
+        "spend":                    float(item.get("spend", 0) or 0),
+        # Meta 支持：从 actions 数组精确匹配 complete_registration
+        "registrations_returned":   actions.get("complete_registration", 0),
+        # Meta 支持：从 action_values 数组精确匹配 purchase（金额，非次数）
+        "purchase_value_returned":  action_values.get("purchase", 0.0),
+        # Meta 不支持：无独立订阅价值字段，固定为 0
+        "subscribe_value_returned":    0.0,
+        # Meta 不支持：无 D1 cohort 拆分，固定为 0
+        "d1_value_returned":           0.0,
+        # D0 Cohort：Meta 标准 Insights API 无法拆分 D0 cohort，固定为 0
+        "d0_registrations_returned":   0,
+        "d0_purchase_value_returned":  0.0,
+        "d0_subscribe_value_returned": 0.0,
+        "raw_payload":                 item,
+    }
+    if level in ("adset", "ad"):
+        returned["adset_id"]   = str(item.get("adset_id", ""))
+        returned["adset_name"] = item.get("adset_name", "")
+    if level == "ad":
+        returned["ad_id"]   = str(item.get("ad_id", ""))
+        returned["ad_name"] = item.get("ad_name", "")
+    return returned
+
+
+def _tiktok_row_to_returned_row(row: dict, advertiser_id: str) -> dict:
+    """
+    将 TikTok 日报行映射到 ad_returned_conversion_daily 回传口径行。
+
+    字段映射说明（对应 PLATFORM_FIELD_SUPPORT["tiktok"]）：
+    - registrations_returned:   固定为 0
+                                TikTok conversion 是安装类事件，安装 ≠ 注册，
+                                complete_payment 是购买次数而非注册，均不可用作降级值。
+    - purchase_value_returned:  固定为 0（TikTok complete_payment 为次数，无金额字段）
+    - subscribe_value_returned: 固定为 0
+    - d1_value_returned:        固定为 0
+    """
+    return {
+        "stat_date":                row.get("stat_date", ""),
+        "media_source":             "tiktok",
+        "account_id":               advertiser_id,
+        "campaign_id":              row.get("campaign_id", ""),
+        "campaign_name":            row.get("campaign_name", ""),
+        "adset_id":                 row.get("adgroup_id", ""),
+        "adset_name":               row.get("adgroup_name", ""),
+        "ad_id":                    row.get("ad_id", ""),
+        "ad_name":                  row.get("ad_name", ""),
+        "country":                  "",
+        "platform":                 "",
+        "impressions":              int(row.get("impressions", 0) or 0),
+        "clicks":                   int(row.get("clicks", 0) or 0),
+        "installs":                 int(row.get("installs", 0) or 0),
+        "spend":                    float(row.get("spend", 0) or 0),
+        # TikTok 支持：registration（App 内注册）+ on_web_register（落地页注册）之和
+        # 在注册优化目标 / 次级转化配置下有值，安装优化目标下通常为 0
+        "registrations_returned":   int(row.get("registrations", 0) or 0),
+        # TikTok 不支持：无购买金额字段，固定 0
+        "purchase_value_returned":     0.0,
+        "subscribe_value_returned":    0.0,
+        "d1_value_returned":           0.0,
+        # D0 Cohort：TikTok 当前不支持，固定 0
+        "d0_registrations_returned":   0,
+        "d0_purchase_value_returned":  0.0,
+        "d0_subscribe_value_returned": 0.0,
+        "raw_payload":                 row.get("raw_json"),
+    }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -449,9 +589,12 @@ async def sync_meta_campaigns(ad_account_id: str,
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] ad 列表同步失败: {e}")
 
-    campaign_fields = "campaign_id,campaign_name,spend,impressions,clicks,actions"
-    adset_fields = "campaign_id,campaign_name,adset_id,adset_name,spend,impressions,clicks,actions"
-    ad_fields = "campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,actions"
+    # action_values 字段必须加入，用于提取 purchase 金额（purchase_value_returned）
+    campaign_fields = "campaign_id,campaign_name,spend,impressions,clicks,actions,action_values"
+    adset_fields = "campaign_id,campaign_name,adset_id,adset_name,spend,impressions,clicks,actions,action_values"
+    ad_fields = "campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,actions,action_values"
+
+    from repositories import returned_conversion_repository
 
     # 4) Campaign 日报
     log_id = biz_sync_log_repository.create(task_name="sync_meta_campaign_daily", platform="meta", account_id=ad_account_id, sync_date=start_date)
@@ -461,6 +604,13 @@ async def sync_meta_campaigns(ad_account_id: str,
         affected = biz_daily_report_repository.upsert_batch(report_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"campaign 日报 {len(report_rows)} 条")
         logger.info(f"[Meta] campaign 日报同步完成: {len(report_rows)} 条")
+        # 同步写入回传口径表（ad_returned_conversion_daily，adpilot_biz）
+        for item in data:
+            ret = _meta_insight_to_returned_row(item, ad_account_id, "campaign")
+            try:
+                returned_conversion_repository.upsert(**ret)
+            except Exception as e_ret:
+                logger.warning(f"[Meta] returned_conversion upsert(campaign) 失败: {e_ret}")
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] campaign 日报同步失败: {e}")
@@ -473,6 +623,13 @@ async def sync_meta_campaigns(ad_account_id: str,
         affected = biz_adgroup_daily_repository.upsert_batch(adset_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"adset 日报 {len(adset_rows)} 条")
         logger.info(f"[Meta] adset 日报同步完成: {len(adset_rows)} 条")
+        # 同步写入回传口径表（adset 级别）
+        for item in data:
+            ret = _meta_insight_to_returned_row(item, ad_account_id, "adset")
+            try:
+                returned_conversion_repository.upsert(**ret)
+            except Exception as e_ret:
+                logger.warning(f"[Meta] returned_conversion upsert(adset) 失败: {e_ret}")
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] adset 日报同步失败: {e}")
@@ -485,6 +642,13 @@ async def sync_meta_campaigns(ad_account_id: str,
         affected = biz_ad_daily_repository.upsert_batch(ad_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"ad 日报 {len(ad_rows)} 条")
         logger.info(f"[Meta] ad 日报同步完成: {len(ad_rows)} 条")
+        # 同步写入回传口径表（ad 级别，最细粒度）
+        for item in data:
+            ret = _meta_insight_to_returned_row(item, ad_account_id, "ad")
+            try:
+                returned_conversion_repository.upsert(**ret)
+            except Exception as e_ret:
+                logger.warning(f"[Meta] returned_conversion upsert(ad) 失败: {e_ret}")
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] ad 日报同步失败: {e}")

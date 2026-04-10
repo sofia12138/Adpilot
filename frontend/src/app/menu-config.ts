@@ -18,6 +18,7 @@ import {
   Monitor,
   Shield,
   SlidersHorizontal,
+  Redo2,
 } from 'lucide-react'
 import type { MenuItem } from '@/types/menu'
 
@@ -52,6 +53,7 @@ export const menuConfig: MenuItem[] = [
       { id: 'overview', label: '数据总览', icon: Eye, path: '/overview', panelKey: 'overview' },
       { id: 'channel-analysis', label: '渠道分析', icon: GitCompare, path: '/channel-analysis', panelKey: 'channel_analysis' },
       { id: 'biz-analysis', label: '业务分析', icon: TrendingUp, path: '/biz-analysis', panelKey: 'biz_analysis' },
+      { id: 'returned-conversion', label: '广告回传分析', icon: Redo2, path: '/returned-conversion', panelKey: 'returned_conversion' },
     ],
   },
   {

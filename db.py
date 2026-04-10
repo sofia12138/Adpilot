@@ -80,6 +80,7 @@ def _create_prd_conn() -> pymysql.Connection:
         charset="utf8mb4",
         connect_timeout=5,
         read_timeout=10,
+        autocommit=True,
         cursorclass=pymysql.cursors.DictCursor,
     )
 
@@ -96,6 +97,7 @@ def _create_app_conn() -> pymysql.Connection:
         charset="utf8mb4",
         connect_timeout=5,
         read_timeout=10,
+        autocommit=True,
         cursorclass=pymysql.cursors.DictCursor,
     )
 
@@ -114,6 +116,7 @@ def _create_biz_conn() -> pymysql.Connection:
         charset="utf8mb4",
         connect_timeout=5,
         read_timeout=10,
+        autocommit=True,
         cursorclass=pymysql.cursors.DictCursor,
     )
 
@@ -498,12 +501,14 @@ _PANEL_SEED = [
     ("overview",           "数据总览",      "数据分析",   "/overview",           40),
     ("channel_analysis",   "渠道分析",      "数据分析",   "/channel-analysis",   41),
     ("biz_analysis",       "业务分析",      "数据分析",   "/biz-analysis",       42),
-    ("data_compare",       "数据对比",      "数据对比",   "/data-compare",       50),
-    ("data_source",        "数据源配置",    "系统管理",   "/data-source",        60),
-    ("user_mgmt",          "用户权限",      "系统管理",   "/user-mgmt",          61),
-    ("role_perm",          "角色权限管理",  "系统管理",   "/role-perm",          62),
-    ("insight_config",     "ROI阈值配置",   "系统管理",   "/insight-config",     63),
-    ("oplog",              "操作日志",      "系统管理",   "/oplog",              64),
+    ("data_compare",           "数据对比",        "数据对比",   "/data-compare",            50),
+    # 广告回传分析（过渡版，回传口径，非订单真值）
+    ("returned_conversion",    "广告回传分析",    "数据分析",   "/returned-conversion",     43),
+    ("data_source",            "数据源配置",      "系统管理",   "/data-source",             60),
+    ("user_mgmt",              "用户权限",        "系统管理",   "/user-mgmt",               61),
+    ("role_perm",              "角色权限管理",    "系统管理",   "/role-perm",               62),
+    ("insight_config",         "ROI阈值配置",     "系统管理",   "/insight-config",          63),
+    ("oplog",                  "操作日志",        "系统管理",   "/oplog",                   64),
 ]
 
 _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
@@ -513,7 +518,7 @@ _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
                     "template_mgmt", "creatives", "creative_analysis"],
     "designer":    ["dashboard", "creatives", "creative_analysis"],
     "analyst":     ["dashboard", "overview", "channel_analysis", "biz_analysis", "data_compare",
-                    "creative_analysis"],
+                    "creative_analysis", "returned_conversion"],
     "viewer":      ["dashboard"],
 }
 
@@ -541,36 +546,35 @@ def init_app_tables():
 
 
 def _seed_panels(cur, conn):
-    """幂等：仅当 panel_definitions 为空时写入种子数据"""
-    cur.execute("SELECT COUNT(*) AS cnt FROM panel_definitions")
-    if cur.fetchone()["cnt"] > 0:
-        return
+    """幂等：将 _PANEL_SEED 中缺失的面板补充写入 panel_definitions（INSERT IGNORE）"""
+    count = 0
     for panel_key, panel_name, panel_group, route_path, sort_order in _PANEL_SEED:
         cur.execute(
-            """INSERT INTO panel_definitions (panel_key, panel_name, panel_group, route_path, sort_order)
+            """INSERT IGNORE INTO panel_definitions
+               (panel_key, panel_name, panel_group, route_path, sort_order)
                VALUES (%s, %s, %s, %s, %s)""",
             (panel_key, panel_name, panel_group, route_path, sort_order),
         )
+        count += cur.rowcount
     conn.commit()
-    logger.info(f"已写入 {len(_PANEL_SEED)} 条面板定义种子数据")
+    if count:
+        logger.info(f"已补充写入 {count} 条面板定义种子数据")
 
 
 def _seed_role_panels(cur, conn):
-    """幂等：仅当 role_panel_permissions 为空时写入默认角色面板权限"""
-    cur.execute("SELECT COUNT(*) AS cnt FROM role_panel_permissions")
-    if cur.fetchone()["cnt"] > 0:
-        return
+    """幂等：将 _ROLE_DEFAULT_PANELS 中缺失的角色面板权限补充写入（INSERT IGNORE）"""
     count = 0
     for role_key, panels in _ROLE_DEFAULT_PANELS.items():
         for panel_key in panels:
             cur.execute(
-                """INSERT INTO role_panel_permissions (role_key, panel_key, can_view)
+                """INSERT IGNORE INTO role_panel_permissions (role_key, panel_key, can_view)
                    VALUES (%s, %s, 1)""",
                 (role_key, panel_key),
             )
-            count += 1
+            count += cur.rowcount
     conn.commit()
-    logger.info(f"已写入 {count} 条角色默认面板权限")
+    if count:
+        logger.info(f"已补充写入 {count} 条角色默认面板权限")
 
 
 def _seed_insight_config(cur, conn):
@@ -757,6 +761,49 @@ _BIZ_TABLES_SQL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
+    -- 广告回传转化日报表（回传口径，非订单真值，存储于 BIZ 业务库）
+    -- data_label = 'returned' 标识本表全部数据为广告平台归因回传口径
+    CREATE TABLE IF NOT EXISTS ad_returned_conversion_daily (
+        id                       BIGINT         AUTO_INCREMENT PRIMARY KEY,
+        stat_date                DATE           NOT NULL COMMENT '统计日期',
+        media_source             VARCHAR(50)    NOT NULL COMMENT '媒体来源: meta / tiktok / google',
+        account_id               VARCHAR(100)   DEFAULT NULL COMMENT '广告账户ID',
+        campaign_id              VARCHAR(100)   DEFAULT NULL COMMENT '广告系列ID',
+        campaign_name            VARCHAR(255)   DEFAULT NULL COMMENT '广告系列名称',
+        adset_id                 VARCHAR(100)   DEFAULT NULL COMMENT '广告组ID',
+        adset_name               VARCHAR(255)   DEFAULT NULL COMMENT '广告组名称',
+        ad_id                    VARCHAR(100)   DEFAULT NULL COMMENT '广告ID',
+        ad_name                  VARCHAR(255)   DEFAULT NULL COMMENT '广告名称',
+        country                  VARCHAR(50)    DEFAULT NULL COMMENT '国家/地区',
+        platform                 VARCHAR(50)    DEFAULT NULL COMMENT '操作系统平台: ios / android / mixed',
+        impressions              BIGINT         NOT NULL DEFAULT 0 COMMENT '展示量',
+        clicks                   BIGINT         NOT NULL DEFAULT 0 COMMENT '点击量',
+        installs                 BIGINT         NOT NULL DEFAULT 0 COMMENT '安装量',
+        spend                    DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT '广告花费',
+        -- 以下字段均为广告平台归因回传口径，非后端订单真值 --
+        registrations_returned   BIGINT         NOT NULL DEFAULT 0 COMMENT '回传注册数（平台归因）',
+        purchase_value_returned  DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT '回传充值价值（平台归因）',
+        subscribe_value_returned DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT '回传订阅价值（平台归因，不支持时为0）',
+        total_value_returned     DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT '回传总价值 = purchase + subscribe',
+        d0_roi_returned          DECIMAL(18,6)  NOT NULL DEFAULT 0 COMMENT 'D0 ROI 回传口径 = total_value / spend',
+        d1_value_returned        DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT 'D1 回传价值（仅平台支持时有值）',
+        d1_roi_returned          DECIMAL(18,6)  NOT NULL DEFAULT 0 COMMENT 'D1 ROI 回传口径 = d1_value / spend',
+        -- 首日（D0 Cohort）拆分字段，需平台支持 D0 cohort 上报时才有值，默认 0 --
+        d0_registrations_returned    BIGINT        NOT NULL DEFAULT 0 COMMENT '首日注册数（D0 cohort，平台支持时有值）',
+        d0_purchase_value_returned   DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '首日充值金额（D0 cohort，平台支持时有值）',
+        d0_subscribe_value_returned  DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '首日订阅金额（D0 cohort，平台支持时有值）',
+        data_label               VARCHAR(50)    NOT NULL DEFAULT 'returned' COMMENT '数据口径标识，固定为 returned',
+        raw_payload              JSON           DEFAULT NULL COMMENT '原始平台数据，用于追溯字段来源',
+        created_at               DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at               DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_returned_daily (stat_date, media_source, account_id, campaign_id, adset_id, ad_id, country, platform),
+        INDEX idx_stat_date (stat_date),
+        INDEX idx_media_source (media_source),
+        INDEX idx_account_date (account_id, stat_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='广告回传转化日报 — 回传口径，非订单真值，存储在 adpilot_biz 业务库'
+    """,
+    """
     CREATE TABLE IF NOT EXISTS biz_sync_logs (
         id              BIGINT AUTO_INCREMENT PRIMARY KEY,
         task_name       VARCHAR(100)  NOT NULL,
@@ -793,12 +840,28 @@ def init_biz_tables():
         for sql in _BIZ_TABLES_SQL:
             cur.execute(sql)
         _migrate_biz_ad_accounts_columns(cur)
+        _migrate_returned_conversion_d0_columns(cur)
         conn.commit()
         logger.info("BIZ 业务库数据沉淀表初始化完成")
     except Exception as e:
         logger.error(f"init_biz_tables 失败: {e}")
     finally:
         conn.close()
+
+
+def _migrate_returned_conversion_d0_columns(cur):
+    """为 ad_returned_conversion_daily 补齐 D0 Cohort 三列（幂等）"""
+    cur.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ad_returned_conversion_daily'")
+    existing = {r["COLUMN_NAME"] for r in cur.fetchall()}
+    migrations = [
+        ("d0_registrations_returned",   "ADD COLUMN d0_registrations_returned   BIGINT        NOT NULL DEFAULT 0 COMMENT '首日注册数（D0 cohort）' AFTER d1_roi_returned"),
+        ("d0_purchase_value_returned",  "ADD COLUMN d0_purchase_value_returned  DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '首日充值金额（D0 cohort）' AFTER d0_registrations_returned"),
+        ("d0_subscribe_value_returned", "ADD COLUMN d0_subscribe_value_returned DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '首日订阅金额（D0 cohort）' AFTER d0_purchase_value_returned"),
+    ]
+    for col, ddl in migrations:
+        if col not in existing:
+            cur.execute(f"ALTER TABLE ad_returned_conversion_daily {ddl}")
 
 
 def _migrate_biz_ad_accounts_columns(cur):

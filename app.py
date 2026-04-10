@@ -86,6 +86,7 @@ def _register_routers(application: FastAPI):
     from routes.panels import router as panels_router
     from routes.insight import router as insight_router
     from routes.accounts import router as accounts_router
+    from routes.analysis import router as analysis_router
 
     for r in [
         auth_router, users_router, campaign_router, adgroup_router,
@@ -93,7 +94,7 @@ def _register_routers(application: FastAPI):
         meta_account_router, meta_campaign_router, meta_adset_router,
         meta_ad_router, meta_report_router, bizdata_router, oplog_router,
         template_router, biz_router, panels_router, insight_router,
-        accounts_router,
+        accounts_router, analysis_router,
     ]:
         application.include_router(r, prefix="/api")
 
