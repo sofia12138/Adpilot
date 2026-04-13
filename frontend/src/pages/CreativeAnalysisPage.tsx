@@ -7,6 +7,7 @@ import { DataTable, type Column } from '@/components/common/DataTable'
 import { DateRangeFilter, getDefaultDateRange, type DateRange } from '@/components/common/DateRangeFilter'
 import { Image, MousePointerClick, Eye, TrendingUp, Trophy, AlertTriangle, Loader2, AlertCircle } from 'lucide-react'
 import { fetchCreativeAnalysis, type CreativeItem } from '@/services/biz'
+import { GlobalSyncBar } from '@/components/common/GlobalSyncBar'
 
 const fmtUsd = (n: number | null) => n != null ? `$${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}` : '--'
 const fmt = (n: number | null) => n != null ? n.toLocaleString() : '--'
@@ -76,6 +77,7 @@ export default function CreativeAnalysisPage() {
   return (
     <div className="max-w-7xl mx-auto">
       <PageHeader title="素材分析" description="分析素材表现，发现高效与低效素材" />
+      <GlobalSyncBar />
 
       <div className="mb-6">
         <DateRangeFilter value={dateRange} onChange={setDateRange} />

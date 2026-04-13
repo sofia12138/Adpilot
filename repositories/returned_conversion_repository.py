@@ -369,6 +369,67 @@ def query_rows(
     return result
 
 
+# ── 树形层级查询 ───────────────────────────────────────────
+
+def query_hierarchy_rows(
+    start_date: str,
+    end_date: str,
+    **filter_kwargs,
+) -> list[dict]:
+    """
+    按 (campaign_id, adset_id, ad_id) 三维 GROUP BY，返回完整层级明细行。
+
+    每行包含 campaign/adset/ad 各层的 id 与 name，供前端自下而上聚合构建树。
+    与三次独立聚合不同，此方案保证同一批数据来源，消除父子数据守恒问题。
+    """
+    where, params = _build_filter(start_date, end_date, **filter_kwargs)
+    sql = f"""
+        SELECT
+            COALESCE(campaign_id, '')              AS campaign_id,
+            COALESCE(ANY_VALUE(campaign_name), '') AS campaign_name,
+            COALESCE(adset_id, '')                 AS adset_id,
+            COALESCE(ANY_VALUE(adset_name), '')    AS adset_name,
+            COALESCE(ad_id, '')                    AS ad_id,
+            COALESCE(ANY_VALUE(ad_name), '')       AS ad_name,
+            {_METRICS_SELECT}
+        FROM ad_returned_conversion_daily
+        WHERE {where}
+        GROUP BY campaign_id, adset_id, ad_id
+        ORDER BY total_spend DESC
+    """
+    with get_biz_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        raw_rows = cur.fetchall()
+
+    result = []
+    for r in raw_rows:
+        spend = float(r.get("total_spend") or 0)
+        total_value = float(r.get("total_total_value_returned") or 0)
+        d1_value = float(r.get("total_d1_value_returned") or 0)
+        result.append({
+            "campaign_id":   str(r.get("campaign_id") or ""),
+            "campaign_name": str(r.get("campaign_name") or ""),
+            "adset_id":      str(r.get("adset_id") or ""),
+            "adset_name":    str(r.get("adset_name") or ""),
+            "ad_id":         str(r.get("ad_id") or ""),
+            "ad_name":       str(r.get("ad_name") or ""),
+            "spend":                       round(spend, 4),
+            "impressions":                 int(r.get("total_impressions") or 0),
+            "clicks":                      int(r.get("total_clicks") or 0),
+            "installs":                    int(r.get("total_installs") or 0),
+            "registrations_returned":      int(r.get("total_registrations_returned") or 0),
+            "purchase_value_returned":     round(float(r.get("total_purchase_value_returned") or 0), 4),
+            "subscribe_value_returned":    round(float(r.get("total_subscribe_value_returned") or 0), 4),
+            "total_value_returned":        round(total_value, 4),
+            "d1_value_returned":           round(d1_value, 4),
+            "d0_registrations_returned":   int(r.get("total_d0_registrations_returned") or 0),
+            "d0_purchase_value_returned":  round(float(r.get("total_d0_purchase_value_returned") or 0), 4),
+            "d0_subscribe_value_returned": round(float(r.get("total_d0_subscribe_value_returned") or 0), 4),
+        })
+    return result
+
+
 # ── 写入接口 ───────────────────────────────────────────────
 
 def upsert(

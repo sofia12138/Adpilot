@@ -20,31 +20,60 @@ from tiktok_ads.api.client import TikTokApiError
 from meta_ads.api.client import MetaApiError
 
 # ── 定时同步任务 ───────────────────────────────────────────
+#
+# 两个错开的调度任务：
+#   Job 1  sync_all_job    — 全量同步（结构 + 日报 + 回传），每 20 分钟，启动后 20 分钟首次执行
+#   Job 2  sync_reports_job — 仅日报 + 回传（不含结构），每 20 分钟，启动后 30 分钟首次执行（错开 10 分钟）
+#
+# 之所以错开而非合并：避免同时向平台 API 发起大量请求，降低触发限流风险。
 
 _scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
 
 
-async def _scheduled_sync():
-    """每 20 分钟自动同步昨天和今天的数据"""
+async def _sync_all_job():
+    """Job 1：全量同步（Campaign/Adset/Ad 结构 + 所有层级日报 + 回传转化）"""
     from services import sync_state
     from tasks.sync_campaigns import run as sync_run
 
-    if sync_state.get_state()["is_running"]:
-        logger.info("定时同步：任务已在运行，跳过本次")
+    if sync_state.is_any_running():
+        logger.info("定时同步(全量)：有任务正在运行，跳过本次")
         return
 
-    end = date.today()
+    end   = date.today()
     start = end - timedelta(days=1)
     date_range = f"{start} ~ {end}"
-    logger.info(f"定时同步开始: {date_range}")
-    sync_state.set_running(True, date_range=date_range)
+    logger.info(f"全量同步开始: {date_range}")
     try:
         await sync_run(start_date=str(start), end_date=str(end))
-        sync_state.set_done()
-        logger.info(f"定时同步完成: {date_range}")
+        logger.info(f"全量同步完成: {date_range}")
     except Exception as e:
-        sync_state.set_error(str(e))
-        logger.error(f"定时同步失败: {e}")
+        for mod in ("structure", "reports", "returned"):
+            sync_state.set_error(mod, str(e))
+        logger.error(f"全量同步失败: {e}")
+
+
+async def _sync_reports_job():
+    """Job 2：仅同步日报 + 回传（错开 10 分钟，弥补高频数据实时性）"""
+    from services import sync_state
+    from tasks.sync_campaigns import run as sync_run
+
+    if sync_state.is_any_running():
+        logger.info("定时同步(日报)：有任务正在运行，跳过本次")
+        return
+
+    end   = date.today()
+    start = end  # 仅今天
+    date_range = f"{start}"
+    logger.info(f"日报补充同步开始: {date_range}")
+    # 通过 platform=None 触发所有平台今天的日报同步
+    # run() 内部会同时更新 sync_state
+    try:
+        await sync_run(start_date=str(start), end_date=str(end))
+        logger.info(f"日报补充同步完成: {date_range}")
+    except Exception as e:
+        for mod in ("reports", "returned"):
+            sync_state.set_error(mod, str(e))
+        logger.error(f"日报补充同步失败: {e}")
 
 
 # ── 生命周期：建表 + 数据迁移 + 启动调度器 ────────────────
@@ -61,17 +90,30 @@ async def lifespan(application: FastAPI):
     from services.account_service import seed_from_env
     seed_from_env()
 
-    # 启动定时同步调度器（每 20 分钟）
+    now = datetime.now()
+
+    # Job 1：全量同步（每 20 分钟，启动后 20 分钟首次）
     _scheduler.add_job(
-        _scheduled_sync,
+        _sync_all_job,
         trigger="interval",
         minutes=20,
-        id="sync_ad_data",
+        id="sync_all",
         replace_existing=True,
-        next_run_time=datetime.now() + timedelta(minutes=20),  # 启动后 20 分钟首次执行
+        next_run_time=now + timedelta(minutes=20),
     )
+
+    # Job 2：日报补充同步（每 20 分钟，启动后 30 分钟首次，与 Job1 错开 10 分钟）
+    _scheduler.add_job(
+        _sync_reports_job,
+        trigger="interval",
+        minutes=20,
+        id="sync_reports",
+        replace_existing=True,
+        next_run_time=now + timedelta(minutes=30),
+    )
+
     _scheduler.start()
-    logger.info("定时同步调度器已启动（每 20 分钟）")
+    logger.info("定时同步调度器已启动（全量每 20 分钟 | 日报补充错开 10 分钟）")
 
     logger.info("应用启动完成")
     yield

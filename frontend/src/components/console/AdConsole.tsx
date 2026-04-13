@@ -1,15 +1,16 @@
-import { useState, useMemo, useCallback, useRef } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PageHeader } from '@/components/common/PageHeader'
 import { StatCard } from '@/components/common/StatCard'
 import { FilterBar } from '@/components/common/FilterBar'
 import { DateRangeFilter, getDefaultDateRange, type DateRange } from '@/components/common/DateRangeFilter'
+import { GlobalSyncBar } from '@/components/common/GlobalSyncBar'
 import {
   DollarSign, TrendingUp, BarChart3, Target, MousePointerClick,
   PlusCircle, Columns3, ChevronRight, ChevronDown,
   Loader2, AlertCircle, AlertTriangle, ArrowUpDown, ExternalLink, X,
-  Database, Play, Pause, Pencil, Search, RefreshCw,
+  Play, Pause, Pencil, Search, RefreshCw,
 } from 'lucide-react'
 import { useBizOverview, useBizCampaigns, useBizAdgroups, useBizAds } from '@/hooks/use-biz'
 import { useInsightConfig } from '@/hooks/use-insight'
@@ -18,6 +19,7 @@ import {
   updateBizEntityStatus,
   type AggRow, type AggParams,
 } from '@/services/biz'
+import { fetchSyncStatus, triggerSync } from '@/services/sync'
 import { updateTikTokCampaign, updateTikTokCampaignStatus } from '@/services/tiktok-campaigns'
 import { updateTikTokAdGroupStatus, updateTikTokAdGroup } from '@/services/tiktok-adgroups'
 import { updateTikTokAdStatus } from '@/services/tiktok-ads'
@@ -318,8 +320,33 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
     queryClient.invalidateQueries({ queryKey: ['biz', 'campaigns', platform] })
     queryClient.invalidateQueries({ queryKey: ['biz', 'adgroups', platform] })
     queryClient.invalidateQueries({ queryKey: ['biz', 'ads', platform] })
+    queryClient.invalidateQueries({ queryKey: ['sync-status-all'] })
     refetchCampaigns()
   }
+
+  // 页面加载时：若结构数据超过 15 分钟未同步，静默触发一次同步
+  useEffect(() => {
+    let cancelled = false
+    async function autoSyncIfStale() {
+      try {
+        const status = await fetchSyncStatus()
+        const lastSynced = status.structure?.last_synced_at
+        if (!lastSynced) {
+          if (!cancelled) await triggerSync(2)
+          return
+        }
+        const ageMin = (Date.now() - new Date(lastSynced).getTime()) / 60_000
+        if (ageMin > 15 && !cancelled) {
+          await triggerSync(2)
+        }
+      } catch {
+        // 静默失败，不影响页面使用
+      }
+    }
+    autoSyncIfStale()
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [platform])
 
   // ── Expand handlers ──
   const toggleCampaign = useCallback(async (campaignId: string) => {
@@ -634,13 +661,10 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
       {Toast}
 
       {/* Header */}
-      <PageHeader title={title} description={`${platformLabel} 投放数据操作台 — 分层查看 Campaign → Adset → Ad`}
-        action={
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-gray-100 text-gray-500">
-            <Database className="w-3 h-3" /> 数据来源: BIZ
-          </span>
-        }
-      />
+      <PageHeader title={title} description={`${platformLabel} 投放数据操作台 — 分层查看 Campaign → Adset → Ad`} />
+
+      {/* 同步状态栏：显示最近同步时间，支持手动刷新 */}
+      <GlobalSyncBar />
 
       {/* Time filter */}
       <FilterBar>

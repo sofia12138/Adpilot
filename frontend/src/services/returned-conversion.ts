@@ -113,17 +113,67 @@ export type BaseReturnedFilter = Pick<
   'start_date' | 'end_date' | 'media_source' | 'country' | 'platform' | 'search_keyword'
 >
 
-/** Campaign 层汇总（group_by=campaign） */
+/**
+ * 完整层级行 — 来自 /hierarchy 接口。
+ * 每行包含 campaign/adset/ad 三层的 id+name 以及指标聚合值，
+ * 前端从同一批数据构建树，保证父子数据守恒。
+ */
+export interface HierarchyLeaf {
+  campaign_id: string
+  campaign_name: string
+  adset_id: string
+  adset_name: string
+  ad_id: string
+  ad_name: string
+  // 指标
+  spend: number
+  impressions: number
+  clicks: number
+  installs: number
+  registrations_returned: number
+  purchase_value_returned: number
+  subscribe_value_returned: number
+  total_value_returned: number
+  d1_value_returned: number
+  d0_registrations_returned: number
+  d0_purchase_value_returned: number
+  d0_subscribe_value_returned: number
+}
+
+export interface HierarchyResponse {
+  code: number
+  message: string
+  summary: ReturnedSummary
+  availability: ReturnedAvailability
+  rows: HierarchyLeaf[]
+}
+
+/**
+ * 获取完整层级行（单次请求，前端构树）。
+ * 替代原来的 fetchCampaignRows / fetchAdsetRows / fetchAdRows 三次独立请求。
+ */
+export async function fetchHierarchyRows(base: BaseReturnedFilter): Promise<HierarchyResponse> {
+  const params = new URLSearchParams()
+  params.set('start_date', base.start_date)
+  params.set('end_date', base.end_date)
+  if (base.media_source)   params.set('media_source', base.media_source)
+  if (base.country)        params.set('country', base.country)
+  if (base.platform)       params.set('platform', base.platform)
+  if (base.search_keyword) params.set('search_keyword', base.search_keyword)
+  return apiFetch<HierarchyResponse>(`/api/analysis/returned-conversion/hierarchy?${params}`)
+}
+
+/** @deprecated 使用 fetchHierarchyRows 替代 */
 export function fetchCampaignRows(base: BaseReturnedFilter): Promise<ReturnedConversionResponse> {
   return fetchReturnedConversion({ ...base, group_by: 'campaign', order_dir: 'desc' })
 }
 
-/** 某 Campaign 下的 Adset 列表（group_by=adset + campaign_id 筛选） */
+/** @deprecated 使用 fetchHierarchyRows 替代 */
 export function fetchAdsetRows(campaignId: string, base: BaseReturnedFilter): Promise<ReturnedConversionResponse> {
   return fetchReturnedConversion({ ...base, campaign_id: campaignId, group_by: 'adset', order_dir: 'desc' })
 }
 
-/** 某 Adset 下的 Ad 列表（group_by=ad + adset_id 筛选） */
+/** @deprecated 使用 fetchHierarchyRows 替代 */
 export function fetchAdRows(adsetId: string, base: BaseReturnedFilter): Promise<ReturnedConversionResponse> {
   return fetchReturnedConversion({ ...base, adset_id: adsetId, group_by: 'ad', order_dir: 'desc' })
 }

@@ -1,31 +1,33 @@
 /**
  * 广告回传分析页面 — Campaign → Adset → Ad 层级视图
  *
- * 数据口径：广告平台归因回传口径（returned），非订单真值，仅用于投放优化。
+ * 架构说明：
+ *   - 单次 GET /api/analysis/returned-conversion/hierarchy 请求，
+ *     后端按 (campaign_id, adset_id, ad_id) 三维 GROUP BY，返回完整层级行。
+ *   - 前端 buildTree() 从同一批数据自下而上聚合，确保父子数据守恒。
+ *   - 不再使用三次独立聚合请求拼接树（老做法产生 "-" 空节点和花费不守恒问题）。
  *
- * 层级交互：
- *   1. 默认展示 Campaign 汇总列表
- *   2. 点击 Campaign 行 → 展开该 Campaign 的 Adset，数据按需加载
- *   3. 点击 Adset 行   → 展开该 Adset 的 Ad，数据按需加载
+ * 跳过规则（对齐需求）：
+ *   - campaign_id 和 campaign_name 均为空 → 跳过整条 leaf
+ *   - adset_id 和 adset_name 均为空 → 跳过 adset 层，该 leaf 指标仍计入 campaign 合计
+ *   - ad_id 和 ad_name 均为空 → 跳过 ad 层，该 leaf 指标仍计入 adset 合计
  *
- * 筛选：时间范围 / 媒体来源 / 平台 / 国家 / 名称搜索（campaign/adset/ad 名称模糊匹配）
- * 已移除：Campaign ID / Adset ID / Ad ID 输入框；group_by 切换按钮
+ * 开发环境下：buildTree 会在控制台打印父子 spend 不一致 warning（预期为跳过的层级行导致）。
  */
 import { useState, useCallback, useMemo, Fragment } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import {
   ChevronRight, ChevronDown, Loader2, AlertCircle,
   DollarSign, Users, ShoppingCart, TrendingUp, BarChart3, Info,
-  RefreshCw, CheckCircle, Clock,
 } from 'lucide-react'
 import { PageHeader } from '@/components/common/PageHeader'
 import { DateRangeFilter, getDefaultDateRange, type DateRange } from '@/components/common/DateRangeFilter'
 import {
-  fetchCampaignRows, fetchAdsetRows, fetchAdRows,
+  fetchHierarchyRows,
   type BaseReturnedFilter, type ReturnedAvailability,
-  type ReturnedFieldAvailability, type ReturnedRow,
+  type ReturnedFieldAvailability, type HierarchyLeaf,
 } from '@/services/returned-conversion'
-import { fetchSyncStatus, triggerSync } from '@/services/sync'
+import { GlobalSyncBar } from '@/components/common/GlobalSyncBar'
 
 // ── 格式化工具 ────────────────────────────────────────────────
 
@@ -39,6 +41,182 @@ const fmtRoi = (n: number): React.ReactNode => {
       {n.toFixed(4)}
     </span>
   )
+}
+
+// ── 树节点类型 ────────────────────────────────────────────────
+
+interface MetricRow {
+  spend: number
+  impressions: number
+  clicks: number
+  installs: number
+  registrations_returned: number
+  purchase_value_returned: number
+  subscribe_value_returned: number
+  total_value_returned: number
+  cumulative_roi_returned: number
+  d0_roi_returned: number
+  d1_value_returned: number
+  d1_roi_returned: number
+  d0_registrations_returned: number
+  d0_purchase_value_returned: number
+  d0_subscribe_value_returned: number
+}
+
+interface AdNode extends MetricRow { id: string; name: string }
+interface AdsetNode extends MetricRow { id: string; name: string; ads: AdNode[] }
+interface CampaignNode extends MetricRow { id: string; name: string; adsets: AdsetNode[] }
+
+// ── 树构建逻辑 ────────────────────────────────────────────────
+
+const ZERO = (): MetricRow => ({
+  spend: 0, impressions: 0, clicks: 0, installs: 0,
+  registrations_returned: 0, purchase_value_returned: 0,
+  subscribe_value_returned: 0, total_value_returned: 0,
+  cumulative_roi_returned: 0, d0_roi_returned: 0,
+  d1_value_returned: 0, d1_roi_returned: 0,
+  d0_registrations_returned: 0, d0_purchase_value_returned: 0,
+  d0_subscribe_value_returned: 0,
+})
+
+/** 将 leaf 的可加指标累加到目标节点（ROI 类派生字段不参与累加） */
+function accum(target: MetricRow, leaf: HierarchyLeaf) {
+  target.spend                    += leaf.spend
+  target.impressions              += leaf.impressions
+  target.clicks                   += leaf.clicks
+  target.installs                 += leaf.installs
+  target.registrations_returned   += leaf.registrations_returned
+  target.purchase_value_returned  += leaf.purchase_value_returned
+  target.subscribe_value_returned += leaf.subscribe_value_returned
+  target.total_value_returned     += leaf.total_value_returned
+  target.d1_value_returned        += leaf.d1_value_returned
+  target.d0_registrations_returned   += leaf.d0_registrations_returned
+  target.d0_purchase_value_returned  += leaf.d0_purchase_value_returned
+  target.d0_subscribe_value_returned += leaf.d0_subscribe_value_returned
+}
+
+/** 根据累加后的原始指标重新计算 ROI 派生字段 */
+function finalize(m: MetricRow) {
+  m.spend = +m.spend.toFixed(4)
+  const roi = (v: number) => m.spend > 0 ? +(v / m.spend).toFixed(4) : 0
+  m.cumulative_roi_returned = roi(m.total_value_returned)
+  m.d0_roi_returned         = roi(m.total_value_returned)
+  m.d1_roi_returned         = roi(m.d1_value_returned)
+}
+
+/**
+ * 从后端层级行列表构建 Campaign → Adset → Ad 树。
+ *
+ * 跳过规则：
+ *   - campaign id+name 均空 → 跳过整行
+ *   - adset id+name 均空    → 跳过 adset 层（leaf 指标仍计入 campaign）
+ *   - ad id+name 均空       → 跳过 ad 层（leaf 指标仍计入 adset）
+ */
+function buildTree(leaves: HierarchyLeaf[]): CampaignNode[] {
+  const campaignMap = new Map<string, CampaignNode>()
+  const adsetMap    = new Map<string, AdsetNode>()
+
+  for (const leaf of leaves) {
+    const { campaign_id: cid, campaign_name: cname,
+            adset_id:    sid, adset_name:    sname,
+            ad_id:       did, ad_name:       dname } = leaf
+
+    // ① 跳过无效 campaign
+    if (!cid && !cname) continue
+
+    // ② 确保 Campaign 节点存在
+    if (!campaignMap.has(cid)) {
+      campaignMap.set(cid, {
+        id: cid,
+        name: cname || `未命名广告系列 (${cid})`,
+        adsets: [],
+        ...ZERO(),
+      })
+    }
+    const campaign = campaignMap.get(cid)!
+    accum(campaign, leaf)
+
+    // ③ 跳过无效 adset 层（leaf 指标已计入 campaign）
+    if (!sid && !sname) continue
+
+    // ④ 确保 Adset 节点存在
+    const adsetKey = `${cid}::${sid}`
+    if (!adsetMap.has(adsetKey)) {
+      const node: AdsetNode = {
+        id: sid,
+        name: sname || `未命名 Adset (${sid})`,
+        ads: [],
+        ...ZERO(),
+      }
+      adsetMap.set(adsetKey, node)
+      campaign.adsets.push(node)
+    }
+    const adset = adsetMap.get(adsetKey)!
+    accum(adset, leaf)
+
+    // ⑤ 跳过无效 ad 层（leaf 指标已计入 adset）
+    if (!did && !dname) continue
+
+    adset.ads.push({
+      id:   did,
+      name: dname || `未命名 Ad (${did})`,
+      spend:                       leaf.spend,
+      impressions:                 leaf.impressions,
+      clicks:                      leaf.clicks,
+      installs:                    leaf.installs,
+      registrations_returned:      leaf.registrations_returned,
+      purchase_value_returned:     leaf.purchase_value_returned,
+      subscribe_value_returned:    leaf.subscribe_value_returned,
+      total_value_returned:        leaf.total_value_returned,
+      cumulative_roi_returned:     leaf.spend > 0 ? +(leaf.total_value_returned / leaf.spend).toFixed(4) : 0,
+      d0_roi_returned:             leaf.spend > 0 ? +(leaf.total_value_returned / leaf.spend).toFixed(4) : 0,
+      d1_value_returned:           leaf.d1_value_returned,
+      d1_roi_returned:             leaf.spend > 0 ? +(leaf.d1_value_returned / leaf.spend).toFixed(4) : 0,
+      d0_registrations_returned:   leaf.d0_registrations_returned,
+      d0_purchase_value_returned:  leaf.d0_purchase_value_returned,
+      d0_subscribe_value_returned: leaf.d0_subscribe_value_returned,
+    })
+  }
+
+  // ⑥ 自下而上 finalize ROI，并按 spend 降序排列
+  const result = [...campaignMap.values()].sort((a, b) => b.spend - a.spend)
+  for (const c of result) {
+    finalize(c)
+    c.adsets.sort((a, b) => b.spend - a.spend)
+    for (const a of c.adsets) {
+      finalize(a)
+      a.ads.sort((x, y) => y.spend - x.spend)
+    }
+  }
+
+  // ⑦ 开发环境：打印父子 spend 守恒校验
+  if (import.meta.env.DEV) {
+    for (const c of result) {
+      if (c.adsets.length > 0) {
+        const adsetSum = c.adsets.reduce((s, a) => s + a.spend, 0)
+        if (Math.abs(adsetSum - c.spend) > 0.01) {
+          console.warn(
+            `[树结构校验] Campaign "${c.name}" spend=${c.spend.toFixed(4)}, ` +
+            `adset合计=${adsetSum.toFixed(4)} — 差值 ${(c.spend - adsetSum).toFixed(4)} ` +
+            `（可能存在 adset_id/name 均为空的 leaf 被跳过）`
+          )
+        }
+        for (const a of c.adsets) {
+          if (a.ads.length > 0) {
+            const adSum = a.ads.reduce((s, d) => s + d.spend, 0)
+            if (Math.abs(adSum - a.spend) > 0.01) {
+              console.warn(
+                `[树结构校验] Adset "${a.name}" spend=${a.spend.toFixed(4)}, ` +
+                `ad合计=${adSum.toFixed(4)} — 差值 ${(a.spend - adSum).toFixed(4)}`
+              )
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return result
 }
 
 // ── 小组件 ────────────────────────────────────────────────────
@@ -81,9 +259,9 @@ function StatCard({
   )
 }
 
-// ── 表格行指标单元格（共用于三个层级） ───────────────────────
+// ── 表格行指标单元格（三层共用） ──────────────────────────────
 
-function MetricCells({ row, avail }: { row: ReturnedRow; avail: ReturnedAvailability }) {
+function MetricCells({ row, avail }: { row: MetricRow; avail: ReturnedAvailability }) {
   return (
     <>
       <td className="text-right px-3 py-2.5 text-sm tabular-nums whitespace-nowrap">
@@ -120,141 +298,9 @@ function MetricCells({ row, avail }: { row: ReturnedRow; avail: ReturnedAvailabi
   )
 }
 
-// ── Ad 行组（第三层，Adset 展开后渲染） ─────────────────────
+// SyncBar 已迁移至全局组件 GlobalSyncBar（@/components/common/GlobalSyncBar）
 
-const COL_COUNT = 11 // 名称列 + 10 指标列
-
-function AdRowGroup({
-  adsetId, base, avail,
-}: { adsetId: string; base: BaseReturnedFilter; avail: ReturnedAvailability }) {
-  const { data, isLoading } = useQuery({
-    queryKey: ['returned-conversion', 'ads', adsetId, base],
-    queryFn: () => fetchAdRows(adsetId, base),
-    staleTime: 2 * 60_000,
-  })
-
-  if (isLoading) {
-    return (
-      <tr>
-        <td colSpan={COL_COUNT} className="py-2 pl-24 text-xs text-gray-400">
-          <Loader2 className="w-3 h-3 animate-spin inline mr-1" />加载广告…
-        </td>
-      </tr>
-    )
-  }
-
-  const ads = data?.rows ?? []
-  if (ads.length === 0) {
-    return (
-      <tr>
-        <td colSpan={COL_COUNT} className="py-2 pl-24 text-xs text-gray-300 italic">暂无 Ad 数据</td>
-      </tr>
-    )
-  }
-
-  return (
-    <>
-      {ads.map(ad => (
-        <tr key={ad.dimension_key} className="border-t border-gray-50 hover:bg-gray-50/50 transition-colors">
-          <td className="py-2 pl-20 pr-3">
-            <div className="flex items-center gap-2">
-              <span className="w-1.5 h-1.5 rounded-full bg-gray-300 shrink-0" />
-              <span
-                className="text-xs text-gray-500 line-clamp-2 break-words leading-tight"
-                title={ad.dimension_label}
-              >
-                {ad.dimension_label || ad.dimension_key || '-'}
-              </span>
-            </div>
-          </td>
-          <MetricCells row={ad} avail={avail} />
-        </tr>
-      ))}
-    </>
-  )
-}
-
-// ── Adset 行组（第二层，Campaign 展开后渲染） ────────────────
-
-function AdsetRowGroup({
-  campaignId, base, avail,
-}: { campaignId: string; base: BaseReturnedFilter; avail: ReturnedAvailability }) {
-  const [expandedAdsets, setExpandedAdsets] = useState(new Set<string>())
-
-  const toggleAdset = useCallback((id: string) => {
-    setExpandedAdsets(prev => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
-    })
-  }, [])
-
-  const { data, isLoading } = useQuery({
-    queryKey: ['returned-conversion', 'adsets', campaignId, base],
-    queryFn: () => fetchAdsetRows(campaignId, base),
-    staleTime: 2 * 60_000,
-  })
-
-  if (isLoading) {
-    return (
-      <tr>
-        <td colSpan={COL_COUNT} className="py-2 pl-10 text-xs text-gray-400">
-          <Loader2 className="w-3 h-3 animate-spin inline mr-1" />加载 Adset…
-        </td>
-      </tr>
-    )
-  }
-
-  const adsets = data?.rows ?? []
-  if (adsets.length === 0) {
-    return (
-      <tr>
-        <td colSpan={COL_COUNT} className="py-2 pl-10 text-xs text-gray-300 italic">暂无 Adset 数据</td>
-      </tr>
-    )
-  }
-
-  return (
-    <>
-      {adsets.map(adset => {
-        const isExpanded = expandedAdsets.has(adset.dimension_key)
-        return (
-          <Fragment key={adset.dimension_key}>
-            <tr
-              className="border-t border-gray-100 bg-white hover:bg-blue-50/30 cursor-pointer transition-colors"
-              onClick={() => toggleAdset(adset.dimension_key)}
-            >
-              <td className="py-2.5 pl-9 pr-3">
-                <div className="flex items-center gap-2">
-                  {/* 左侧竖线缩进指示 */}
-                  <span className="w-px h-4 bg-gray-200 shrink-0" />
-                  <span className="text-gray-400 shrink-0">
-                    {isExpanded
-                      ? <ChevronDown className="w-3.5 h-3.5" />
-                      : <ChevronRight className="w-3.5 h-3.5" />
-                    }
-                  </span>
-                  <span
-                    className="text-xs text-gray-700 line-clamp-2 break-words leading-tight"
-                    title={adset.dimension_label}
-                  >
-                    {adset.dimension_label || adset.dimension_key || '-'}
-                  </span>
-                </div>
-              </td>
-              <MetricCells row={adset} avail={avail} />
-            </tr>
-            {isExpanded && (
-              <AdRowGroup adsetId={adset.dimension_key} base={base} avail={avail} />
-            )}
-          </Fragment>
-        )
-      })}
-    </>
-  )
-}
-
-// ── 筛选选项 ─────────────────────────────────────────────────
+// ── 常量 ─────────────────────────────────────────────────────
 
 const MEDIA_OPTIONS = [
   { value: '', label: '全部媒体' },
@@ -275,6 +321,8 @@ const TABLE_HEADERS = [
   '回传注册数', '回传充值价值', '回传订阅价值', '回传总价值', '累计回传ROI', 'D0 ROI（回传）',
 ]
 
+const COL_COUNT = 11
+
 const _unsupported: ReturnedFieldAvailability = { supported: false, has_nonzero_data: false }
 const DEFAULT_AVAIL: ReturnedAvailability = {
   registrations_returned:      _unsupported,
@@ -288,91 +336,15 @@ const DEFAULT_AVAIL: ReturnedAvailability = {
 
 // ── 主页面组件 ────────────────────────────────────────────────
 
-// ── 同步状态栏 ────────────────────────────────────────────────
-
-function SyncBar() {
-  const queryClient = useQueryClient()
-
-  const { data: syncStatus, refetch: refetchStatus } = useQuery({
-    queryKey: ['sync-status'],
-    queryFn: fetchSyncStatus,
-    refetchInterval: 15_000,   // 每 15 秒轮询一次
-    staleTime: 10_000,
-  })
-
-  const mutation = useMutation({
-    mutationFn: () => triggerSync(2),
-    onSuccess: () => {
-      // 触发后立即刷新状态，并延迟刷新广告数据
-      refetchStatus()
-      setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ['returned-conversion'] })
-        refetchStatus()
-      }, 3000)
-    },
-  })
-
-  const fmtRelTime = (iso: string | null): string => {
-    if (!iso) return '从未同步'
-    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-    if (diff < 60)  return `${diff} 秒前`
-    if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
-    if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
-    return `${Math.floor(diff / 86400)} 天前`
-  }
-
-  const isRunning = syncStatus?.is_running ?? false
-  const hasError  = !!syncStatus?.last_error
-
-  return (
-    <div className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border text-xs mb-4 ${
-      hasError
-        ? 'bg-red-50 border-red-200 text-red-700'
-        : isRunning
-          ? 'bg-blue-50 border-blue-200 text-blue-700'
-          : 'bg-gray-50 border-gray-200 text-gray-500'
-    }`}>
-      {isRunning ? (
-        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
-      ) : hasError ? (
-        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-      ) : (
-        <CheckCircle className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
-      )}
-
-      <span className="flex items-center gap-1.5">
-        <Clock className="w-3 h-3" />
-        {isRunning
-          ? `同步中… ${syncStatus?.last_range ?? ''}`
-          : hasError
-            ? `同步出错：${syncStatus?.last_error?.slice(0, 60)}`
-            : `上次同步：${fmtRelTime(syncStatus?.last_synced_at ?? null)}${syncStatus?.last_range ? `（${syncStatus.last_range}）` : ''}`
-        }
-      </span>
-
-      <span className="ml-auto text-gray-400">每 20 分钟自动同步</span>
-
-      <button
-        onClick={() => mutation.mutate()}
-        disabled={isRunning || mutation.isPending}
-        className="flex items-center gap-1 px-3 py-1 rounded-md bg-white border border-gray-200 text-gray-600
-                   hover:bg-gray-50 hover:border-gray-300 transition disabled:opacity-40 disabled:cursor-not-allowed"
-      >
-        <RefreshCw className={`w-3 h-3 ${mutation.isPending ? 'animate-spin' : ''}`} />
-        立即同步
-      </button>
-    </div>
-  )
-}
-
-
 export default function ReturnedConversionPage() {
-  const [dateRange, setDateRange] = useState<DateRange>(() => getDefaultDateRange('7d'))
+  const [dateRange, setDateRange]     = useState<DateRange>(() => getDefaultDateRange('7d'))
   const [mediaSource, setMediaSource] = useState('')
-  const [platform, setPlatform] = useState('')
-  const [country, setCountry] = useState('')
+  const [platform, setPlatform]       = useState('')
+  const [country, setCountry]         = useState('')
   const [searchKeyword, setSearchKeyword] = useState('')
+
   const [expandedCampaigns, setExpandedCampaigns] = useState(new Set<string>())
+  const [expandedAdsets,    setExpandedAdsets]    = useState(new Set<string>())
 
   const baseFilter = useMemo<BaseReturnedFilter>(() => ({
     start_date:     dateRange.startDate,
@@ -383,21 +355,30 @@ export default function ReturnedConversionPage() {
     search_keyword: searchKeyword || undefined,
   }), [dateRange, mediaSource, platform, country, searchKeyword])
 
+  // 单次请求，后端三维 GROUP BY，前端构树
   const { data, isLoading, isError, error } = useQuery({
-    queryKey: ['returned-conversion', 'campaigns', baseFilter],
-    queryFn: () => fetchCampaignRows(baseFilter),
+    queryKey: ['returned-conversion', 'hierarchy', baseFilter],
+    queryFn: () => fetchHierarchyRows(baseFilter),
     staleTime: 2 * 60_000,
   })
 
-  const summary   = data?.summary
-  const campaigns = data?.rows ?? []
-  const avail     = data?.availability ?? DEFAULT_AVAIL
+  const summary  = data?.summary
+  const avail    = data?.availability ?? DEFAULT_AVAIL
+  // 从同一批数据构建树，保证父子守恒
+  const campaigns = useMemo(
+    () => buildTree(data?.rows ?? []),
+    [data?.rows]
+  )
 
   const toggleCampaign = useCallback((id: string) => {
     setExpandedCampaigns(prev => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
+      const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next
+    })
+  }, [])
+
+  const toggleAdset = useCallback((key: string) => {
+    setExpandedAdsets(prev => {
+      const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next
     })
   }, [])
 
@@ -419,7 +400,7 @@ export default function ReturnedConversionPage() {
       />
 
       {/* 同步状态栏 */}
-      <SyncBar />
+      <GlobalSyncBar />
 
       {/* 免责声明 */}
       <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-4 text-sm text-amber-800">
@@ -430,7 +411,7 @@ export default function ReturnedConversionPage() {
         </span>
       </div>
 
-      {/* 筛选区 — 仅保留 4 个维度筛选 + 日期 */}
+      {/* 筛选区 */}
       <div className="bg-white rounded-xl border border-gray-100 p-4 mb-4 shadow-sm">
         <div className="mb-3">
           <DateRangeFilter value={dateRange} onChange={setDateRange} />
@@ -496,82 +477,42 @@ export default function ReturnedConversionPage() {
 
       {!isLoading && !isError && (
         <>
-          {/* 指标卡 — 两组：投放 / 回传 */}
+          {/* 指标卡 — 投放 + 回传两组 */}
           <div className="mb-4 space-y-3">
-
             <div>
               <div className="text-xs text-gray-400 mb-2 font-medium tracking-wide uppercase">投放指标</div>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <StatCard
-                  label="花费"
-                  value={summary ? fmtUsd(summary.spend) : '-'}
-                  icon={DollarSign}
-                />
-                <StatCard
-                  label="展示"
-                  value={summary ? fmtInt(summary.impressions) : '-'}
-                  icon={BarChart3}
-                />
-                <StatCard
-                  label="点击"
-                  value={summary ? fmtInt(summary.clicks) : '-'}
-                  icon={BarChart3}
-                />
-                <StatCard
-                  label="安装"
-                  value={summary ? fmtInt(summary.installs) : '-'}
-                  icon={BarChart3}
-                />
+                <StatCard label="花费"  value={summary ? fmtUsd(summary.spend) : '-'}          icon={DollarSign} />
+                <StatCard label="展示"  value={summary ? fmtInt(summary.impressions) : '-'}    icon={BarChart3} />
+                <StatCard label="点击"  value={summary ? fmtInt(summary.clicks) : '-'}         icon={BarChart3} />
+                <StatCard label="安装"  value={summary ? fmtInt(summary.installs) : '-'}       icon={BarChart3} />
               </div>
             </div>
-
             <div>
               <div className="text-xs text-gray-400 mb-2 font-medium tracking-wide uppercase">回传指标</div>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                 <StatCard
                   label="回传注册数"
-                  value={
-                    !summary ? '-'
-                    : avail.registrations_returned.supported
-                      ? fmtInt(summary.registrations_returned)
-                      : '暂未提供'
-                  }
+                  value={!summary ? '-' : avail.registrations_returned.supported ? fmtInt(summary.registrations_returned) : '暂未提供'}
                   icon={Users}
                   sub={avail.registrations_returned.supported ? '广告平台归因' : '当前平台不支持'}
                 />
                 <StatCard
                   label="回传充值价值"
-                  value={
-                    !summary ? '-'
-                    : avail.purchase_value_returned.supported
-                      ? fmtUsd(summary.purchase_value_returned)
-                      : '暂未提供'
-                  }
+                  value={!summary ? '-' : avail.purchase_value_returned.supported ? fmtUsd(summary.purchase_value_returned) : '暂未提供'}
                   icon={ShoppingCart}
                   sub={avail.purchase_value_returned.supported ? '广告平台归因' : '当前平台不支持'}
                 />
                 <StatCard
                   label="回传订阅价值"
-                  value={
-                    !summary ? '-'
-                    : avail.subscribe_value_returned.supported
-                      ? fmtUsd(summary.subscribe_value_returned)
-                      : '暂未提供'
-                  }
+                  value={!summary ? '-' : avail.subscribe_value_returned.supported ? fmtUsd(summary.subscribe_value_returned) : '暂未提供'}
                   icon={TrendingUp}
                   sub={avail.subscribe_value_returned.supported ? '广告平台归因' : '当前平台不支持'}
                 />
-                <StatCard
-                  label="回传总价值"
-                  value={summary ? fmtUsd(summary.total_value_returned) : '-'}
-                  icon={TrendingUp}
-                  sub="充值 + 订阅"
-                />
+                <StatCard label="回传总价值"  value={summary ? fmtUsd(summary.total_value_returned) : '-'} icon={TrendingUp} sub="充值 + 订阅" />
                 <StatCard
                   label="累计回传ROI"
-                  value={summary && summary.cumulative_roi_returned > 0
-                    ? summary.cumulative_roi_returned.toFixed(4)
-                    : '-'}
+                  value={summary && summary.cumulative_roi_returned > 0 ? summary.cumulative_roi_returned.toFixed(4) : '-'}
                   icon={BarChart3}
                   sub="回传总价值 / 花费"
                 />
@@ -583,19 +524,14 @@ export default function ReturnedConversionPage() {
                 />
               </div>
             </div>
-
           </div>
 
           {/* 层级展开表格 */}
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden mb-6">
-
-            {/* 表头提示 */}
             <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
               <span className="text-sm font-medium text-gray-700">
                 Campaign 层级
-                <span className="ml-2 text-xs font-normal text-gray-400">
-                  ({campaigns.length} 个)
-                </span>
+                <span className="ml-2 text-xs font-normal text-gray-400">({campaigns.length} 个)</span>
               </span>
               <span className="text-xs text-gray-400 flex items-center gap-1">
                 <ChevronRight className="w-3 h-3" />
@@ -633,44 +569,106 @@ export default function ReturnedConversionPage() {
                     </tr>
                   ) : (
                     campaigns.map(campaign => {
-                      const isExpanded = expandedCampaigns.has(campaign.dimension_key)
+                      const cExpanded = expandedCampaigns.has(campaign.id)
                       return (
-                        <Fragment key={campaign.dimension_key}>
-                          {/* Campaign 行 — 一级，整行可点击 */}
+                        <Fragment key={campaign.id}>
+                          {/* ── Campaign 行 ── */}
                           <tr
                             className={`border-t border-gray-100 cursor-pointer transition-colors select-none ${
-                              isExpanded
-                                ? 'bg-blue-50/50'
-                                : 'hover:bg-gray-50'
+                              cExpanded ? 'bg-blue-50/50' : 'hover:bg-gray-50'
                             }`}
-                            onClick={() => toggleCampaign(campaign.dimension_key)}
+                            onClick={() => toggleCampaign(campaign.id)}
                           >
                             <td className="py-3 pl-3 pr-3">
                               <div className="flex items-center gap-2">
                                 <span className="text-gray-400 shrink-0">
-                                  {isExpanded
+                                  {cExpanded
                                     ? <ChevronDown className="w-4 h-4" />
                                     : <ChevronRight className="w-4 h-4" />
                                   }
                                 </span>
                                 <span
                                   className="text-sm font-semibold text-gray-800 line-clamp-2 break-words leading-tight"
-                                  title={campaign.dimension_label}
+                                  title={campaign.name}
                                 >
-                                  {campaign.dimension_label || campaign.dimension_key || '-'}
+                                  {campaign.name}
                                 </span>
                               </div>
                             </td>
                             <MetricCells row={campaign} avail={avail} />
                           </tr>
 
-                          {/* Adset 行组 — 按需加载，仅展开时挂载 */}
-                          {isExpanded && (
-                            <AdsetRowGroup
-                              campaignId={campaign.dimension_key}
-                              base={baseFilter}
-                              avail={avail}
-                            />
+                          {/* ── Adset 行（仅 Campaign 展开时渲染） ── */}
+                          {cExpanded && campaign.adsets.map(adset => {
+                            const adsetKey = `${campaign.id}::${adset.id}`
+                            const aExpanded = expandedAdsets.has(adsetKey)
+                            return (
+                              <Fragment key={adsetKey}>
+                                <tr
+                                  className="border-t border-gray-100 bg-white hover:bg-blue-50/30 cursor-pointer transition-colors"
+                                  onClick={() => toggleAdset(adsetKey)}
+                                >
+                                  <td className="py-2.5 pl-9 pr-3">
+                                    <div className="flex items-center gap-2">
+                                      <span className="w-px h-4 bg-gray-200 shrink-0" />
+                                      <span className="text-gray-400 shrink-0">
+                                        {aExpanded
+                                          ? <ChevronDown className="w-3.5 h-3.5" />
+                                          : <ChevronRight className="w-3.5 h-3.5" />
+                                        }
+                                      </span>
+                                      <span
+                                        className="text-xs text-gray-700 line-clamp-2 break-words leading-tight"
+                                        title={adset.name}
+                                      >
+                                        {adset.name}
+                                      </span>
+                                    </div>
+                                  </td>
+                                  <MetricCells row={adset} avail={avail} />
+                                </tr>
+
+                                {/* ── Ad 行（仅 Adset 展开时渲染） ── */}
+                                {aExpanded && (
+                                  adset.ads.length === 0 ? (
+                                    <tr key={`${adsetKey}__empty`}>
+                                      <td colSpan={COL_COUNT} className="py-2 pl-24 text-xs text-gray-300 italic">
+                                        暂无 Ad 数据
+                                      </td>
+                                    </tr>
+                                  ) : (
+                                    adset.ads.map(ad => (
+                                      <tr
+                                        key={`${adsetKey}::${ad.id}`}
+                                        className="border-t border-gray-50 hover:bg-gray-50/50 transition-colors"
+                                      >
+                                        <td className="py-2 pl-20 pr-3">
+                                          <div className="flex items-center gap-2">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-gray-300 shrink-0" />
+                                            <span
+                                              className="text-xs text-gray-500 line-clamp-2 break-words leading-tight"
+                                              title={ad.name}
+                                            >
+                                              {ad.name}
+                                            </span>
+                                          </div>
+                                        </td>
+                                        <MetricCells row={ad} avail={avail} />
+                                      </tr>
+                                    ))
+                                  )
+                                )}
+                              </Fragment>
+                            )
+                          })}
+
+                          {/* 当 campaign 展开但没有 adsets 时的提示 */}
+                          {cExpanded && campaign.adsets.length === 0 && (
+                            <tr>
+                              <td colSpan={COL_COUNT} className="py-2 pl-10 text-xs text-gray-300 italic">
+                                暂无 Adset 数据
+                              </td>
+                            </tr>
                           )}
                         </Fragment>
                       )

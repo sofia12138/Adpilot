@@ -7,6 +7,7 @@ import { InsightPanel } from '@/components/common/InsightPanel'
 import { DateRangeFilter, getDefaultDateRange, type DateRange } from '@/components/common/DateRangeFilter'
 import { DollarSign, TrendingUp, BarChart3, ArrowRight, Loader2, AlertCircle } from 'lucide-react'
 import { useBizOverview, useCampaignDaily } from '@/hooks/use-biz'
+import { GlobalSyncBar } from '@/components/common/GlobalSyncBar'
 import { SpendRevenueTrendChart } from '@/components/charts/SpendRevenueTrendChart'
 import { useInsightConfig } from '@/hooks/use-insight'
 import { buildOverviewInsights } from '@/services/insight-engine'
@@ -98,6 +99,9 @@ export default function OverviewPage() {
           </Link>
         }
       />
+
+      {/* 同步状态栏 */}
+      <GlobalSyncBar />
 
       {/* 筛选栏 */}
       <div className="flex items-center gap-4 mb-6">

@@ -20,6 +20,15 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _VALID_GROUP_BY = {"date", "media", "campaign", "adset", "ad", "country", "platform"}
 
+# 层级视图公共筛选参数（不含 group_by / campaign_id / adset_id / ad_id）
+_HIERARCHY_FILTER_PARAMS = dict(
+    media_source=(Optional[str], Query(None, description="媒体来源: meta / tiktok / google")),
+    account_id=(Optional[str], Query(None, description="广告账户ID")),
+    country=(Optional[str], Query(None, description="国家/地区")),
+    platform=(Optional[str], Query(None, description="操作系统平台: ios / android / mixed")),
+    search_keyword=(Optional[str], Query(None, description="名称模糊搜索")),
+)
+
 
 def _validate_dates(start_date: str, end_date: str):
     if not _DATE_RE.match(start_date):
@@ -139,6 +148,61 @@ async def returned_conversion(
             "group_by":    group_by,
             "db":          "adpilot_biz / ad_returned_conversion_daily",
         },
+        "summary": summary,
+        "availability": availability,
+        "rows": rows,
+    }
+
+
+@router.get(
+    "/returned-conversion/hierarchy",
+    summary="广告回传转化层级视图",
+    description=(
+        "按 (campaign_id, adset_id, ad_id) 三维 GROUP BY 一次性返回完整层级明细行，"
+        "每行包含 campaign/adset/ad 的 id 与 name 以及各指标聚合值。"
+        "前端从同一批数据自下而上构建 Campaign → Adset → Ad 树，确保父子数据守恒。"
+    ),
+)
+async def returned_conversion_hierarchy(
+    start_date: str = Query(..., description="开始日期 YYYY-MM-DD"),
+    end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
+    media_source: Optional[str] = Query(None, description="媒体来源: meta / tiktok / google"),
+    account_id: Optional[str] = Query(None, description="广告账户ID"),
+    country: Optional[str] = Query(None, description="国家/地区"),
+    platform: Optional[str] = Query(None, description="操作系统平台: ios / android / mixed"),
+    search_keyword: Optional[str] = Query(None, description="名称模糊搜索（campaign/adset/ad name）"),
+):
+    _validate_dates(start_date, end_date)
+
+    filter_kwargs = dict(
+        media_source=media_source,
+        account_id=account_id,
+        country=country,
+        platform=platform,
+        search_keyword=search_keyword,
+    )
+
+    summary, dynamic_avail, rows = await asyncio.gather(
+        asyncio.to_thread(
+            returned_conversion_repository.query_summary,
+            start_date, end_date, **filter_kwargs,
+        ),
+        asyncio.to_thread(
+            returned_conversion_repository.query_data_availability,
+            start_date, end_date, **filter_kwargs,
+        ),
+        asyncio.to_thread(
+            returned_conversion_repository.query_hierarchy_rows,
+            start_date, end_date, **filter_kwargs,
+        ),
+    )
+
+    static_avail = returned_conversion_repository.get_static_availability(media_source)
+    availability = _build_availability(static_avail, dynamic_avail)
+
+    return {
+        "code": 0,
+        "message": "ok",
         "summary": summary,
         "availability": availability,
         "rows": rows,

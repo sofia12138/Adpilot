@@ -27,6 +27,7 @@ from repositories import (
 )
 from repositories import biz_adgroup_daily_repository, biz_ad_daily_repository
 from repositories import biz_adgroup_repository, biz_ad_repository
+from services import sync_state
 
 
 def _date_chunks(start: str, end: str, max_days: int = 30):
@@ -311,9 +312,13 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         affected = biz_ad_daily_repository.upsert_batch(ad_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"ad 日报 {len(ad_rows)} 条")
         logger.info(f"[TikTok] ad 日报同步完成: {len(ad_rows)} 条")
+        # 日报模块完成标记（TikTok Ad 日报为最后一步）
+        sync_state.set_done("reports")
+        sync_state.set_done("structure")
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[TikTok] ad 日报同步失败: {e}")
+        sync_state.set_error("reports", f"[TikTok] ad 日报: {e}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -649,9 +654,14 @@ async def sync_meta_campaigns(ad_account_id: str,
                 returned_conversion_repository.upsert(**ret)
             except Exception as e_ret:
                 logger.warning(f"[Meta] returned_conversion upsert(ad) 失败: {e_ret}")
+        # 日报 + 结构完成标记
+        sync_state.set_done("reports")
+        sync_state.set_done("structure")
+        sync_state.set_done("returned")
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] ad 日报同步失败: {e}")
+        sync_state.set_error("reports", f"[Meta] ad 日报: {e}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -668,7 +678,12 @@ async def run(platform: str | None = None,
     if not end_date:
         end_date = start_date
 
-    logger.info(f"开始同步数据: platform={platform or 'all'}, range={start_date}~{end_date}")
+    date_range = f"{start_date} ~ {end_date}"
+    logger.info(f"开始同步数据: platform={platform or 'all'}, range={date_range}")
+
+    # 标记各模块开始运行
+    for mod in ("structure", "reports", "returned"):
+        sync_state.set_running(mod, True, date_range=date_range)
 
     try:
         from repositories import biz_account_repository
