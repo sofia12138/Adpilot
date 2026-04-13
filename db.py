@@ -504,6 +504,8 @@ _PANEL_SEED = [
     ("data_compare",           "数据对比",        "数据对比",   "/data-compare",            50),
     # 广告回传分析（过渡版，回传口径，非订单真值）
     ("returned_conversion",    "广告回传分析",    "数据分析",   "/returned-conversion",     43),
+    # 剧级分析
+    ("drama_analysis",         "剧级分析",        "数据分析",   "/drama-analysis",          44),
     ("data_source",            "数据源配置",      "系统管理",   "/data-source",             60),
     ("user_mgmt",              "用户权限",        "系统管理",   "/user-mgmt",               61),
     ("role_perm",              "角色权限管理",    "系统管理",   "/role-perm",               62),
@@ -518,7 +520,7 @@ _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
                     "template_mgmt", "creatives", "creative_analysis"],
     "designer":    ["dashboard", "creatives", "creative_analysis"],
     "analyst":     ["dashboard", "overview", "channel_analysis", "biz_analysis", "data_compare",
-                    "creative_analysis", "returned_conversion"],
+                    "creative_analysis", "returned_conversion", "drama_analysis"],
     "viewer":      ["dashboard"],
 }
 
@@ -820,6 +822,90 @@ _BIZ_TABLES_SQL = [
         INDEX idx_task_date (task_name, sync_date),
         INDEX idx_status (status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    # ─── 剧级映射表：存储每条广告活动的剧名解析结果 ───────────────────
+    """
+    CREATE TABLE IF NOT EXISTS ad_drama_mapping (
+        id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
+        source_type          VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '来源类型: 小程序 / APP',
+        platform             VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '媒体平台: tiktok / meta',
+        channel              VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '渠道标识',
+        account_id           VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '广告账户ID',
+        campaign_id          VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '活动ID',
+        campaign_name        TEXT          NOT NULL COMMENT '原始活动名称',
+        adset_id             VARCHAR(100)  NOT NULL DEFAULT '',
+        adset_name           VARCHAR(500)  NOT NULL DEFAULT '',
+        ad_id                VARCHAR(100)  NOT NULL DEFAULT '',
+        ad_name              VARCHAR(500)  NOT NULL DEFAULT '',
+
+        drama_id             VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '剧集ID（小程序解析得到；APP暂留）',
+        drama_type           VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '剧集类型，如 AIGC',
+        country              VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '国家/地区代码',
+
+        drama_name_raw       VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '第10字段原始剧名（唯一合法来源）',
+        localized_drama_name VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '去掉语言尾缀的剧名',
+        language_code        VARCHAR(10)   NOT NULL DEFAULT 'unknown' COMMENT '语言代码，未识别为 unknown',
+        language_tag_raw     VARCHAR(20)   DEFAULT NULL COMMENT '原始语言标记，如 (EN)',
+
+        buyer_name           VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '投手姓名（小程序字段6）',
+        buyer_short_name     VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '投手简称（APP字段11）',
+        optimization_type    VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '优化目标',
+        bid_type             VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '出价类型',
+        publish_date         VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '发布日期，格式 YYYYMMDD',
+
+        remark_raw           TEXT          DEFAULT NULL COMMENT '备注原文（第11+字段），不参与任何解析',
+
+        content_key          VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '剧内容唯一键：小程序=drama_id，APP=normalized(localized_drama_name)',
+        match_source         VARCHAR(50)   NOT NULL DEFAULT 'parser' COMMENT '映射来源: parser / manual',
+        is_confirmed         TINYINT       NOT NULL DEFAULT 0 COMMENT '是否人工确认',
+        parse_status         VARCHAR(20)   NOT NULL DEFAULT 'ok' COMMENT 'ok / partial / failed',
+        parse_error          TEXT          DEFAULT NULL COMMENT '解析失败原因',
+
+        created_at           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        UNIQUE KEY uk_campaign (platform, account_id, campaign_id),
+        INDEX idx_content_key (content_key(191)),
+        INDEX idx_drama_id (drama_id),
+        INDEX idx_language (language_code),
+        INDEX idx_source_type (source_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='广告活动剧名解析映射表'
+    """,
+    # ─── 剧级日报事实表：聚合后的每日投放数据 ────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS fact_drama_daily (
+        id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
+        stat_date            DATE          NOT NULL COMMENT '统计日期',
+        source_type          VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '来源类型: 小程序 / APP',
+        platform             VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '媒体平台: tiktok / meta',
+        channel              VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '渠道标识',
+        account_id           VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '广告账户ID',
+        country              VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '国家/地区代码',
+
+        drama_id             VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '剧集ID',
+        drama_type           VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '剧集类型',
+        localized_drama_name VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '本地化剧名（不含语言尾缀）',
+        language_code        VARCHAR(10)   NOT NULL DEFAULT 'unknown' COMMENT '语言代码',
+        content_key          VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '剧内容唯一键',
+
+        spend                DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '花费（USD）',
+        impressions          BIGINT        NOT NULL DEFAULT 0 COMMENT '展示次数',
+        clicks               BIGINT        NOT NULL DEFAULT 0 COMMENT '点击次数',
+        installs             BIGINT        NOT NULL DEFAULT 0 COMMENT '安装数',
+        registrations        BIGINT        NOT NULL DEFAULT 0 COMMENT '注册数',
+        purchase_value       DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '购买/充值价值',
+
+        created_at           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at           DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        UNIQUE KEY uk_drama_daily (stat_date, source_type, platform, channel, account_id, country, content_key(191), language_code),
+        INDEX idx_content_key (content_key(191)),
+        INDEX idx_stat_date (stat_date),
+        INDEX idx_drama_id (drama_id),
+        INDEX idx_language (language_code)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='剧级日报事实表（按 content_key + language_code 聚合）'
     """,
 ]
 

@@ -22,6 +22,7 @@ import RolePermPage from '@/pages/RolePermPage'
 import InsightConfigPage from '@/pages/InsightConfigPage'
 import OplogPage from '@/pages/OplogPage'
 import ReturnedConversionPage from '@/pages/ReturnedConversionPage'
+import DramaOverviewPage from '@/pages/DramaOverviewPage'
 
 function G({ panelKey, children }: { panelKey: string; children: React.ReactNode }) {
   return <AuthGuard panelKey={panelKey}>{children}</AuthGuard>
@@ -47,6 +48,7 @@ export const router = createBrowserRouter([
       { path: 'channel-analysis',   element: <G panelKey="channel_analysis"><ChannelAnalysisPage /></G> },
       { path: 'biz-analysis',         element: <G panelKey="biz_analysis"><BizAnalysisPage /></G> },
       { path: 'returned-conversion', element: <G panelKey="returned_conversion"><ReturnedConversionPage /></G> },
+      { path: 'drama-analysis',      element: <G panelKey="drama_analysis"><DramaOverviewPage /></G> },
       { path: 'data-compare',        element: <G panelKey="data_compare"><DataComparePage /></G> },
       { path: 'data-source',        element: <G panelKey="data_source"><DataSourcePage /></G> },
       { path: 'user-mgmt',          element: <G panelKey="user_mgmt"><UserMgmtPage /></G> },

@@ -416,8 +416,9 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
     将 Meta Insights 数据映射到 ad_returned_conversion_daily 回传口径行。
 
     字段映射说明（对应 PLATFORM_FIELD_SUPPORT["meta"]）：
-    - registrations_returned:   actions 数组中 action_type=complete_registration 的 value
-    - purchase_value_returned:  action_values 数组中 action_type=purchase 的 value（金额，非次数）
+    - registrations_returned:   omni_complete_registration（优先）or complete_registration
+                                  omni 是跨渠道汇总，已包含 app 注册，不与 complete 相加
+    - purchase_value_returned:  omni_purchase（优先）or purchase，来自 action_values 数组（金额）
     - subscribe_value_returned: 0（Meta 无独立订阅价值字段）
     - d1_value_returned:        0（Meta Insights 无 D1 cohort 拆分）
     - installs:                 actions 数组中 action_type=mobile_app_install 的 value
@@ -441,10 +442,19 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
         "clicks":                   int(item.get("clicks", 0) or 0),
         "installs":                 actions.get("mobile_app_install", 0),
         "spend":                    float(item.get("spend", 0) or 0),
-        # Meta 支持：从 actions 数组精确匹配 complete_registration
-        "registrations_returned":   actions.get("complete_registration", 0),
-        # Meta 支持：从 action_values 数组精确匹配 purchase（金额，非次数）
-        "purchase_value_returned":  action_values.get("purchase", 0.0),
+        # Meta 支持：注册数优先取 omni_complete_registration（跨渠道汇总），
+        # 若无则回退到 complete_registration（仅 App）。
+        # 两者互斥：omni 已包含 App 注册，不能相加避免重复计数。
+        "registrations_returned":   (
+            actions.get("omni_complete_registration", 0)
+            or actions.get("complete_registration", 0)
+        ),
+        # Meta 支持：从 action_values 数组精确匹配 purchase（金额，非次数）；
+        # omni_purchase 是跨渠道汇总版，优先使用。
+        "purchase_value_returned":  (
+            action_values.get("omni_purchase", 0.0)
+            or action_values.get("purchase", 0.0)
+        ),
         # Meta 不支持：无独立订阅价值字段，固定为 0
         "subscribe_value_returned":    0.0,
         # Meta 不支持：无 D1 cohort 拆分，固定为 0
@@ -693,6 +703,9 @@ async def run(platform: str | None = None,
 
     synced_any = False
 
+    # 新账号首次同步回填天数
+    FIRST_SYNC_DAYS = 30
+
     if db_accounts:
         for acct in db_accounts:
             p = acct["platform"]
@@ -700,11 +713,24 @@ async def run(platform: str | None = None,
                 continue
             aid = acct["account_id"]
             token = acct.get("access_token")
+
+            # 首次同步（last_synced_at 为 NULL）自动回填近 N 天
+            acct_start = start_date
+            acct_end   = end_date
+            if not acct.get("last_synced_at"):
+                yesterday = date.today() - timedelta(days=1)
+                acct_start = (date.today() - timedelta(days=FIRST_SYNC_DAYS)).isoformat()
+                acct_end   = yesterday.isoformat()
+                logger.info(
+                    f"[首次同步] {p}/{aid} last_synced_at=NULL，"
+                    f"自动回填 {FIRST_SYNC_DAYS} 天: {acct_start} ~ {acct_end}"
+                )
+
             try:
                 if p == "tiktok":
-                    await sync_tiktok_campaigns(aid, start_date, end_date, access_token=token)
+                    await sync_tiktok_campaigns(aid, acct_start, acct_end, access_token=token)
                 elif p == "meta":
-                    await sync_meta_campaigns(aid, start_date, end_date, access_token=token)
+                    await sync_meta_campaigns(aid, acct_start, acct_end, access_token=token)
                 biz_account_repository.update_last_synced(acct["id"])
                 synced_any = True
             except Exception as e:
