@@ -23,6 +23,9 @@ import InsightConfigPage from '@/pages/InsightConfigPage'
 import OplogPage from '@/pages/OplogPage'
 import ReturnedConversionPage from '@/pages/ReturnedConversionPage'
 import DramaOverviewPage from '@/pages/DramaOverviewPage'
+import DesignerPerformancePage from '@/pages/DesignerPerformancePage'
+import OptimizerPerformancePage from '@/pages/OptimizerPerformancePage'
+import OptimizerDirectoryPage from '@/pages/OptimizerDirectoryPage'
 
 function G({ panelKey, children }: { panelKey: string; children: React.ReactNode }) {
   return <AuthGuard panelKey={panelKey}>{children}</AuthGuard>
@@ -48,13 +51,16 @@ export const router = createBrowserRouter([
       { path: 'channel-analysis',   element: <G panelKey="channel_analysis"><ChannelAnalysisPage /></G> },
       { path: 'biz-analysis',         element: <G panelKey="biz_analysis"><BizAnalysisPage /></G> },
       { path: 'returned-conversion', element: <G panelKey="returned_conversion"><ReturnedConversionPage /></G> },
-      { path: 'drama-analysis',      element: <G panelKey="drama_analysis"><DramaOverviewPage /></G> },
+      { path: 'drama-analysis',          element: <G panelKey="drama_analysis"><DramaOverviewPage /></G> },
+      { path: 'designer-performance',    element: <G panelKey="designer_performance"><DesignerPerformancePage /></G> },
+      { path: 'optimizer-performance',   element: <G panelKey="optimizer_performance"><OptimizerPerformancePage /></G> },
       { path: 'data-compare',        element: <G panelKey="data_compare"><DataComparePage /></G> },
       { path: 'data-source',        element: <G panelKey="data_source"><DataSourcePage /></G> },
       { path: 'user-mgmt',          element: <G panelKey="user_mgmt"><UserMgmtPage /></G> },
       { path: 'role-perm',          element: <G panelKey="role_perm"><RolePermPage /></G> },
       { path: 'insight-config',    element: <G panelKey="insight_config"><InsightConfigPage /></G> },
       { path: 'oplog',              element: <G panelKey="oplog"><OplogPage /></G> },
+      { path: 'optimizer-directory', element: <G panelKey="optimizer_directory"><OptimizerDirectoryPage /></G> },
     ],
   },
 ])

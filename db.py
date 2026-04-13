@@ -506,21 +506,28 @@ _PANEL_SEED = [
     ("returned_conversion",    "广告回传分析",    "数据分析",   "/returned-conversion",     43),
     # 剧级分析
     ("drama_analysis",         "剧级分析",        "数据分析",   "/drama-analysis",          44),
+    # 设计师人效报表
+    ("designer_performance",   "设计师人效",      "素材中心",   "/designer-performance",    32),
+    # 优化师人效报表
+    ("optimizer_performance",  "优化师人效",      "数据分析",   "/optimizer-performance",   45),
     ("data_source",            "数据源配置",      "系统管理",   "/data-source",             60),
     ("user_mgmt",              "用户权限",        "系统管理",   "/user-mgmt",               61),
     ("role_perm",              "角色权限管理",    "系统管理",   "/role-perm",               62),
     ("insight_config",         "ROI阈值配置",     "系统管理",   "/insight-config",          63),
     ("oplog",                  "操作日志",        "系统管理",   "/oplog",                   64),
+    ("optimizer_directory",    "优化师名单配置",  "系统管理",   "/optimizer-directory",     65),
 ]
 
 _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
     "super_admin": [p[0] for p in _PANEL_SEED],
     "admin":       [p[0] for p in _PANEL_SEED if p[0] != "role_perm"],
     "optimizer":   ["dashboard", "ads_data", "tiktok_console", "meta_console", "ad_create",
-                    "template_mgmt", "creatives", "creative_analysis"],
-    "designer":    ["dashboard", "creatives", "creative_analysis"],
+                    "template_mgmt", "creatives", "creative_analysis", "optimizer_performance",
+                    "optimizer_directory"],
+    "designer":    ["dashboard", "creatives", "creative_analysis", "designer_performance"],
     "analyst":     ["dashboard", "overview", "channel_analysis", "biz_analysis", "data_compare",
-                    "creative_analysis", "returned_conversion", "drama_analysis"],
+                    "creative_analysis", "returned_conversion", "drama_analysis", "designer_performance",
+                    "optimizer_performance"],
     "viewer":      ["dashboard"],
 }
 
@@ -907,6 +914,98 @@ _BIZ_TABLES_SQL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     COMMENT='剧级日报事实表（按 content_key + language_code 聚合）'
     """,
+    # ─── 优化师-Campaign 映射表 ────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS campaign_optimizer_mapping (
+        id                        BIGINT AUTO_INCREMENT PRIMARY KEY,
+        source_type               VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '来源类型: 小程序 / APP',
+        platform                  VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '媒体平台: tiktok / meta',
+        channel                   VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '渠道标识',
+        account_id                VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '广告账户ID',
+        campaign_id               VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '活动ID',
+        campaign_name             TEXT          NOT NULL COMMENT '原始活动名称',
+
+        optimizer_name_raw        VARCHAR(200)  NOT NULL DEFAULT '' COMMENT '解析出的原始优化师名称',
+        optimizer_name_normalized VARCHAR(200)  NOT NULL DEFAULT '未识别' COMMENT '标准化优化师名称（大写去空格）',
+        optimizer_source          VARCHAR(50)   NOT NULL DEFAULT 'campaign_name' COMMENT '优化师来源: campaign_name / structured',
+
+        parse_status              VARCHAR(20)   NOT NULL DEFAULT 'ok' COMMENT 'ok / failed',
+        parse_error               TEXT          DEFAULT NULL COMMENT '解析失败原因',
+
+        created_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        UNIQUE KEY uk_optimizer_campaign (source_type, platform, account_id, campaign_id),
+        INDEX idx_optimizer_name (optimizer_name_normalized),
+        INDEX idx_source_type (source_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='Campaign 到优化师的映射表'
+    """,
+    # ─── 优化师日报事实表 ────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS fact_optimizer_daily (
+        id                        BIGINT AUTO_INCREMENT PRIMARY KEY,
+        stat_date                 DATE          NOT NULL COMMENT '统计日期',
+        source_type               VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '来源类型: 小程序 / APP',
+        platform                  VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '媒体平台: tiktok / meta',
+        channel                   VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '渠道标识',
+        account_id                VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '广告账户ID',
+        country                   VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '国家/地区代码',
+        optimizer_name            VARCHAR(200)  NOT NULL DEFAULT '未识别' COMMENT '优化师名称（标准化）',
+
+        spend                     DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '花费（USD）',
+        impressions               BIGINT        NOT NULL DEFAULT 0 COMMENT '展示次数',
+        clicks                    BIGINT        NOT NULL DEFAULT 0 COMMENT '点击次数',
+        installs                  BIGINT        NOT NULL DEFAULT 0 COMMENT '安装数',
+        registrations             BIGINT        NOT NULL DEFAULT 0 COMMENT '注册数',
+        purchase_value            DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '购买/充值价值',
+        campaign_count            INT           NOT NULL DEFAULT 0 COMMENT '关联Campaign数',
+
+        created_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        UNIQUE KEY uk_optimizer_daily (stat_date, source_type, platform, channel, account_id, country, optimizer_name),
+        INDEX idx_optimizer_name (optimizer_name),
+        INDEX idx_stat_date (stat_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='优化师日报事实表'
+    """,
+    # ─── 优化师默认规则表 ────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS optimizer_default_rules (
+        id                        BIGINT AUTO_INCREMENT PRIMARY KEY,
+        source_type               VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '来源类型: 小程序 / APP / 空=全部',
+        platform                  VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '媒体平台: tiktok / meta / 空=全部',
+        channel                   VARCHAR(50)   NOT NULL DEFAULT '' COMMENT '渠道标识 / 空=全部',
+        account_id                VARCHAR(100)  NOT NULL DEFAULT '' COMMENT '广告账户ID / 空=全部',
+        country                   VARCHAR(20)   NOT NULL DEFAULT '' COMMENT '国家代码 / 空=全部',
+        optimizer_name            VARCHAR(200)  NOT NULL COMMENT '匹配到的优化师名称',
+        priority                  INT           NOT NULL DEFAULT 0 COMMENT '优先级（越大越高）',
+        is_enabled                TINYINT       NOT NULL DEFAULT 1 COMMENT '是否启用',
+        created_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_priority (priority DESC),
+        INDEX idx_enabled (is_enabled)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='优化师默认兜底规则表'
+    """,
+    # ─── 优化师名单表 ────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS optimizer_directory (
+        id                        BIGINT AUTO_INCREMENT PRIMARY KEY,
+        optimizer_name            VARCHAR(200)  NOT NULL COMMENT '标准名称',
+        optimizer_code            VARCHAR(100)  NOT NULL COMMENT '唯一编码',
+        aliases                   VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '别名，逗号分隔',
+        is_active                 TINYINT       NOT NULL DEFAULT 1 COMMENT '是否启用',
+        remark                    VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '备注',
+        created_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_optimizer_code (optimizer_code),
+        INDEX idx_optimizer_name (optimizer_name),
+        INDEX idx_is_active (is_active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='优化师名单配置表'
+    """,
 ]
 
 
@@ -927,12 +1026,35 @@ def init_biz_tables():
             cur.execute(sql)
         _migrate_biz_ad_accounts_columns(cur)
         _migrate_returned_conversion_d0_columns(cur)
+        _migrate_optimizer_mapping_columns(cur)
         conn.commit()
         logger.info("BIZ 业务库数据沉淀表初始化完成")
     except Exception as e:
         logger.error(f"init_biz_tables 失败: {e}")
     finally:
         conn.close()
+
+
+def _migrate_optimizer_mapping_columns(cur):
+    """为 campaign_optimizer_mapping 补齐 match_source / match_confidence / match_position 列（幂等）"""
+    cur.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'campaign_optimizer_mapping'")
+    existing = {r["COLUMN_NAME"] for r in cur.fetchall()}
+    migrations = [
+        ("optimizer_match_source",
+         "ADD COLUMN optimizer_match_source VARCHAR(50) NOT NULL DEFAULT 'campaign_name' "
+         "COMMENT '匹配来源: structured_field/campaign_name/historical_mapping/default_rule/unassigned' "
+         "AFTER parse_error"),
+        ("optimizer_match_confidence",
+         "ADD COLUMN optimizer_match_confidence DECIMAL(4,2) NOT NULL DEFAULT 0.90 "
+         "COMMENT '匹配置信度 0~1' AFTER optimizer_match_source"),
+        ("optimizer_match_position",
+         "ADD COLUMN optimizer_match_position VARCHAR(20) NOT NULL DEFAULT '' "
+         "COMMENT '匹配位置: field_6/field_11/field_12/unassigned' AFTER optimizer_match_confidence"),
+    ]
+    for col, ddl in migrations:
+        if col not in existing:
+            cur.execute(f"ALTER TABLE campaign_optimizer_mapping {ddl}")
 
 
 def _migrate_returned_conversion_d0_columns(cur):

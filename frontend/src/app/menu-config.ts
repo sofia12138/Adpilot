@@ -20,6 +20,8 @@ import {
   SlidersHorizontal,
   Redo2,
   Film,
+  UserCheck,
+  BookUser,
 } from 'lucide-react'
 import type { MenuItem } from '@/types/menu'
 
@@ -44,6 +46,7 @@ export const menuConfig: MenuItem[] = [
     children: [
       { id: 'creatives', label: '素材库', icon: FolderOpen, path: '/creatives', panelKey: 'creatives' },
       { id: 'creative-analysis', label: '素材分析', icon: LineChart, path: '/creative-analysis', panelKey: 'creative_analysis' },
+      { id: 'designer-performance', label: '设计师人效', icon: UserCheck, path: '/designer-performance', panelKey: 'designer_performance' },
     ],
   },
   {
@@ -56,6 +59,7 @@ export const menuConfig: MenuItem[] = [
       { id: 'biz-analysis', label: '业务分析', icon: TrendingUp, path: '/biz-analysis', panelKey: 'biz_analysis' },
       { id: 'returned-conversion', label: '广告回传分析', icon: Redo2, path: '/returned-conversion', panelKey: 'returned_conversion' },
       { id: 'drama-analysis', label: '剧级分析', icon: Film, path: '/drama-analysis', panelKey: 'drama_analysis' },
+      { id: 'optimizer-performance', label: '优化师人效', icon: UserCheck, path: '/optimizer-performance', panelKey: 'optimizer_performance' },
     ],
   },
   {
@@ -76,6 +80,7 @@ export const menuConfig: MenuItem[] = [
       { id: 'role-perm', label: '角色权限管理', icon: Shield, path: '/role-perm', panelKey: 'role_perm' },
       { id: 'insight-config', label: 'ROI 阈值配置', icon: SlidersHorizontal, path: '/insight-config', panelKey: 'insight_config' },
       { id: 'oplog', label: '操作日志', icon: ClipboardList, path: '/oplog', panelKey: 'oplog' },
+      { id: 'optimizer-directory', label: '优化师名单配置', icon: BookUser, path: '/optimizer-directory', panelKey: 'optimizer_directory' },
     ],
   },
 ]

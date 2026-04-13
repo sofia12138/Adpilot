@@ -1,3 +1,4 @@
+import type React from 'react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/utils/cn'
 import type { LucideIcon } from 'lucide-react'
@@ -10,9 +11,10 @@ interface Props {
   icon?: LucideIcon
   className?: string
   href?: string
+  extra?: React.ReactNode
 }
 
-export function StatCard({ label, value, change, changeType = 'neutral', icon: Icon, className, href }: Props) {
+export function StatCard({ label, value, change, changeType = 'neutral', icon: Icon, className, href, extra }: Props) {
   const content = (
     <>
       <div className="flex items-center justify-between mb-3">
@@ -36,6 +38,7 @@ export function StatCard({ label, value, change, changeType = 'neutral', icon: I
           {change}
         </p>
       )}
+      {extra && <div className="mt-1.5">{extra}</div>}
     </>
   )
 

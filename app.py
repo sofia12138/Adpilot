@@ -51,6 +51,15 @@ async def _sync_all_job():
             sync_state.set_error(mod, str(e))
         logger.error(f"全量同步失败: {e}")
 
+    # 全量同步完成后，附带同步优化师映射和事实表
+    try:
+        from tasks.sync_optimizer import run as sync_optimizer_run
+        opt_start = end - timedelta(days=7)
+        sync_optimizer_run(str(opt_start), str(end))
+        logger.info("优化师映射同步完成")
+    except Exception as e:
+        logger.error(f"优化师映射同步失败: {e}")
+
 
 async def _sync_reports_job():
     """Job 2：仅同步日报 + 回传（错开 10 分钟，弥补高频数据实时性）"""
@@ -176,6 +185,9 @@ def _register_routers(application: FastAPI):
     from routes.analysis import router as analysis_router
     from routes.sync import router as sync_router
     from routes.drama import router as drama_router
+    from routes.designer_performance import router as designer_performance_router
+    from routes.optimizer_performance import router as optimizer_performance_router
+    from routes.optimizer_directory import router as optimizer_directory_router
 
     for r in [
         auth_router, users_router, campaign_router, adgroup_router,
@@ -184,6 +196,8 @@ def _register_routers(application: FastAPI):
         meta_ad_router, meta_report_router, bizdata_router, oplog_router,
         template_router, biz_router, panels_router, insight_router,
         accounts_router, analysis_router, sync_router, drama_router,
+        designer_performance_router, optimizer_performance_router,
+        optimizer_directory_router,
     ]:
         application.include_router(r, prefix="/api")
 
