@@ -12,10 +12,11 @@
  * 已移除：Campaign ID / Adset ID / Ad ID 输入框；group_by 切换按钮
  */
 import { useState, useCallback, useMemo, Fragment } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronRight, ChevronDown, Loader2, AlertCircle,
   DollarSign, Users, ShoppingCart, TrendingUp, BarChart3, Info,
+  RefreshCw, CheckCircle, Clock,
 } from 'lucide-react'
 import { PageHeader } from '@/components/common/PageHeader'
 import { DateRangeFilter, getDefaultDateRange, type DateRange } from '@/components/common/DateRangeFilter'
@@ -24,6 +25,7 @@ import {
   type BaseReturnedFilter, type ReturnedAvailability,
   type ReturnedFieldAvailability, type ReturnedRow,
 } from '@/services/returned-conversion'
+import { fetchSyncStatus, triggerSync } from '@/services/sync'
 
 // ── 格式化工具 ────────────────────────────────────────────────
 
@@ -286,6 +288,84 @@ const DEFAULT_AVAIL: ReturnedAvailability = {
 
 // ── 主页面组件 ────────────────────────────────────────────────
 
+// ── 同步状态栏 ────────────────────────────────────────────────
+
+function SyncBar() {
+  const queryClient = useQueryClient()
+
+  const { data: syncStatus, refetch: refetchStatus } = useQuery({
+    queryKey: ['sync-status'],
+    queryFn: fetchSyncStatus,
+    refetchInterval: 15_000,   // 每 15 秒轮询一次
+    staleTime: 10_000,
+  })
+
+  const mutation = useMutation({
+    mutationFn: () => triggerSync(2),
+    onSuccess: () => {
+      // 触发后立即刷新状态，并延迟刷新广告数据
+      refetchStatus()
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['returned-conversion'] })
+        refetchStatus()
+      }, 3000)
+    },
+  })
+
+  const fmtRelTime = (iso: string | null): string => {
+    if (!iso) return '从未同步'
+    const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+    if (diff < 60)  return `${diff} 秒前`
+    if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+    if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+    return `${Math.floor(diff / 86400)} 天前`
+  }
+
+  const isRunning = syncStatus?.is_running ?? false
+  const hasError  = !!syncStatus?.last_error
+
+  return (
+    <div className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border text-xs mb-4 ${
+      hasError
+        ? 'bg-red-50 border-red-200 text-red-700'
+        : isRunning
+          ? 'bg-blue-50 border-blue-200 text-blue-700'
+          : 'bg-gray-50 border-gray-200 text-gray-500'
+    }`}>
+      {isRunning ? (
+        <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+      ) : hasError ? (
+        <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+      ) : (
+        <CheckCircle className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+      )}
+
+      <span className="flex items-center gap-1.5">
+        <Clock className="w-3 h-3" />
+        {isRunning
+          ? `同步中… ${syncStatus?.last_range ?? ''}`
+          : hasError
+            ? `同步出错：${syncStatus?.last_error?.slice(0, 60)}`
+            : `上次同步：${fmtRelTime(syncStatus?.last_synced_at ?? null)}${syncStatus?.last_range ? `（${syncStatus.last_range}）` : ''}`
+        }
+      </span>
+
+      <span className="ml-auto text-gray-400">每 20 分钟自动同步</span>
+
+      <button
+        onClick={() => mutation.mutate()}
+        disabled={isRunning || mutation.isPending}
+        className="flex items-center gap-1 px-3 py-1 rounded-md bg-white border border-gray-200 text-gray-600
+                   hover:bg-gray-50 hover:border-gray-300 transition disabled:opacity-40 disabled:cursor-not-allowed"
+      >
+        <RefreshCw className={`w-3 h-3 ${mutation.isPending ? 'animate-spin' : ''}`} />
+        立即同步
+      </button>
+    </div>
+  )
+}
+
+
 export default function ReturnedConversionPage() {
   const [dateRange, setDateRange] = useState<DateRange>(() => getDefaultDateRange('7d'))
   const [mediaSource, setMediaSource] = useState('')
@@ -337,6 +417,9 @@ export default function ReturnedConversionPage() {
         }
         description="广告平台归因回传指标 · Campaign → Adset → Ad 层级视图"
       />
+
+      {/* 同步状态栏 */}
+      <SyncBar />
 
       {/* 免责声明 */}
       <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-4 text-sm text-amber-800">

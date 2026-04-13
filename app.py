@@ -2,10 +2,12 @@
 
 import sys
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -17,8 +19,35 @@ from db import DatabaseUnavailableError, init_app_tables, init_biz_tables, migra
 from tiktok_ads.api.client import TikTokApiError
 from meta_ads.api.client import MetaApiError
 
+# ── 定时同步任务 ───────────────────────────────────────────
 
-# ── 生命周期：建表 + 数据迁移 ─────────────────────────────
+_scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+
+
+async def _scheduled_sync():
+    """每 20 分钟自动同步昨天和今天的数据"""
+    from services import sync_state
+    from tasks.sync_campaigns import run as sync_run
+
+    if sync_state.get_state()["is_running"]:
+        logger.info("定时同步：任务已在运行，跳过本次")
+        return
+
+    end = date.today()
+    start = end - timedelta(days=1)
+    date_range = f"{start} ~ {end}"
+    logger.info(f"定时同步开始: {date_range}")
+    sync_state.set_running(True, date_range=date_range)
+    try:
+        await sync_run(start_date=str(start), end_date=str(end))
+        sync_state.set_done()
+        logger.info(f"定时同步完成: {date_range}")
+    except Exception as e:
+        sync_state.set_error(str(e))
+        logger.error(f"定时同步失败: {e}")
+
+
+# ── 生命周期：建表 + 数据迁移 + 启动调度器 ────────────────
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
@@ -31,8 +60,24 @@ async def lifespan(application: FastAPI):
     ensure_default_admin()
     from services.account_service import seed_from_env
     seed_from_env()
+
+    # 启动定时同步调度器（每 20 分钟）
+    _scheduler.add_job(
+        _scheduled_sync,
+        trigger="interval",
+        minutes=20,
+        id="sync_ad_data",
+        replace_existing=True,
+        next_run_time=datetime.now() + timedelta(minutes=20),  # 启动后 20 分钟首次执行
+    )
+    _scheduler.start()
+    logger.info("定时同步调度器已启动（每 20 分钟）")
+
     logger.info("应用启动完成")
     yield
+
+    _scheduler.shutdown(wait=False)
+    logger.info("定时同步调度器已停止")
 
 
 # ── 应用实例 ──────────────────────────────────────────────
@@ -87,6 +132,7 @@ def _register_routers(application: FastAPI):
     from routes.insight import router as insight_router
     from routes.accounts import router as accounts_router
     from routes.analysis import router as analysis_router
+    from routes.sync import router as sync_router
 
     for r in [
         auth_router, users_router, campaign_router, adgroup_router,
@@ -94,7 +140,7 @@ def _register_routers(application: FastAPI):
         meta_account_router, meta_campaign_router, meta_adset_router,
         meta_ad_router, meta_report_router, bizdata_router, oplog_router,
         template_router, biz_router, panels_router, insight_router,
-        accounts_router, analysis_router,
+        accounts_router, analysis_router, sync_router,
     ]:
         application.include_router(r, prefix="/api")
 
