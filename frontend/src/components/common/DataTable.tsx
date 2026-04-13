@@ -56,6 +56,7 @@ export function DataTable<T>({ columns, data, rowKey, emptyText = '暂无数据'
                       'px-4 py-2.5 text-sm text-gray-600',
                       col.align === 'right' ? 'text-right tabular-nums' : col.align === 'center' ? 'text-center' : 'text-left',
                     )}
+                    style={col.width ? { width: col.width, maxWidth: col.width } : undefined}
                   >
                     {col.render
                       ? col.render(row, idx)

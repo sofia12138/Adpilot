@@ -42,8 +42,11 @@ export default function CreativeAnalysisPage() {
   const allItems = data?.list ?? []
 
   const columns: Column<CreativeItem>[] = useMemo(() => [
-    { key: 'ad_name', title: '素材名称', render: (r) => (
-      <span className="text-sm text-gray-800 font-medium truncate max-w-[220px] block" title={r.ad_name || r.ad_id}>
+    { key: 'ad_name', title: '素材名称', width: '320px', render: (r) => (
+      <span
+        className="text-sm text-gray-800 font-medium block max-w-[320px] whitespace-normal break-words line-clamp-2 leading-snug"
+        title={r.ad_name || r.ad_id}
+      >
         {r.ad_name || r.ad_id}
       </span>
     )},
@@ -61,8 +64,11 @@ export default function CreativeAnalysisPage() {
   ], [])
 
   const miniCols: Column<CreativeItem>[] = useMemo(() => [
-    { key: 'ad_name', title: '素材', render: (r) => (
-      <span className="text-sm truncate max-w-[160px] block" title={r.ad_name || r.ad_id}>
+    { key: 'ad_name', title: '素材', width: '200px', render: (r) => (
+      <span
+        className="text-sm block max-w-[200px] whitespace-normal break-words line-clamp-2 leading-snug"
+        title={r.ad_name || r.ad_id}
+      >
         {r.ad_name || r.ad_id}
       </span>
     )},
