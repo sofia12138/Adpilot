@@ -1142,10 +1142,9 @@ def _migrate_users(cur, conn):
 
 
 def _migrate_templates(cur, conn):
-    if not _table_is_empty(cur, "app_templates"):
-        return
-
     from routes.templates import BUILTIN_TEMPLATES
+
+    is_empty = _table_is_empty(cur, "app_templates")
 
     all_templates: list[dict] = []
     builtin_ids = {t["id"] for t in BUILTIN_TEMPLATES}
@@ -1153,24 +1152,26 @@ def _migrate_templates(cur, conn):
     for t in BUILTIN_TEMPLATES:
         all_templates.append(t)
 
-    json_path = Path(__file__).parent / "templates.json"
-    if json_path.exists():
-        try:
-            file_data = json.loads(json_path.read_text(encoding="utf-8"))
-            if isinstance(file_data, list):
-                for t in file_data:
-                    if isinstance(t, dict) and t.get("id"):
-                        if t["id"] in builtin_ids:
-                            for i, bt in enumerate(all_templates):
-                                if bt["id"] == t["id"]:
-                                    all_templates[i] = t
-                                    break
-                        else:
-                            all_templates.append(t)
-        except Exception:
-            pass
+    if is_empty:
+        json_path = Path(__file__).parent / "templates.json"
+        if json_path.exists():
+            try:
+                file_data = json.loads(json_path.read_text(encoding="utf-8"))
+                if isinstance(file_data, list):
+                    for t in file_data:
+                        if isinstance(t, dict) and t.get("id"):
+                            if t["id"] in builtin_ids:
+                                for i, bt in enumerate(all_templates):
+                                    if bt["id"] == t["id"]:
+                                        all_templates[i] = t
+                                        break
+                            else:
+                                all_templates.append(t)
+            except Exception:
+                pass
 
-    count = 0
+    inserted = 0
+    updated = 0
     for t in all_templates:
         tpl_id = t.get("id", "")
         name = t.get("name", "")
@@ -1178,16 +1179,31 @@ def _migrate_templates(cur, conn):
         is_builtin = 1 if tpl_id in builtin_ids else 0
         created_at = t.get("created_at")
         content = {k: v for k, v in t.items() if k not in ("id", "name", "platform", "created_at", "updated_at")}
+        content_json = json.dumps(content, ensure_ascii=False)
+
+        cur.execute("SELECT 1 FROM app_templates WHERE tpl_id = %s", (tpl_id,))
+        if cur.fetchone():
+            if tpl_id in builtin_ids:
+                cur.execute(
+                    """UPDATE app_templates
+                          SET name = %s, platform = %s, content = %s, is_builtin = 1
+                        WHERE tpl_id = %s""",
+                    (name, platform, content_json, tpl_id),
+                )
+                updated += 1
+            continue
+
         cur.execute(
             """INSERT INTO app_templates (tpl_id, name, platform, is_builtin, content, created_at)
                VALUES (%s, %s, %s, %s, %s, %s)""",
             (tpl_id, name, platform, is_builtin,
-             json.dumps(content, ensure_ascii=False),
+             content_json,
              created_at or time.strftime("%Y-%m-%d %H:%M:%S")),
         )
-        count += 1
-    conn.commit()
-    logger.info(f"已迁移 {count} 个模板到 APP.app_templates")
+        inserted += 1
+    if inserted or updated:
+        conn.commit()
+        logger.info(f"模板同步完成: 新增 {inserted}, 更新 {updated} 个内置模板到 APP.app_templates")
 
 
 def _migrate_oplog(cur, conn):

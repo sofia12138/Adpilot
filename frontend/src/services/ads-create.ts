@@ -9,14 +9,30 @@ const TIKTOK_LOCATION_IDS: Record<string, string> = {
 
 // ─── Types ───────────────────────────────────────────────
 
+export interface W2aFields {
+  pageId: string
+  landingPageUrl: string
+  primaryText: string
+  headline: string
+  description: string
+  callToAction: string
+  imageHash: string
+  videoId: string
+  pixelId: string
+  customEventType: string
+}
+
 export interface CreateAdsParams {
-  mode: 'blank' | 'template'
+  mode: 'template'
   platform: 'tiktok' | 'meta'
   campaignName: string
   country: string
+  countries?: string[]
   budget: number
   templateId?: string
   template?: Template | null
+  adAccountId?: string
+  w2a?: W2aFields
 }
 
 export interface CreateResult {
@@ -28,28 +44,57 @@ export interface CreateResult {
 // ─── 统一入口 ────────────────────────────────────────────
 
 export async function createAds(params: CreateAdsParams): Promise<CreateResult> {
-  if (params.mode === 'template' && params.templateId) {
-    return launchFromTemplate(params)
+  if (!params.templateId) {
+    return { success: false, message: '请先选择模板' }
   }
-  return params.platform === 'tiktok' ? createTikTok(params) : createMeta(params)
+  return launchFromTemplate(params)
 }
 
 // ─── 模板投放：POST /api/templates/launch ────────────────
 
 async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
   try {
-    const locId = TIKTOK_LOCATION_IDS[p.country]
+    const tplPlatform = p.template?.platform ?? p.platform
+    const tplType = p.template?.template_type ?? ''
 
-    const res = await apiFetch<{ data: Record<string, unknown> }>('/api/templates/launch', {
+    const body: Record<string, unknown> = {
+      template_id: p.templateId,
+      campaign_name: p.campaignName,
+      budget: p.budget || 50,
+    }
+
+    if (tplPlatform === 'meta') {
+      if (!p.adAccountId) {
+        return { success: false, message: 'Meta 模板投放必须选择广告账户 (ad_account_id)' }
+      }
+      body.ad_account_id = p.adAccountId
+
+      if (tplType === 'web_to_app' && p.w2a) {
+        body.overrides = _buildW2aOverrides(p)
+      } else {
+        const countryCodes = (p.countries && p.countries.length > 0) ? p.countries : [p.country]
+        body.overrides = {
+          adset: {
+            targeting: {
+              geo_locations: { countries: countryCodes },
+            },
+          },
+        }
+      }
+    } else {
+      body.advertiser_id = ''
+      const locId = TIKTOK_LOCATION_IDS[p.country]
+      body.location_ids = locId ? [locId] : []
+    }
+
+    const res = await apiFetch<{ data: Record<string, unknown>; error?: string }>('/api/templates/launch', {
       method: 'POST',
-      body: JSON.stringify({
-        template_id: p.templateId,
-        advertiser_id: '',
-        campaign_name: p.campaignName,
-        budget: p.budget || 50,
-        location_ids: locId ? [locId] : [],
-      }),
+      body: JSON.stringify(body),
     })
+
+    if (res.error) {
+      return { success: false, message: `模板投放失败: ${res.error}` }
+    }
 
     const d = res.data ?? {}
     const campOk = (d.campaign as Record<string, unknown>)?.success
@@ -60,6 +105,33 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
     return { success: true, message: '模板投放创建成功', details: d }
   } catch (e) {
     return { success: false, message: `模板投放失败: ${(e as Error).message}` }
+  }
+}
+
+function _buildW2aOverrides(p: CreateAdsParams): Record<string, unknown> {
+  const w = p.w2a!
+  const countryCodes = (p.countries && p.countries.length > 0) ? p.countries : [p.country]
+  return {
+    adset: {
+      daily_budget: Math.round((p.budget || 50) * 100),
+      targeting: {
+        geo_locations: { countries: countryCodes },
+      },
+      promoted_object: {
+        pixel_id: w.pixelId || '',
+        custom_event_type: w.customEventType || '',
+      },
+    },
+    creative: {
+      page_id: w.pageId,
+      primary_text: w.primaryText,
+      headline: w.headline,
+      description: w.description,
+      call_to_action: w.callToAction || 'LEARN_MORE',
+      link: w.landingPageUrl,
+      image_hash: w.imageHash || '',
+      video_id: w.videoId || '',
+    },
   }
 }
 

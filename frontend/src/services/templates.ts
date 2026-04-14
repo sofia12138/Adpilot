@@ -4,6 +4,8 @@ export interface Template {
   id: string
   name: string
   platform: string
+  template_type?: string
+  template_subtype?: string
   created_at: string
   updated_at: string
   [key: string]: unknown
@@ -42,4 +44,12 @@ export async function deleteTemplate(tplId: string): Promise<void> {
   await apiFetch<{ message: string }>(`/api/templates/${tplId}`, {
     method: 'DELETE',
   })
+}
+
+export async function cloneTemplate(tplId: string, body: { name: string; notes?: string }): Promise<Template> {
+  const r = await apiFetch<SingleResp>(`/api/templates/${tplId}/clone`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  return r.data
 }

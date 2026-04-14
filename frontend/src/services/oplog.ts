@@ -9,6 +9,8 @@ export interface OplogEntry {
   detail: string
   platform: string
   status: string
+  before_data?: Record<string, unknown> | null
+  after_data?: Record<string, unknown> | null
 }
 
 interface OplogResp {

@@ -19,11 +19,21 @@ def _get_shared_client() -> httpx.AsyncClient:
 
 
 class MetaApiError(Exception):
-    def __init__(self, code: int, message: str, fbtrace_id: str = ""):
+    def __init__(self, code: int, message: str, fbtrace_id: str = "",
+                 error_subcode: int = 0, error_user_msg: str = ""):
         self.code = code
         self.message = message
         self.fbtrace_id = fbtrace_id
-        super().__init__(f"[{code}] {message} (fbtrace_id={fbtrace_id})")
+        self.error_subcode = error_subcode
+        self.error_user_msg = error_user_msg
+        parts = [f"[{code}] {message}"]
+        if error_subcode:
+            parts.append(f"subcode={error_subcode}")
+        if error_user_msg:
+            parts.append(error_user_msg)
+        if fbtrace_id:
+            parts.append(f"fbtrace={fbtrace_id}")
+        super().__init__(" | ".join(parts))
 
 
 class MetaClient:
@@ -49,6 +59,8 @@ class MetaClient:
                 code=err.get("code", -1),
                 message=err.get("message", "Unknown error"),
                 fbtrace_id=err.get("fbtrace_id", ""),
+                error_subcode=err.get("error_subcode", 0),
+                error_user_msg=err.get("error_user_msg", ""),
             )
         response.raise_for_status()
         return data

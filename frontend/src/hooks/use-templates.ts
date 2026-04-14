@@ -4,6 +4,7 @@ import {
   createTemplate,
   updateTemplate,
   deleteTemplate,
+  cloneTemplate,
   type Template,
 } from '@/services/templates'
 
@@ -37,6 +38,15 @@ export function useDeleteTemplate() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (tplId: string) => deleteTemplate(tplId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
+  })
+}
+
+export function useCloneTemplate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ tplId, body }: { tplId: string; body: { name: string; notes?: string } }) =>
+      cloneTemplate(tplId, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: KEY }),
   })
 }

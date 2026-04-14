@@ -37,7 +37,7 @@ def log_operation(
 
 
 def list_logs(page: int = 1, page_size: int = 30) -> tuple[list[dict], int]:
-    """查询日志并映射为兼容旧前端的格式"""
+    """查询日志并映射为前端需要的格式，包含 before_data / after_data。"""
     rows, total = oplog_repository.list_logs(page=page, page_size=page_size)
     compatible = []
     for row in rows:
@@ -45,7 +45,11 @@ def list_logs(page: int = 1, page_size: int = 30) -> tuple[list[dict], int]:
         if row.get("platform"):
             target_parts.append(row["platform"].capitalize())
         if row.get("target_type"):
-            type_map = {"campaign": "广告系列", "adgroup": "广告组", "ad": "广告"}
+            type_map = {
+                "campaign": "广告系列", "adgroup": "广告组", "ad": "广告",
+                "template": "模板", "template_launch": "模板投放",
+                "ad_account": "广告账户", "user": "用户",
+            }
             target_parts.append(type_map.get(row["target_type"], row["target_type"]))
         if row.get("target_id"):
             target_parts.append(row["target_id"])
@@ -57,14 +61,20 @@ def list_logs(page: int = 1, page_size: int = 30) -> tuple[list[dict], int]:
         else:
             time_str = str(created_at) if created_at else ""
 
+        detail = row.get("error_message") or ""
+        if not detail and row.get("status") == "success":
+            detail = row.get("action", "")
+
         compatible.append({
+            "id": row.get("id"),
             "time": time_str,
             "user": row.get("username", ""),
             "action": row.get("action", ""),
             "target": target_str,
-            "detail": row.get("error_message") or "",
-            "id": row.get("id"),
+            "detail": detail,
             "platform": row.get("platform", ""),
             "status": row.get("status", "success"),
+            "before_data": row.get("before_data"),
+            "after_data": row.get("after_data"),
         })
     return compatible, total

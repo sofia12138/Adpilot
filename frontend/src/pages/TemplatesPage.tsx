@@ -1,74 +1,306 @@
-import { useState } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { PageHeader } from '@/components/common/PageHeader'
 import { SectionCard } from '@/components/common/SectionCard'
-import { DataTable, type Column } from '@/components/common/DataTable'
-import { Loader2, AlertCircle, Plus, Trash2, Pencil, Copy, X, ToggleLeft, ToggleRight } from 'lucide-react'
-import { useTemplates, useCreateTemplate, useUpdateTemplate, useDeleteTemplate } from '@/hooks/use-templates'
+import { CountryMultiSelect } from '@/components/common/CountryMultiSelect'
+import {
+  Loader2, AlertCircle, Trash2, Pencil, Copy, X, Eye,
+  ToggleLeft, ToggleRight, ChevronLeft, Shield, Save,
+} from 'lucide-react'
+import {
+  useTemplates, useUpdateTemplate, useDeleteTemplate, useCloneTemplate,
+} from '@/hooks/use-templates'
 import type { Template } from '@/services/templates'
+import { fetchMetaAccounts, type MetaAccount } from '@/services/advertisers'
+import {
+  fetchMetaPages, fetchMetaPixels,
+  type MetaPageOption, type MetaPixelOption,
+} from '@/services/meta-assets'
 
-const platformBadge = (p: string) => {
-  const cls = p === 'tiktok' ? 'bg-sky-50 text-sky-600' : p === 'meta' ? 'bg-indigo-50 text-indigo-600' : 'bg-gray-100 text-gray-600'
-  return <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>{p}</span>
+/* ═══════════════════════════════════════════════════
+   内置模板 ID 集合 — 前端判断是否为母版
+   ═══════════════════════════════════════════════════ */
+const BUILTIN_IDS = new Set([
+  'tpl_tiktok_android_purchase',
+  'tpl_web_to_app',
+  'tpl_miniapp_troas',
+  'tpl_meta_us_aeo',
+  'tpl_meta_web_to_app_basic_abo',
+  'tpl_meta_web_to_app_conv_abo',
+])
+
+function isBuiltin(t: Template): boolean {
+  return BUILTIN_IDS.has(t.id) || Boolean(t.is_builtin)
 }
 
-function extractTags(t: Template): string[] {
-  const tags: string[] = []
-  if (t.objective_type) tags.push(String(t.objective_type))
-  if (t.optimization_goal) tags.push(String(t.optimization_goal))
-  if (t.billing_event) tags.push(String(t.billing_event))
-  return tags.slice(0, 3)
+function isMetaW2aConv(t: Template): boolean {
+  return t.platform === 'meta'
+    && t.template_type === 'web_to_app'
+    && t.template_subtype === 'conversion'
 }
 
-interface FormState {
-  mode: 'create' | 'edit'
-  id: string
+/* ═══════════════════════════════════════════════════
+   固定枚举
+   ═══════════════════════════════════════════════════ */
+const OBJECTIVES = [
+  { value: 'OUTCOME_SALES', label: 'OUTCOME_SALES (转化/销售)' },
+  { value: 'OUTCOME_TRAFFIC', label: 'OUTCOME_TRAFFIC (流量)' },
+  { value: 'OUTCOME_LEADS', label: 'OUTCOME_LEADS (线索)' },
+  { value: 'OUTCOME_APP_PROMOTION', label: 'OUTCOME_APP_PROMOTION (应用推广)' },
+  { value: 'OUTCOME_ENGAGEMENT', label: 'OUTCOME_ENGAGEMENT (互动)' },
+  { value: 'OUTCOME_AWARENESS', label: 'OUTCOME_AWARENESS (品牌知名度)' },
+] as const
+
+const OPT_GOALS = [
+  { value: 'OFFSITE_CONVERSIONS', label: 'OFFSITE_CONVERSIONS (站外转化)' },
+  { value: 'LANDING_PAGE_VIEWS', label: 'LANDING_PAGE_VIEWS (落地页浏览)' },
+  { value: 'LINK_CLICKS', label: 'LINK_CLICKS (链接点击)' },
+  { value: 'IMPRESSIONS', label: 'IMPRESSIONS (展示)' },
+  { value: 'REACH', label: 'REACH (触达)' },
+  { value: 'APP_INSTALLS', label: 'APP_INSTALLS (应用安装)' },
+  { value: 'APP_EVENTS', label: 'APP_EVENTS (应用事件)' },
+  { value: 'VALUE', label: 'VALUE (价值优化)' },
+] as const
+
+const BILLING_EVENTS = [
+  { value: 'IMPRESSIONS', label: 'IMPRESSIONS (按展示计费)' },
+  { value: 'LINK_CLICKS', label: 'LINK_CLICKS (按点击计费)' },
+] as const
+
+const CTA_OPTIONS = [
+  'LEARN_MORE', 'SHOP_NOW', 'INSTALL_NOW', 'SIGN_UP',
+  'WATCH_MORE', 'DOWNLOAD', 'GET_OFFER', 'ORDER_NOW',
+  'SUBSCRIBE', 'CONTACT_US', 'BOOK_NOW', 'APPLY_NOW',
+] as const
+
+const EVENT_TYPES = [
+  { value: 'PURCHASE', label: 'PURCHASE (购买)' },
+  { value: 'COMPLETE_REGISTRATION', label: 'COMPLETE_REGISTRATION (完成注册)' },
+  { value: 'LEAD', label: 'LEAD (线索)' },
+  { value: 'INITIATE_CHECKOUT', label: 'INITIATE_CHECKOUT (发起结账)' },
+  { value: 'ADD_TO_CART', label: 'ADD_TO_CART (加入购物车)' },
+  { value: 'VIEW_CONTENT', label: 'VIEW_CONTENT (查看内容)' },
+  { value: 'SEARCH', label: 'SEARCH (搜索)' },
+  { value: 'CONTACT', label: 'CONTACT (联系)' },
+  { value: 'SUBSCRIBE', label: 'SUBSCRIBE (订阅)' },
+  { value: 'START_TRIAL', label: 'START_TRIAL (开始试用)' },
+] as const
+
+const BID_STRATEGIES = [
+  { value: 'LOWEST_COST_WITHOUT_CAP', label: '最低成本 (自动出价)' },
+  { value: 'COST_CAP', label: '成本上限 (Cost Cap)' },
+  { value: 'BID_CAP', label: '出价上限 (Bid Cap)' },
+] as const
+
+const inputCls = 'w-full px-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition'
+
+/* ═══════════════════════════════════════════════════
+   编辑 state 类型 + 转换
+   ═══════════════════════════════════════════════════ */
+interface W2aEditState {
   name: string
-  platform: string
-  country: string
-  budget: string
-  bidding_strategy: string
-  status: string
+  adAccountId: string
+  pageId: string
+  pixelId: string
+  customEventType: string
+  countries: string[]
+  objective: string
+  optimizationGoal: string
+  billingEvent: string
+  callToAction: string
+  bidStrategy: string
+  landingPageUrl: string
+  primaryText: string
+  headline: string
+  description: string
+  dailyBudget: string
+  ageMin: string
+  ageMax: string
+  notes: string
 }
 
-const emptyForm: FormState = {
-  mode: 'create', id: '', name: '', platform: 'tiktok',
-  country: '', budget: '', bidding_strategy: '', status: 'active',
+function templateToEditState(t: Template): W2aEditState {
+  const campaign = (t.campaign ?? {}) as Record<string, unknown>
+  const adset = (t.adset ?? {}) as Record<string, unknown>
+  const creative = (t.creative ?? {}) as Record<string, unknown>
+  const targeting = (adset.targeting ?? {}) as Record<string, unknown>
+  const geoLocations = (targeting.geo_locations ?? {}) as Record<string, unknown>
+  const po = (adset.promoted_object ?? {}) as Record<string, unknown>
+
+  return {
+    name: t.name || '',
+    adAccountId: String(t.default_ad_account_id ?? ''),
+    pageId: String(creative.page_id ?? ''),
+    pixelId: String(po.pixel_id ?? ''),
+    customEventType: String(po.custom_event_type ?? ''),
+    countries: Array.isArray(geoLocations.countries) ? geoLocations.countries : ['US'],
+    objective: String(campaign.objective ?? 'OUTCOME_SALES'),
+    optimizationGoal: String(adset.optimization_goal ?? 'OFFSITE_CONVERSIONS'),
+    billingEvent: String(adset.billing_event ?? 'IMPRESSIONS'),
+    callToAction: String(creative.call_to_action ?? 'LEARN_MORE'),
+    bidStrategy: String(adset.bid_strategy ?? 'LOWEST_COST_WITHOUT_CAP'),
+    landingPageUrl: String(creative.link ?? ''),
+    primaryText: String(creative.primary_text ?? ''),
+    headline: String(creative.headline ?? ''),
+    description: String(creative.description ?? ''),
+    dailyBudget: adset.daily_budget ? String(Number(adset.daily_budget) / 100) : '50',
+    ageMin: String((targeting.age_min as number) ?? 18),
+    ageMax: String((targeting.age_max as number) ?? 65),
+    notes: String(t.notes ?? ''),
+  }
 }
 
+function editStateToBody(s: W2aEditState): Record<string, unknown> {
+  return {
+    name: s.name,
+    platform: 'meta',
+    template_type: 'web_to_app',
+    template_subtype: 'conversion',
+    default_ad_account_id: s.adAccountId || undefined,
+    notes: s.notes || undefined,
+    campaign: {
+      objective: s.objective,
+      status: 'PAUSED',
+      special_ad_categories: [],
+      is_adset_budget_sharing_enabled: false,
+    },
+    adset: {
+      billing_event: s.billingEvent,
+      optimization_goal: s.optimizationGoal,
+      daily_budget: Math.round(Number(s.dailyBudget || '50') * 100),
+      bid_strategy: s.bidStrategy,
+      status: 'PAUSED',
+      targeting: {
+        geo_locations: { countries: s.countries.length ? s.countries : ['US'] },
+        age_min: Number(s.ageMin) || 18,
+        age_max: Number(s.ageMax) || 65,
+      },
+      promoted_object: {
+        pixel_id: s.pixelId,
+        custom_event_type: s.customEventType,
+      },
+    },
+    creative: {
+      page_id: s.pageId,
+      primary_text: s.primaryText,
+      headline: s.headline,
+      description: s.description,
+      call_to_action: s.callToAction,
+      link: s.landingPageUrl,
+      image_hash: '',
+      video_id: '',
+    },
+    ad: { status: 'PAUSED' },
+  }
+}
+
+/* ═══════════════════════════════════════════════════
+   主组件
+   ═══════════════════════════════════════════════════ */
 export default function TemplatesPage() {
   const { data: templates, isLoading, isError } = useTemplates()
-  const createMutation = useCreateTemplate()
   const updateMutation = useUpdateTemplate()
   const deleteMutation = useDeleteTemplate()
+  const cloneMutation = useCloneTemplate()
 
-  const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState<FormState>(emptyForm)
-  const [platformFilter, setPlatformFilter] = useState<string | null>(null)
+  // 视图状态
+  type View = 'list' | 'view' | 'edit'
+  const [view, setView] = useState<View>('list')
+  const [currentTpl, setCurrentTpl] = useState<Template | null>(null)
+  const [w2aEdit, setW2aEdit] = useState<W2aEditState | null>(null)
 
-  const filtered = (templates ?? []).filter(t => !platformFilter || t.platform === platformFilter)
+  // 另存为弹窗
+  const [cloneOpen, setCloneOpen] = useState(false)
+  const [cloneSourceId, setCloneSourceId] = useState('')
+  const [cloneName, setCloneName] = useState('')
+  const [cloneNotes, setCloneNotes] = useState('')
+  const [cloneSuccess, setCloneSuccess] = useState('')
 
-  const isBuiltin = (t: Template) => String(t.id).startsWith('tpl_')
-    && ['tpl_tiktok_android_purchase', 'tpl_web_to_app', 'tpl_miniapp_troas'].includes(t.id)
+  // Meta API 联动
+  const [metaAccounts, setMetaAccounts] = useState<MetaAccount[]>([])
+  const [pages, setPages] = useState<MetaPageOption[]>([])
+  const [pixels, setPixels] = useState<MetaPixelOption[]>([])
+  const [pagesLoading, setPagesLoading] = useState(false)
+  const [pixelsLoading, setPixelsLoading] = useState(false)
+  const [pagesError, setPagesError] = useState('')
+  const [pixelsError, setPixelsError] = useState('')
 
-  function openCreate() { setForm(emptyForm); setShowForm(true) }
+  useEffect(() => {
+    fetchMetaAccounts()
+      .then(r => setMetaAccounts(r.data ?? []))
+      .catch(() => {})
+  }, [])
 
+  const currentAdAccount = w2aEdit?.adAccountId ?? ''
+  useEffect(() => {
+    if (!currentAdAccount) {
+      setPages([]); setPixels([])
+      setPagesError(''); setPixelsError('')
+      return
+    }
+    setPagesLoading(true); setPagesError('')
+    fetchMetaPages(currentAdAccount)
+      .then(r => setPages(r.data ?? []))
+      .catch(e => setPagesError(String(e)))
+      .finally(() => setPagesLoading(false))
+    setPixelsLoading(true); setPixelsError('')
+    fetchMetaPixels(currentAdAccount)
+      .then(r => setPixels(r.data ?? []))
+      .catch(e => setPixelsError(String(e)))
+      .finally(() => setPixelsLoading(false))
+  }, [currentAdAccount])
+
+  /* ── 列表筛选：只显示 Meta W2A Conv ABO ── */
+  const w2aTemplates = useMemo(() =>
+    (templates ?? []).filter(isMetaW2aConv),
+    [templates],
+  )
+  const defaultTpl = useMemo(() => w2aTemplates.find(isBuiltin), [w2aTemplates])
+  const businessTpls = useMemo(() => w2aTemplates.filter(t => !isBuiltin(t)), [w2aTemplates])
+
+  /* ── 操作 ── */
+  function openView(t: Template) {
+    setCurrentTpl(t); setW2aEdit(templateToEditState(t)); setView('view')
+  }
   function openEdit(t: Template) {
-    setForm({
-      mode: 'edit', id: t.id, name: t.name, platform: t.platform,
-      country: String(t.country ?? ''), budget: String(t.budget ?? ''),
-      bidding_strategy: String(t.bidding_strategy ?? ''),
-      status: String(t.status ?? 'active'),
-    })
-    setShowForm(true)
+    setCurrentTpl(t); setW2aEdit(templateToEditState(t)); setView('edit')
+  }
+  function goBack() {
+    setView('list'); setCurrentTpl(null); setW2aEdit(null)
   }
 
-  function handleCopy(t: Template) {
-    setForm({
-      mode: 'create', id: '', name: `${t.name}_copy`, platform: t.platform,
-      country: String(t.country ?? ''), budget: String(t.budget ?? ''),
-      bidding_strategy: String(t.bidding_strategy ?? ''), status: 'active',
-    })
-    setShowForm(true)
+  function openCloneDialog(sourceId: string, sourceName: string) {
+    setCloneSourceId(sourceId)
+    setCloneName(`${sourceName} - 副本`)
+    setCloneNotes('')
+    setCloneSuccess('')
+    setCloneOpen(true)
+  }
+
+  function handleClone() {
+    if (!cloneName.trim()) return
+    cloneMutation.mutate(
+      { tplId: cloneSourceId, body: { name: cloneName.trim(), notes: cloneNotes.trim() || undefined } },
+      {
+        onSuccess: (newTpl) => {
+          setCloneSuccess(`模板「${newTpl.name}」创建成功`)
+          setTimeout(() => {
+            setCloneOpen(false)
+            openEdit(newTpl)
+          }, 800)
+        },
+      },
+    )
+  }
+
+  function handleSave() {
+    if (!w2aEdit || !currentTpl || !w2aEdit.name.trim()) return
+    const body = editStateToBody(w2aEdit)
+    updateMutation.mutate({ tplId: currentTpl.id, body }, { onSuccess: goBack })
+  }
+
+  function handleDelete(tplId: string) {
+    if (!confirm('确定删除此业务模板？')) return
+    deleteMutation.mutate(tplId)
   }
 
   function handleToggleStatus(t: Template) {
@@ -76,101 +308,412 @@ export default function TemplatesPage() {
     updateMutation.mutate({ tplId: t.id, body: { status: newStatus } })
   }
 
-  function handleSubmit() {
-    const body: Record<string, unknown> = { name: form.name.trim(), platform: form.platform }
-    if (form.country) body.country = form.country
-    if (form.budget) body.budget = Number(form.budget)
-    if (form.bidding_strategy) body.bidding_strategy = form.bidding_strategy
-    if (form.status) body.status = form.status
-
-    if (form.mode === 'create') {
-      createMutation.mutate(body, { onSuccess: () => setShowForm(false) })
-    } else {
-      updateMutation.mutate({ tplId: form.id, body }, { onSuccess: () => setShowForm(false) })
-    }
+  function setField<K extends keyof W2aEditState>(key: K, val: W2aEditState[K]) {
+    setW2aEdit(prev => prev ? { ...prev, [key]: val } : prev)
   }
 
-  function handleDelete(tplId: string) {
-    if (!confirm('确定删除此模板？')) return
-    deleteMutation.mutate(tplId)
+  function handleAdAccountChange(val: string) {
+    setW2aEdit(prev => {
+      if (!prev) return prev
+      const next = { ...prev, adAccountId: val }
+      if (prev.adAccountId && prev.adAccountId !== val) {
+        next.pageId = ''; next.pixelId = ''
+      }
+      return next
+    })
   }
 
-  const isPending = createMutation.isPending || updateMutation.isPending
+  const isPending = updateMutation.isPending || cloneMutation.isPending
 
-  const columns: Column<Template>[] = [
-    { key: 'name', title: '模板名称', render: (r) => <span className="font-medium text-gray-800">{r.name}</span> },
-    { key: 'platform', title: '平台', render: (r) => platformBadge(r.platform) },
-    { key: 'country', title: '国家', render: (r) => <span className="text-xs text-gray-500">{String(r.country || '-')}</span> },
-    { key: 'budget', title: '预算', align: 'right', render: (r) => <span className="text-xs text-gray-500">{r.budget ? `$${r.budget}` : '-'}</span> },
-    { key: 'tags', title: '标签', render: (r) => {
-      const tags = extractTags(r)
-      return (
-        <div className="flex gap-1 flex-wrap">
-          {tags.map(t => <span key={t} className="inline-block px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-500">{t}</span>)}
-          {tags.length === 0 && <span className="text-xs text-gray-300">-</span>}
-        </div>
-      )
-    }},
-    { key: 'status', title: '状态', render: (r) => {
-      const st = String(r.status ?? 'active')
-      return <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${st === 'active' ? 'bg-green-50 text-green-600' : 'bg-gray-100 text-gray-400'}`}>
-        {st === 'active' ? '启用' : '停用'}
-      </span>
-    }},
-    { key: 'actions', title: '', render: (r) => (
-      <div className="flex items-center gap-1.5">
-        <button onClick={() => openEdit(r)} className="p-1 text-gray-400 hover:text-blue-500 transition" title="编辑"><Pencil className="w-3.5 h-3.5" /></button>
-        <button onClick={() => handleCopy(r)} className="p-1 text-gray-400 hover:text-blue-500 transition" title="复制"><Copy className="w-3.5 h-3.5" /></button>
-        <button onClick={() => handleToggleStatus(r)} className="p-1 text-gray-400 hover:text-amber-500 transition" title={String(r.status ?? 'active') === 'active' ? '停用' : '启用'}>
-          {String(r.status ?? 'active') === 'active' ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
-        </button>
-        {!isBuiltin(r) && <button onClick={() => handleDelete(r.id)} className="p-1 text-gray-400 hover:text-red-500 transition" title="删除"><Trash2 className="w-3.5 h-3.5" /></button>}
-      </div>
-    )},
-  ]
-
-  return (
-    <div className="max-w-7xl mx-auto">
-      <PageHeader title="模板管理" description="沉淀投放策略，快速复用"
-        action={<button onClick={openCreate} className="flex items-center gap-1.5 px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 transition-colors"><Plus className="w-4 h-4" /> 新建模板</button>}
-      />
-
-      <div className="flex items-center gap-2 mb-4">
-        <span className="text-xs text-gray-400">平台</span>
-        {[null, 'tiktok', 'meta'].map(p => (
-          <button key={p ?? 'all'} onClick={() => setPlatformFilter(p)}
-            className={`px-3 py-1 rounded-full text-xs transition ${platformFilter === p ? 'bg-blue-500 text-white font-medium' : 'bg-gray-100 text-gray-500 hover:bg-gray-200'}`}>
-            {p === null ? '全部' : p === 'tiktok' ? 'TikTok' : 'Meta'}
-          </button>
-        ))}
-      </div>
-
-      {showForm && (
-        <div className="bg-white rounded-xl border border-blue-200 p-5 mb-4 relative">
-          <button onClick={() => setShowForm(false)} className="absolute top-3 right-3 text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
-          <h3 className="text-sm font-medium text-gray-800 mb-3">{form.mode === 'create' ? '新建模板' : `编辑模板：${form.name}`}</h3>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-            <div><label className="text-xs text-gray-500 block mb-1">模板名称</label><input value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))} placeholder="例：US-iOS-放量" className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-300" /></div>
-            <div><label className="text-xs text-gray-500 block mb-1">平台</label><select value={form.platform} onChange={e => setForm(f => ({...f, platform: e.target.value}))} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-300"><option value="tiktok">TikTok</option><option value="meta">Meta</option></select></div>
-            <div><label className="text-xs text-gray-500 block mb-1">国家</label><input value={form.country} onChange={e => setForm(f => ({...f, country: e.target.value}))} placeholder="US, JP" className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-300" /></div>
-            <div><label className="text-xs text-gray-500 block mb-1">日预算</label><input type="number" value={form.budget} onChange={e => setForm(f => ({...f, budget: e.target.value}))} placeholder="500" className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-300" /></div>
-            <div><label className="text-xs text-gray-500 block mb-1">出价策略</label><select value={form.bidding_strategy} onChange={e => setForm(f => ({...f, bidding_strategy: e.target.value}))} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-300"><option value="">不限</option><option value="LOWEST_COST">最低成本</option><option value="COST_CAP">成本上限</option><option value="BID_CAP">出价上限</option></select></div>
-            <div><label className="text-xs text-gray-500 block mb-1">状态</label><select value={form.status} onChange={e => setForm(f => ({...f, status: e.target.value}))} className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-300"><option value="active">启用</option><option value="disabled">停用</option></select></div>
+  /* ═══════════════════════════════════════════════
+     渲染：查看/编辑详情页
+     ═══════════════════════════════════════════════ */
+  if ((view === 'view' || view === 'edit') && currentTpl && w2aEdit) {
+    const readonly = view === 'view'
+    const tplIsBuiltin = isBuiltin(currentTpl)
+    return (
+      <div className="max-w-5xl mx-auto">
+        {/* 顶栏 */}
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <button onClick={goBack} className="p-2 rounded-lg hover:bg-gray-100 transition text-gray-500">
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-semibold text-gray-800">
+                  {readonly ? '查看模板' : '编辑模板'}
+                </h1>
+                {tplIsBuiltin && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-600 border border-amber-200">
+                    <Shield className="w-3 h-3" /> 系统默认
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-gray-400 mt-0.5">Meta Web to App Conversion (ABO)</p>
+            </div>
           </div>
-          <div className="mt-4 flex gap-2">
-            <button onClick={handleSubmit} disabled={isPending || !form.name.trim()} className="px-4 py-2 bg-blue-500 text-white text-sm rounded-lg hover:bg-blue-600 disabled:opacity-50 transition">{isPending ? '提交中...' : form.mode === 'create' ? '创建' : '保存'}</button>
-            <button onClick={() => setShowForm(false)} className="px-4 py-2 bg-gray-100 text-gray-600 text-sm rounded-lg hover:bg-gray-200 transition">取消</button>
-          </div>
+          {tplIsBuiltin && readonly && (
+            <button
+              onClick={() => openCloneDialog(currentTpl.id, currentTpl.name)}
+              className="px-4 py-2 bg-blue-500 text-white text-sm rounded-xl hover:bg-blue-600 transition font-medium flex items-center gap-1.5"
+            >
+              <Copy className="w-4 h-4" /> 另存为业务模板
+            </button>
+          )}
         </div>
-      )}
 
-      {isLoading && <div className="flex items-center justify-center py-32 text-gray-400"><Loader2 className="w-6 h-6 animate-spin mr-2" /><span className="text-sm">加载中...</span></div>}
-      {isError && <div className="flex flex-col items-center justify-center py-24 text-red-400"><AlertCircle className="w-8 h-8 mb-2" /><p className="text-sm font-medium">数据加载失败</p></div>}
-      {!isLoading && !isError && (
-        <SectionCard title={`模板列表（${filtered.length}）`} noPadding>
-          <DataTable columns={columns} data={filtered} rowKey={(r) => r.id} />
+        {/* 只读提示 */}
+        {readonly && tplIsBuiltin && (
+          <div className="flex items-start gap-3 p-4 mb-5 bg-amber-50 border border-amber-200 rounded-xl">
+            <Shield className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-amber-700">这是系统默认模板（母版）</p>
+              <p className="text-xs text-amber-600 mt-1">
+                不支持直接编辑。请点击右上角「另存为业务模板」创建副本后再修改。
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* A. 下拉选择配置区 */}
+        <SectionCard title="投放策略配置" className="mb-5">
+          <div className="space-y-5">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">模板名称 <span className="text-red-400">*</span></label>
+              <input value={w2aEdit.name} onChange={e => setField('name', e.target.value)} disabled={readonly} placeholder="例：US-Pixel-Conv-ABO" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">默认广告账户</label>
+              <select value={w2aEdit.adAccountId} onChange={e => handleAdAccountChange(e.target.value)} disabled={readonly} className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                <option value="">请选择 Meta 广告账户</option>
+                {metaAccounts.map(a => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">默认 Page</label>
+                <select value={w2aEdit.pageId} onChange={e => setField('pageId', e.target.value)}
+                  disabled={readonly || !w2aEdit.adAccountId || pagesLoading}
+                  className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                  <option value="">{!w2aEdit.adAccountId ? '请先选择广告账户' : pagesLoading ? '加载中...' : '请选择主页'}</option>
+                  {pages.map(p => <option key={p.id} value={p.id}>{p.name} ({p.id})</option>)}
+                </select>
+                {pagesError && <p className="text-xs text-red-400 mt-1">拉取失败: {pagesError}</p>}
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">默认 Pixel</label>
+                <select value={w2aEdit.pixelId} onChange={e => setField('pixelId', e.target.value)}
+                  disabled={readonly || !w2aEdit.adAccountId || pixelsLoading}
+                  className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                  <option value="">{!w2aEdit.adAccountId ? '请先选择广告账户' : pixelsLoading ? '加载中...' : '请选择 Pixel'}</option>
+                  {pixels.map(p => <option key={p.id} value={p.id}>{p.name} ({p.id})</option>)}
+                </select>
+                {pixelsError && <p className="text-xs text-red-400 mt-1">拉取失败: {pixelsError}</p>}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Custom Event Type</label>
+                <select value={w2aEdit.customEventType} onChange={e => setField('customEventType', e.target.value)} disabled={readonly} className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                  <option value="">请选择事件类型</option>
+                  {EVENT_TYPES.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Call To Action</label>
+                <select value={w2aEdit.callToAction} onChange={e => setField('callToAction', e.target.value)} disabled={readonly} className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                  {CTA_OPTIONS.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">投放国家/地区</label>
+              {readonly ? (
+                <div className="flex flex-wrap gap-1.5 px-3 py-2 border border-gray-200 rounded-xl bg-gray-50 min-h-[42px]">
+                  {w2aEdit.countries.map(c => (
+                    <span key={c} className="inline-block px-2 py-0.5 rounded-md bg-blue-50 text-blue-600 text-xs font-medium">{c}</span>
+                  ))}
+                  {w2aEdit.countries.length === 0 && <span className="text-gray-400 text-sm">未设置</span>}
+                </div>
+              ) : (
+                <CountryMultiSelect value={w2aEdit.countries} onChange={codes => setField('countries', codes)} />
+              )}
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Campaign Objective</label>
+                <select value={w2aEdit.objective} onChange={e => setField('objective', e.target.value)} disabled={readonly} className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                  {OBJECTIVES.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Optimization Goal</label>
+                <select value={w2aEdit.optimizationGoal} onChange={e => setField('optimizationGoal', e.target.value)} disabled={readonly} className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                  {OPT_GOALS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Billing Event</label>
+                <select value={w2aEdit.billingEvent} onChange={e => setField('billingEvent', e.target.value)} disabled={readonly} className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                  {BILLING_EVENTS.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <div className="max-w-xs">
+              <label className="block text-xs font-medium text-gray-600 mb-1">出价策略</label>
+              <select value={w2aEdit.bidStrategy} onChange={e => setField('bidStrategy', e.target.value)} disabled={readonly} className={`${inputCls} bg-white ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}>
+                {BID_STRATEGIES.map(b => <option key={b.value} value={b.value}>{b.label}</option>)}
+              </select>
+            </div>
+          </div>
         </SectionCard>
+
+        {/* B. 默认值配置区 */}
+        <SectionCard title="创意与预算默认值" className="mb-5">
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Landing Page URL</label>
+              <input value={w2aEdit.landingPageUrl} onChange={e => setField('landingPageUrl', e.target.value)} disabled={readonly} placeholder="https://example.com/landing" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Primary Text</label>
+              <textarea value={w2aEdit.primaryText} onChange={e => setField('primaryText', e.target.value)} disabled={readonly} rows={2} placeholder="广告主文案" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Headline</label>
+                <input value={w2aEdit.headline} onChange={e => setField('headline', e.target.value)} disabled={readonly} placeholder="标题" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
+                <input value={w2aEdit.description} onChange={e => setField('description', e.target.value)} disabled={readonly} placeholder="可选描述" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">日预算 (USD)</label>
+                <input type="number" value={w2aEdit.dailyBudget} onChange={e => setField('dailyBudget', e.target.value)} disabled={readonly} placeholder="50" min="1" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">最小年龄</label>
+                <input type="number" value={w2aEdit.ageMin} onChange={e => setField('ageMin', e.target.value)} disabled={readonly} min="13" max="65" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">最大年龄</label>
+                <input type="number" value={w2aEdit.ageMax} onChange={e => setField('ageMax', e.target.value)} disabled={readonly} min="13" max="65" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">备注</label>
+              <textarea value={w2aEdit.notes} onChange={e => setField('notes', e.target.value)} disabled={readonly} rows={2} placeholder="内部备注，不影响投放" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+            </div>
+          </div>
+        </SectionCard>
+
+        {/* 底部操作栏 */}
+        <div className="flex items-center gap-3">
+          {readonly ? (
+            <button
+              onClick={() => openCloneDialog(currentTpl.id, currentTpl.name)}
+              className="px-5 py-2.5 bg-blue-500 text-white text-sm rounded-xl hover:bg-blue-600 transition font-medium flex items-center gap-1.5"
+            >
+              <Copy className="w-4 h-4" /> 另存为业务模板
+            </button>
+          ) : (
+            <button
+              onClick={handleSave}
+              disabled={isPending || !w2aEdit.name.trim()}
+              className="px-5 py-2.5 bg-blue-500 text-white text-sm rounded-xl hover:bg-blue-600 disabled:opacity-50 transition font-medium flex items-center gap-1.5"
+            >
+              <Save className="w-4 h-4" /> {isPending ? '保存中...' : '保存修改'}
+            </button>
+          )}
+          <button onClick={goBack} className="px-5 py-2.5 bg-gray-100 text-gray-600 text-sm rounded-xl hover:bg-gray-200 transition">返回列表</button>
+        </div>
+
+        {/* 另存为弹窗 */}
+        {cloneOpen && <CloneDialog
+          name={cloneName} setName={setCloneName}
+          notes={cloneNotes} setNotes={setCloneNotes}
+          onSubmit={handleClone} onClose={() => setCloneOpen(false)}
+          isPending={cloneMutation.isPending} success={cloneSuccess}
+        />}
+      </div>
+    )
+  }
+
+  /* ═══════════════════════════════════════════════
+     渲染：模板列表主页
+     ═══════════════════════════════════════════════ */
+  return (
+    <div className="max-w-6xl mx-auto">
+      <PageHeader title="模板管理" description="Meta Web to App Conversion (ABO) 模板配置" />
+
+      {isLoading && (
+        <div className="flex items-center justify-center py-32 text-gray-400">
+          <Loader2 className="w-6 h-6 animate-spin mr-2" /><span className="text-sm">加载中...</span>
+        </div>
       )}
+      {isError && (
+        <div className="flex flex-col items-center justify-center py-24 text-red-400">
+          <AlertCircle className="w-8 h-8 mb-2" /><p className="text-sm font-medium">数据加载失败</p>
+        </div>
+      )}
+
+      {!isLoading && !isError && (
+        <>
+          {/* 默认模板（母版） */}
+          {defaultTpl && (
+            <SectionCard title="系统默认模板（母版）" className="mb-5"
+              extra={<span className="inline-flex items-center gap-1 text-amber-500 font-medium"><Shield className="w-3.5 h-3.5" /> 只读</span>}>
+              <div className="flex items-center justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-semibold text-gray-800">{defaultTpl.name}</p>
+                    <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-600">Meta</span>
+                    <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-600 border border-amber-200">系统默认</span>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-1">
+                    {(defaultTpl.campaign as Record<string, unknown>)?.objective as string || 'OUTCOME_SALES'}
+                    {' · '}
+                    {(defaultTpl.adset as Record<string, unknown>)?.optimization_goal as string || 'OFFSITE_CONVERSIONS'}
+                    {' · '}
+                    预算 ${Number((defaultTpl.adset as Record<string, unknown>)?.daily_budget ?? 5000) / 100}/天
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={() => openView(defaultTpl)}
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition">
+                    <Eye className="w-3.5 h-3.5" /> 查看
+                  </button>
+                  <button onClick={() => openCloneDialog(defaultTpl.id, defaultTpl.name)}
+                    className="flex items-center gap-1.5 px-3 py-2 text-xs text-white bg-blue-500 rounded-lg hover:bg-blue-600 transition font-medium">
+                    <Copy className="w-3.5 h-3.5" /> 另存为
+                  </button>
+                </div>
+              </div>
+            </SectionCard>
+          )}
+
+          {/* 业务模板列表 */}
+          <SectionCard title={`我的业务模板（${businessTpls.length}）`} className="mb-5">
+            {businessTpls.length === 0 ? (
+              <div className="flex flex-col items-center py-12 text-gray-400">
+                <Copy className="w-8 h-8 mb-3 opacity-50" />
+                <p className="text-sm">暂无业务模板</p>
+                <p className="text-xs mt-1">点击上方默认模板的「另存为」创建第一个业务模板</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-100">
+                {businessTpls.map(t => {
+                  const adset = (t.adset ?? {}) as Record<string, unknown>
+                  const targeting = (adset.targeting ?? {}) as Record<string, unknown>
+                  const geo = (targeting.geo_locations ?? {}) as Record<string, unknown>
+                  const countries = Array.isArray(geo.countries) ? geo.countries as string[] : []
+                  const st = String(t.status ?? 'active')
+                  return (
+                    <div key={t.id} className="flex items-center justify-between py-3 first:pt-0 last:pb-0">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium text-gray-800 truncate">{t.name}</p>
+                          <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${st === 'active' ? 'bg-green-50 text-green-600' : 'bg-gray-100 text-gray-400'}`}>
+                            {st === 'active' ? '启用' : '停用'}
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {countries.length > 0 ? `${countries.slice(0, 5).join(', ')}${countries.length > 5 ? ` +${countries.length - 5}` : ''}` : '-'}
+                          {' · '}
+                          ${Number(adset.daily_budget ?? 5000) / 100}/天
+                          {t.updated_at ? ` · 更新于 ${String(t.updated_at).slice(0, 10)}` : ''}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 ml-4">
+                        <button onClick={() => openEdit(t)} className="p-1.5 text-gray-400 hover:text-blue-500 transition" title="编辑">
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => openCloneDialog(t.id, t.name)} className="p-1.5 text-gray-400 hover:text-blue-500 transition" title="复制">
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                        <button onClick={() => handleToggleStatus(t)} className="p-1.5 text-gray-400 hover:text-amber-500 transition" title={st === 'active' ? '停用' : '启用'}>
+                          {st === 'active' ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                        </button>
+                        <button onClick={() => handleDelete(t.id)} className="p-1.5 text-gray-400 hover:text-red-500 transition" title="删除">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </SectionCard>
+        </>
+      )}
+
+      {/* 另存为弹窗 */}
+      {cloneOpen && <CloneDialog
+        name={cloneName} setName={setCloneName}
+        notes={cloneNotes} setNotes={setCloneNotes}
+        onSubmit={handleClone} onClose={() => setCloneOpen(false)}
+        isPending={cloneMutation.isPending} success={cloneSuccess}
+      />}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════
+   另存为弹窗组件
+   ═══════════════════════════════════════════════════ */
+interface CloneDialogProps {
+  name: string; setName: (v: string) => void
+  notes: string; setNotes: (v: string) => void
+  onSubmit: () => void; onClose: () => void
+  isPending: boolean; success: string
+}
+
+function CloneDialog({ name, setName, notes, setNotes, onSubmit, onClose, isPending, success }: CloneDialogProps) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-base font-semibold text-gray-800">另存为业务模板</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+        </div>
+
+        {success ? (
+          <div className="flex items-center gap-2 py-8 justify-center text-green-600">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
+            <span className="text-sm font-medium">{success}</span>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">新模板名称 <span className="text-red-400">*</span></label>
+                <input value={name} onChange={e => setName(e.target.value)} placeholder="例：US-Conv-新剧推广" className={inputCls} autoFocus />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">备注（可选）</label>
+                <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} placeholder="记录此模板的用途" className={inputCls} />
+              </div>
+            </div>
+            <div className="flex items-center gap-2 mt-5">
+              <button onClick={onSubmit} disabled={isPending || !name.trim()}
+                className="flex-1 px-4 py-2.5 bg-blue-500 text-white text-sm rounded-xl hover:bg-blue-600 disabled:opacity-50 transition font-medium">
+                {isPending ? '创建中...' : '创建副本'}
+              </button>
+              <button onClick={onClose} className="px-4 py-2.5 bg-gray-100 text-gray-600 text-sm rounded-xl hover:bg-gray-200 transition">取消</button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   )
 }

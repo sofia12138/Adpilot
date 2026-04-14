@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { PageHeader } from '@/components/common/PageHeader'
 import { SectionCard } from '@/components/common/SectionCard'
 import { DataTable, type Column } from '@/components/common/DataTable'
-import { Loader2, AlertCircle, ChevronLeft, ChevronRight, LogIn } from 'lucide-react'
+import { Loader2, AlertCircle, ChevronLeft, ChevronRight, LogIn, X, Eye } from 'lucide-react'
 import { useOplog } from '@/hooks/use-oplog'
 import { AuthError } from '@/services/api'
 import type { OplogEntry } from '@/services/oplog'
@@ -16,14 +16,64 @@ const statusBadge = (s: string) => {
   return <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>{s === 'success' ? '成功' : s === 'fail' ? '失败' : s}</span>
 }
 
+function DetailModal({ entry, onClose }: { entry: OplogEntry; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h3 className="text-sm font-semibold text-gray-800">操作日志详情</h3>
+          <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 transition text-gray-400 hover:text-gray-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="px-6 py-4 overflow-y-auto max-h-[calc(80vh-60px)] space-y-4">
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div><span className="text-gray-400">时间</span><p className="text-gray-700 mt-0.5">{entry.time}</p></div>
+            <div><span className="text-gray-400">操作人</span><p className="text-gray-700 mt-0.5">{entry.user || '-'}</p></div>
+            <div><span className="text-gray-400">操作</span><p className="text-gray-700 mt-0.5">{entry.action}</p></div>
+            <div><span className="text-gray-400">状态</span><div className="mt-0.5">{statusBadge(entry.status)}</div></div>
+            <div className="col-span-2"><span className="text-gray-400">目标</span><p className="text-gray-700 mt-0.5">{entry.target || '-'}</p></div>
+            <div className="col-span-2"><span className="text-gray-400">详情</span><p className="text-gray-700 mt-0.5 break-all">{entry.detail || '-'}</p></div>
+          </div>
+
+          {entry.before_data && (
+            <div>
+              <p className="text-xs font-medium text-gray-500 mb-1.5">操作前数据 (before)</p>
+              <pre className="text-[11px] text-gray-600 bg-gray-50 rounded-xl p-3 overflow-x-auto max-h-48 whitespace-pre-wrap break-all">
+                {JSON.stringify(entry.before_data, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {entry.after_data && (
+            <div>
+              <p className="text-xs font-medium text-gray-500 mb-1.5">操作后数据 (after)</p>
+              <pre className="text-[11px] text-gray-600 bg-blue-50 rounded-xl p-3 overflow-x-auto max-h-48 whitespace-pre-wrap break-all">
+                {JSON.stringify(entry.after_data, null, 2)}
+              </pre>
+            </div>
+          )}
+
+          {!entry.before_data && !entry.after_data && (
+            <p className="text-xs text-gray-300 text-center py-4">暂无 before/after 数据</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function OplogPage() {
   const [page, setPage] = useState(1)
   const { data, isLoading, isError, error } = useOplog(page, PAGE_SIZE)
+  const [selectedEntry, setSelectedEntry] = useState<OplogEntry | null>(null)
 
   const isAuthError = error instanceof AuthError
   const list = data?.list ?? []
   const total = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+
+  const hasExtra = (r: OplogEntry) => !!(r.before_data || r.after_data)
 
   const columns: Column<OplogEntry>[] = [
     { key: 'time', title: '时间', render: (r) => <span className="text-xs text-gray-500 whitespace-nowrap">{r.time}</span> },
@@ -37,7 +87,18 @@ export default function OplogPage() {
     }},
     { key: 'status', title: '状态', render: (r) => statusBadge(r.status) },
     { key: 'detail', title: '详情', render: (r) => (
-      <span className="text-xs text-gray-400 truncate max-w-[150px] block" title={r.detail}>{r.detail || '-'}</span>
+      <div className="flex items-center gap-1.5 max-w-[220px]">
+        <span className="text-xs text-gray-400 truncate flex-1" title={r.detail}>{r.detail || '-'}</span>
+        {hasExtra(r) && (
+          <button
+            onClick={(e) => { e.stopPropagation(); setSelectedEntry(r) }}
+            className="shrink-0 flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-medium text-blue-500 bg-blue-50 hover:bg-blue-100 transition"
+          >
+            <Eye className="w-3 h-3" />
+            详情
+          </button>
+        )}
+      </div>
     )},
   ]
 
@@ -70,7 +131,11 @@ export default function OplogPage() {
       {!isLoading && !isError && (
         <>
           <SectionCard title={`操作日志（共 ${total} 条）`} noPadding>
-            <DataTable columns={columns} data={list} rowKey={(r) => String(r.id)} />
+            <DataTable
+              columns={columns}
+              data={list}
+              rowKey={(r) => String(r.id)}
+            />
           </SectionCard>
 
           {totalPages > 1 && (
@@ -114,6 +179,8 @@ export default function OplogPage() {
           )}
         </>
       )}
+
+      {selectedEntry && <DetailModal entry={selectedEntry} onClose={() => setSelectedEntry(null)} />}
     </div>
   )
 }
