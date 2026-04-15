@@ -520,7 +520,7 @@ export default function ReturnedConversionPage() {
                   label="D0 ROI（回传口径）"
                   value={summary && summary.d0_roi_returned > 0 ? summary.d0_roi_returned.toFixed(4) : '-'}
                   icon={BarChart3}
-                  sub="total_value / spend"
+                  sub={summary?.d0_roi_is_fallback ? '暂无 D0 拆分，等同累计 ROI' : 'D0 价值 / 花费'}
                 />
               </div>
             </div>

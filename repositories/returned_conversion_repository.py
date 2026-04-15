@@ -216,6 +216,9 @@ def _row_to_summary(row: dict) -> dict:
     spend = float(row.get("total_spend") or 0)
     total_value = float(row.get("total_total_value_returned") or 0)
     d1_value = float(row.get("total_d1_value_returned") or 0)
+    d0_purchase = float(row.get("total_d0_purchase_value_returned") or 0)
+    d0_subscribe = float(row.get("total_d0_subscribe_value_returned") or 0)
+    d0_value = d0_purchase + d0_subscribe
     return {
         "spend":                        round(spend, 4),
         "impressions":                  int(row.get("total_impressions") or 0),
@@ -226,12 +229,13 @@ def _row_to_summary(row: dict) -> dict:
         "subscribe_value_returned":     round(float(row.get("total_subscribe_value_returned") or 0), 4),
         "total_value_returned":         round(total_value, 4),
         "cumulative_roi_returned":      _calc_roi(total_value, spend),
-        "d0_roi_returned":              _calc_roi(total_value, spend),
+        "d0_roi_returned":              _calc_roi(d0_value, spend) if d0_value > 0 else _calc_roi(total_value, spend),
+        "d0_roi_is_fallback":           d0_value <= 0,
         "d1_value_returned":            round(d1_value, 4),
         "d1_roi_returned":              _calc_roi(d1_value, spend),
         "d0_registrations_returned":    int(row.get("total_d0_registrations_returned") or 0),
-        "d0_purchase_value_returned":   round(float(row.get("total_d0_purchase_value_returned") or 0), 4),
-        "d0_subscribe_value_returned":  round(float(row.get("total_d0_subscribe_value_returned") or 0), 4),
+        "d0_purchase_value_returned":   round(d0_purchase, 4),
+        "d0_subscribe_value_returned":  round(d0_subscribe, 4),
     }
 
 
@@ -343,6 +347,9 @@ def query_rows(
         spend = float(r.get("total_spend") or 0)
         total_value = float(r.get("total_total_value_returned") or 0)
         d1_value = float(r.get("total_d1_value_returned") or 0)
+        d0_purchase = float(r.get("total_d0_purchase_value_returned") or 0)
+        d0_subscribe = float(r.get("total_d0_subscribe_value_returned") or 0)
+        d0_value = d0_purchase + d0_subscribe
 
         dim_key = str(r.get("dimension_key") or "")
         dim_label = str(r.get("dimension_label") or dim_key or "")
@@ -355,16 +362,16 @@ def query_rows(
             "clicks":                      int(r.get("total_clicks") or 0),
             "installs":                    int(r.get("total_installs") or 0),
             "registrations_returned":      int(r.get("total_registrations_returned") or 0),
-            "purchase_value_returned":     round(float(r.get("total_purchase_value_returned") or 0), 4),
-            "subscribe_value_returned":    round(float(r.get("total_subscribe_value_returned") or 0), 4),
+            "purchase_value_returned":     round(d0_purchase if d0_purchase else float(r.get("total_purchase_value_returned") or 0), 4),
+            "subscribe_value_returned":    round(d0_subscribe if d0_subscribe else float(r.get("total_subscribe_value_returned") or 0), 4),
             "total_value_returned":        round(total_value, 4),
             "cumulative_roi_returned":     _calc_roi(total_value, spend),
-            "d0_roi_returned":             _calc_roi(total_value, spend),
+            "d0_roi_returned":             _calc_roi(d0_value, spend) if d0_value > 0 else _calc_roi(total_value, spend),
             "d1_value_returned":           round(d1_value, 4),
             "d1_roi_returned":             _calc_roi(d1_value, spend),
             "d0_registrations_returned":   int(r.get("total_d0_registrations_returned") or 0),
-            "d0_purchase_value_returned":  round(float(r.get("total_d0_purchase_value_returned") or 0), 4),
-            "d0_subscribe_value_returned": round(float(r.get("total_d0_subscribe_value_returned") or 0), 4),
+            "d0_purchase_value_returned":  round(d0_purchase, 4),
+            "d0_subscribe_value_returned": round(d0_subscribe, 4),
         })
     return result
 
@@ -526,10 +533,10 @@ def upsert(
         cur = conn.cursor()
         cur.execute(sql, (
             stat_date, media_source,
-            account_id or None, campaign_id or None, campaign_name or None,
-            adset_id or None, adset_name or None,
-            ad_id or None, ad_name or None,
-            country or None, platform or None,
+            account_id or "", campaign_id or "", campaign_name or None,
+            adset_id or "", adset_name or None,
+            ad_id or "", ad_name or None,
+            country or "", platform or "",
             impressions, clicks, installs, spend,
             registrations_returned, purchase_value_returned,
             subscribe_value_returned, total_value,

@@ -523,7 +523,8 @@ _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
     "admin":       [p[0] for p in _PANEL_SEED if p[0] != "role_perm"],
     "optimizer":   ["dashboard", "ads_data", "tiktok_console", "meta_console", "ad_create",
                     "template_mgmt", "creatives", "creative_analysis", "optimizer_performance",
-                    "optimizer_directory"],
+                    "optimizer_directory", "designer_performance", "drama_analysis",
+                    "returned_conversion", "oplog"],
     "designer":    ["dashboard", "creatives", "creative_analysis", "designer_performance"],
     "analyst":     ["dashboard", "overview", "channel_analysis", "biz_analysis", "data_compare",
                     "creative_analysis", "returned_conversion", "drama_analysis", "designer_performance",
@@ -1026,6 +1027,7 @@ def init_biz_tables():
             cur.execute(sql)
         _migrate_biz_ad_accounts_columns(cur)
         _migrate_returned_conversion_d0_columns(cur)
+        _migrate_returned_conversion_cleanup(cur)
         _migrate_optimizer_mapping_columns(cur)
         conn.commit()
         logger.info("BIZ 业务库数据沉淀表初始化完成")
@@ -1070,6 +1072,90 @@ def _migrate_returned_conversion_d0_columns(cur):
     for col, ddl in migrations:
         if col not in existing:
             cur.execute(f"ALTER TABLE ad_returned_conversion_daily {ddl}")
+
+
+def _migrate_returned_conversion_cleanup(cur):
+    """清理 ad_returned_conversion_daily 中因 NULL 唯一键失效产生的重复行 + campaign/adset 汇总行（幂等）。
+
+    问题根因：
+      1. upsert() 将空字符串转为 NULL → 唯一键无法去重 → 每次同步都 INSERT 新行
+      2. campaign/adset/ad 三级同时写入 → 同一笔花费被 SUM 3 次
+    修复策略：
+      Step 1: 先删除"NULL 等价重复行"（把 NULL 视为 '' 后与其他行重复的行，只保留 id 最大的）
+      Step 2: 将唯一键列中的 NULL 统一为空字符串
+      Step 3: 删除转换后仍然存在的重复行
+      Step 4: 删除 campaign/adset 汇总行
+    """
+    cur.execute("SELECT COUNT(*) AS cnt FROM ad_returned_conversion_daily")
+    total = cur.fetchone()["cnt"]
+    if total == 0:
+        return
+
+    # Step 1: 删除"NULL 等价重复行"：将 NULL 视为 '' 后分组，每组只保留 id 最大的
+    cur.execute("""
+        DELETE t1 FROM ad_returned_conversion_daily t1
+        INNER JOIN (
+            SELECT COALESCE(stat_date, '1970-01-01') AS g_date,
+                   COALESCE(media_source, '') AS g_ms,
+                   COALESCE(account_id, '') AS g_acc,
+                   COALESCE(campaign_id, '') AS g_cid,
+                   COALESCE(adset_id, '') AS g_asid,
+                   COALESCE(ad_id, '') AS g_adid,
+                   COALESCE(country, '') AS g_co,
+                   COALESCE(platform, '') AS g_pf,
+                   MAX(id) AS keep_id
+            FROM ad_returned_conversion_daily
+            GROUP BY g_date, g_ms, g_acc, g_cid, g_asid, g_adid, g_co, g_pf
+            HAVING COUNT(*) > 1
+        ) t2 ON COALESCE(t1.stat_date, '1970-01-01') = t2.g_date
+            AND COALESCE(t1.media_source, '') = t2.g_ms
+            AND COALESCE(t1.account_id, '') = t2.g_acc
+            AND COALESCE(t1.campaign_id, '') = t2.g_cid
+            AND COALESCE(t1.adset_id, '') = t2.g_asid
+            AND COALESCE(t1.ad_id, '') = t2.g_adid
+            AND COALESCE(t1.country, '') = t2.g_co
+            AND COALESCE(t1.platform, '') = t2.g_pf
+            AND t1.id != t2.keep_id
+    """)
+    dedup_deleted = cur.rowcount
+    if dedup_deleted > 0:
+        logger.info(f"returned_conversion 清理: 删除 {dedup_deleted} 条唯一键重复行")
+
+    # Step 2: NULL → 空字符串（让唯一键可以正常工作）
+    for col in ("account_id", "campaign_id", "adset_id", "ad_id", "country", "platform"):
+        cur.execute(f"UPDATE ad_returned_conversion_daily SET {col} = '' WHERE {col} IS NULL")
+
+    # Step 3: 删除 campaign 汇总行（adset_id='' AND ad_id=''），前提是同 campaign 下存在 ad 级别行
+    cur.execute("""
+        DELETE FROM ad_returned_conversion_daily
+        WHERE adset_id = '' AND ad_id = ''
+          AND campaign_id IN (
+              SELECT DISTINCT campaign_id FROM (
+                  SELECT campaign_id FROM ad_returned_conversion_daily WHERE ad_id != ''
+              ) sub
+          )
+    """)
+    campaign_deleted = cur.rowcount
+
+    # Step 4: 删除 adset 汇总行（ad_id=''），前提是同 adset 下存在 ad 级别行
+    cur.execute("""
+        DELETE FROM ad_returned_conversion_daily
+        WHERE ad_id = '' AND adset_id != ''
+          AND adset_id IN (
+              SELECT DISTINCT adset_id FROM (
+                  SELECT adset_id FROM ad_returned_conversion_daily WHERE ad_id != ''
+              ) sub
+          )
+    """)
+    adset_deleted = cur.rowcount
+
+    if campaign_deleted + adset_deleted > 0:
+        logger.info(f"returned_conversion 清理: 删除 {campaign_deleted} 条 campaign 汇总行, "
+                    f"{adset_deleted} 条 adset 汇总行")
+
+    cur.execute("SELECT COUNT(*) AS cnt FROM ad_returned_conversion_daily")
+    remaining = cur.fetchone()["cnt"]
+    logger.info(f"returned_conversion 清理完成: 清理前 {total} 行 → 清理后 {remaining} 行")
 
 
 def _migrate_biz_ad_accounts_columns(cur):

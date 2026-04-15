@@ -619,13 +619,7 @@ async def sync_meta_campaigns(ad_account_id: str,
         affected = biz_daily_report_repository.upsert_batch(report_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"campaign 日报 {len(report_rows)} 条")
         logger.info(f"[Meta] campaign 日报同步完成: {len(report_rows)} 条")
-        # 同步写入回传口径表（ad_returned_conversion_daily，adpilot_biz）
-        for item in data:
-            ret = _meta_insight_to_returned_row(item, ad_account_id, "campaign")
-            try:
-                returned_conversion_repository.upsert(**ret)
-            except Exception as e_ret:
-                logger.warning(f"[Meta] returned_conversion upsert(campaign) 失败: {e_ret}")
+        # 回传口径表只在 ad 级别（最细粒度）写入，避免 campaign/adset/ad 三级重复导致 SUM 膨胀
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] campaign 日报同步失败: {e}")
@@ -638,13 +632,7 @@ async def sync_meta_campaigns(ad_account_id: str,
         affected = biz_adgroup_daily_repository.upsert_batch(adset_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"adset 日报 {len(adset_rows)} 条")
         logger.info(f"[Meta] adset 日报同步完成: {len(adset_rows)} 条")
-        # 同步写入回传口径表（adset 级别）
-        for item in data:
-            ret = _meta_insight_to_returned_row(item, ad_account_id, "adset")
-            try:
-                returned_conversion_repository.upsert(**ret)
-            except Exception as e_ret:
-                logger.warning(f"[Meta] returned_conversion upsert(adset) 失败: {e_ret}")
+        # 回传口径表只在 ad 级别写入，此处不再重复写入 adset 级别
     except Exception as e:
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] adset 日报同步失败: {e}")
@@ -657,7 +645,7 @@ async def sync_meta_campaigns(ad_account_id: str,
         affected = biz_ad_daily_repository.upsert_batch(ad_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"ad 日报 {len(ad_rows)} 条")
         logger.info(f"[Meta] ad 日报同步完成: {len(ad_rows)} 条")
-        # 同步写入回传口径表（ad 级别，最细粒度）
+        # 回传口径表只在 ad 级别写入（最细粒度），campaign/adset 级别不再写入以避免 SUM 膨胀
         for item in data:
             ret = _meta_insight_to_returned_row(item, ad_account_id, "ad")
             try:

@@ -38,13 +38,16 @@ async def get_role_panels(role_key: str, _: User = Depends(_require_super_admin)
 async def update_role_panels(role_key: str, body: PanelKeysBody,
                              admin: User = Depends(_require_super_admin)):
     panel_service.set_role_panels(role_key, body.panel_keys)
+    from repositories import panel_repository
+    cleared = panel_repository.clear_user_overrides_by_role(role_key)
     log_operation(
         username=admin.username,
-        action="更新角色面板权限",
+        action=f"更新角色面板权限(清除{cleared}个用户覆盖)" if cleared else "更新角色面板权限",
         target_type="role",
         target_id=role_key,
     )
-    return {"ok": True, "role_key": role_key, "panel_keys": body.panel_keys}
+    return {"ok": True, "role_key": role_key, "panel_keys": body.panel_keys,
+            "cleared_user_overrides": cleared}
 
 
 @router.get("/users/{username}")

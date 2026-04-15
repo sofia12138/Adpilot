@@ -60,6 +60,21 @@ def set_user_panels(username: str, panel_keys: list[str]):
         conn.commit()
 
 
+def clear_user_overrides_by_role(role_key: str) -> int:
+    """清除指定角色下所有用户的个性化面板覆盖，使其回退到角色默认权限。"""
+    with get_app_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "DELETE up FROM user_panel_permissions up "
+            "INNER JOIN app_users u ON up.username = u.username "
+            "WHERE u.role = %s",
+            (role_key,),
+        )
+        affected = cur.rowcount
+        conn.commit()
+        return affected
+
+
 def resolve_user_allowed_panels(username: str, role: str) -> list[str]:
     """权限合并：用户个性化 > 角色默认。若用户有配置则以用户为准，否则回退角色默认。"""
     user_overrides = get_user_panels(username)
