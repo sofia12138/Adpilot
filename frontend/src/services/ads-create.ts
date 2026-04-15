@@ -16,10 +16,27 @@ export interface W2aFields {
   headline: string
   description: string
   callToAction: string
-  imageHash: string
-  videoId: string
   pixelId: string
   customEventType: string
+}
+
+export interface MaterialItem {
+  id: string
+  type: 'image' | 'video'
+  image_hash?: string
+  video_id?: string
+  picture_url?: string
+  original_name: string
+  ad_name: string
+}
+
+export interface AdSetConfig {
+  name: string
+  daily_budget: number
+  countries: string[]
+  pixel_id?: string
+  custom_event_type?: string
+  material_ids: string[]
 }
 
 export interface CreateAdsParams {
@@ -33,12 +50,40 @@ export interface CreateAdsParams {
   template?: Template | null
   adAccountId?: string
   w2a?: W2aFields
+  materials?: MaterialItem[]
+  adsets?: AdSetConfig[]
+}
+
+export interface AdResult {
+  success: boolean
+  ad_id?: string
+  ad_name: string
+  material_name: string
+  material_type?: string
+  error?: string
+}
+
+export interface AdSetResult {
+  success: boolean
+  adset_id?: string
+  adset_name: string
+  error?: string
+  payload_sent?: Record<string, unknown>
+  ads: AdResult[]
+}
+
+export interface BatchLaunchResult {
+  platform: string
+  template_type?: string
+  ad_account_id?: string
+  campaign: { success: boolean; campaign_id?: string; error?: string }
+  adsets: AdSetResult[]
 }
 
 export interface CreateResult {
   success: boolean
   message: string
-  details?: Record<string, unknown>
+  details?: BatchLaunchResult
 }
 
 // ─── 统一入口 ────────────────────────────────────────────
@@ -75,11 +120,25 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
         const countryCodes = (p.countries && p.countries.length > 0) ? p.countries : [p.country]
         body.overrides = {
           adset: {
-            targeting: {
-              geo_locations: { countries: countryCodes },
-            },
+            targeting: { geo_locations: { countries: countryCodes } },
           },
         }
+      }
+
+      if (p.materials && p.materials.length > 0) {
+        body.materials = p.materials
+      }
+      if (p.adsets && p.adsets.length > 0) {
+        body.adsets = p.adsets.map(a => ({
+          name: a.name,
+          daily_budget: a.daily_budget,
+          targeting: { geo_locations: { countries: a.countries } },
+          promoted_object: {
+            pixel_id: a.pixel_id || p.w2a?.pixelId || '',
+            custom_event_type: a.custom_event_type || p.w2a?.customEventType || '',
+          },
+          material_ids: a.material_ids,
+        }))
       }
     } else {
       body.advertiser_id = ''
@@ -87,7 +146,7 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
       body.location_ids = locId ? [locId] : []
     }
 
-    const res = await apiFetch<{ data: Record<string, unknown>; error?: string }>('/api/templates/launch', {
+    const res = await apiFetch<{ data: BatchLaunchResult; error?: string }>('/api/templates/launch', {
       method: 'POST',
       body: JSON.stringify(body),
     })
@@ -96,13 +155,33 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
       return { success: false, message: `模板投放失败: ${res.error}` }
     }
 
-    const d = res.data ?? {}
-    const campOk = (d.campaign as Record<string, unknown>)?.success
-    if (!campOk) {
-      const err = (d.campaign as Record<string, unknown>)?.error ?? '未知错误'
-      return { success: false, message: `模板投放失败: ${err}`, details: d }
+    const d = res.data
+    if (!d?.campaign?.success) {
+      const err = d?.campaign?.error ?? '未知错误'
+      return { success: false, message: `Campaign 创建失败: ${err}`, details: d }
     }
-    return { success: true, message: '模板投放创建成功', details: d }
+
+    const adsets = d.adsets ?? []
+    const totalAdsets = adsets.length
+    const okAdsets = adsets.filter(a => a.success).length
+    const totalAds = adsets.reduce((s, a) => s + (a.ads?.length ?? 0), 0)
+    const okAds = adsets.reduce((s, a) => s + (a.ads?.filter(ad => ad.success).length ?? 0), 0)
+
+    if (okAdsets === 0 && totalAdsets > 0) {
+      return { success: false, message: `所有 AdSet 创建失败 (${totalAdsets} 个)`, details: d }
+    }
+    if (okAdsets < totalAdsets || okAds < totalAds) {
+      return {
+        success: true,
+        message: `部分创建成功: AdSet ${okAdsets}/${totalAdsets}, Ad ${okAds}/${totalAds}`,
+        details: d,
+      }
+    }
+    return {
+      success: true,
+      message: `创建成功: ${okAdsets} 个 AdSet, ${okAds} 个 Ad`,
+      details: d,
+    }
   } catch (e) {
     return { success: false, message: `模板投放失败: ${(e as Error).message}` }
   }
@@ -129,104 +208,17 @@ function _buildW2aOverrides(p: CreateAdsParams): Record<string, unknown> {
       description: w.description,
       call_to_action: w.callToAction || 'LEARN_MORE',
       link: w.landingPageUrl,
-      image_hash: w.imageHash || '',
-      video_id: w.videoId || '',
     },
   }
 }
 
-// ─── TikTok 空白创建：Campaign → AdGroup → Ad ───────────
+// ─── 素材名 → Ad 名称工具 ────────────────────────────────
 
-async function createTikTok(p: CreateAdsParams): Promise<CreateResult> {
-  const steps: Record<string, unknown> = {}
-  try {
-    const camp = await apiFetch<{ data: Record<string, unknown> }>('/api/campaigns/', {
-      method: 'POST',
-      body: JSON.stringify({
-        campaign_name: p.campaignName,
-        objective_type: 'APP_PROMOTION',
-        budget_mode: p.budget ? 'BUDGET_MODE_DAY' : 'BUDGET_MODE_INFINITE',
-        budget: p.budget || undefined,
-      }),
-    })
-    steps.campaign = camp
-    const cid = (camp.data as Record<string, unknown>)?.campaign_id
-      ?? ((camp.data as Record<string, unknown>)?.campaign_ids as string[] | undefined)?.[0]
-    if (!cid) {
-      return { success: false, message: 'Campaign 已创建但未返回 ID，请在 TikTok 后台确认', details: steps }
-    }
+const _ILLEGAL_CHARS = /[<>:"/\\|?*\x00-\x1f]/g
+const _MAX_AD_NAME_LEN = 200
 
-    const locId = TIKTOK_LOCATION_IDS[p.country]
-    const adg = await apiFetch<{ data: Record<string, unknown> }>('/api/adgroups/', {
-      method: 'POST',
-      body: JSON.stringify({
-        campaign_id: cid,
-        adgroup_name: `${p.campaignName}_adgroup`,
-        budget: p.budget || 50,
-        location_ids: locId ? [locId] : [],
-      }),
-    })
-    steps.adgroup = adg
-    const agid = (adg.data as Record<string, unknown>)?.adgroup_id
-      ?? ((adg.data as Record<string, unknown>)?.adgroup_ids as string[] | undefined)?.[0]
-    if (!agid) {
-      return { success: true, message: 'Campaign + AdGroup 创建成功（Ad 跳过：未返回 AdGroup ID）', details: steps }
-    }
-
-    // TODO: 接入素材选择后，传入 video_id / image_ids
-    const ad = await apiFetch<{ data: Record<string, unknown> }>('/api/ads/', {
-      method: 'POST',
-      body: JSON.stringify({
-        adgroup_id: agid,
-        ad_name: `${p.campaignName}_ad`,
-      }),
-    })
-    steps.ad = ad
-
-    return { success: true, message: 'TikTok 广告创建成功（Campaign → AdGroup → Ad）', details: steps }
-  } catch (e) {
-    return { success: false, message: `TikTok 创建失败: ${(e as Error).message}`, details: steps }
-  }
-}
-
-// ─── Meta 空白创建：Campaign → AdSet ─────────────────────
-
-async function createMeta(p: CreateAdsParams): Promise<CreateResult> {
-  const steps: Record<string, unknown> = {}
-  try {
-    const camp = await apiFetch<{ data: Record<string, unknown> }>('/api/meta/campaigns/', {
-      method: 'POST',
-      body: JSON.stringify({
-        name: p.campaignName,
-        objective: 'OUTCOME_APP_PROMOTION',
-        status: 'PAUSED',
-        special_ad_categories: [],
-        daily_budget: Math.round((p.budget || 50) * 100),
-      }),
-    })
-    steps.campaign = camp
-    const cid = (camp.data as Record<string, unknown>)?.id
-    if (!cid) {
-      return { success: true, message: 'Meta Campaign 创建请求已发送（未返回 ID，跳过后续步骤）', details: steps }
-    }
-
-    // TODO: 完善 targeting、optimization_goal 等配置
-    const adset = await apiFetch<{ data: Record<string, unknown> }>('/api/meta/adsets/', {
-      method: 'POST',
-      body: JSON.stringify({
-        name: `${p.campaignName}_adset`,
-        campaign_id: cid,
-        status: 'PAUSED',
-        daily_budget: Math.round((p.budget || 50) * 100),
-        billing_event: 'IMPRESSIONS',
-        optimization_goal: 'APP_INSTALLS',
-        targeting: { geo_locations: { countries: [p.country] } },
-      }),
-    })
-    steps.adset = adset
-
-    return { success: true, message: 'Meta Campaign + AdSet 创建成功（Ad 需绑定素材，暂跳过）', details: steps }
-  } catch (e) {
-    return { success: false, message: `Meta 创建失败: ${(e as Error).message}`, details: steps }
-  }
+export function fileNameToAdName(fileName: string): string {
+  const dotIdx = fileName.lastIndexOf('.')
+  const base = dotIdx > 0 ? fileName.slice(0, dotIdx) : fileName
+  return base.replace(_ILLEGAL_CHARS, '_').trim().slice(0, _MAX_AD_NAME_LEN) || 'ad'
 }

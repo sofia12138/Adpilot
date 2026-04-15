@@ -13,6 +13,7 @@ export interface UploadVideoResult {
   size?: number; upload_time_ms?: number; error?: string
   stage?: string; upload_mode?: string; retry_count?: number
   meta_response?: string
+  picture_url?: string
 }
 
 const ALLOWED_IMAGE_EXT = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']

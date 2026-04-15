@@ -382,15 +382,8 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
 
     budget = float(payload.get("budget", 0))
     overrides = payload.get("overrides", {})
-
-    results: dict = {
-        "platform": "meta",
-        "template_type": template_type,
-        "ad_account_id": ad_account_id,
-        "campaign": None,
-        "adset": None,
-        "ad": None,
-    }
+    materials: list[dict] = payload.get("materials", [])
+    adsets_input: list[dict] = payload.get("adsets", [])
 
     tpl_campaign = _deep_merge(tpl.get("campaign", {}), overrides.get("campaign", {}))
     tpl_adset = _deep_merge(tpl.get("adset", {}), overrides.get("adset", {}))
@@ -398,102 +391,124 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
     tpl_tracking = _deep_merge(tpl.get("tracking", {}), overrides.get("tracking", {}))
     tpl_ad = _deep_merge(tpl.get("ad", {}), overrides.get("ad", {}))
 
-    # tracking.landing_page_url → creative.link 自动回填
     landing_url = tpl_tracking.get("landing_page_url", "")
     if landing_url and not tpl_creative.get("link"):
         tpl_creative["link"] = landing_url
 
-    # ── web_to_app 必填校验 ──
+    # ── 兼容旧结构：无 materials/adsets 时自动转换 ──
+    if not materials and not adsets_input:
+        image_hash = tpl_creative.get("image_hash", "")
+        video_id = tpl_creative.get("video_id", "")
+        if image_hash or video_id:
+            mat_type = "video" if video_id else "image"
+            materials = [{
+                "id": "mat_legacy",
+                "type": mat_type,
+                "image_hash": image_hash,
+                "video_id": video_id,
+                "original_name": f"{campaign_name}_ad",
+                "ad_name": f"{campaign_name}_ad",
+            }]
+        ov_adset = overrides.get("adset", {})
+        targeting = ov_adset.get("targeting") or tpl_adset.get("targeting", {"geo_locations": {"countries": ["US"]}})
+        po = ov_adset.get("promoted_object") or tpl_adset.get("promoted_object", {})
+        daily_b = ov_adset.get("daily_budget") or tpl_adset.get("daily_budget", 5000)
+        if budget:
+            daily_b = int(budget * 100)
+        adsets_input = [{
+            "name": f"{campaign_name}",
+            "daily_budget": daily_b,
+            "targeting": targeting,
+            "promoted_object": po,
+            "material_ids": [m["id"] for m in materials],
+        }]
+
+    # ── 校验 ──
+    if not materials:
+        return {"error": "至少需要 1 个素材 (materials)"}
+    if len(materials) > 20:
+        return {"error": f"素材总数不能超过 20 个，当前 {len(materials)}"}
+    if not adsets_input:
+        return {"error": "至少需要 1 个 adset"}
+
+    mat_map = {m["id"]: m for m in materials}
+    for m in materials:
+        if not m.get("image_hash") and not m.get("video_id"):
+            return {"error": f"素材 {m.get('original_name', m.get('id'))} 缺少 image_hash 或 video_id"}
+        if m.get("video_id") and not m.get("image_hash") and not m.get("picture_url") and m.get("id") != "mat_legacy":
+            return {"error": f"视频素材 {m.get('original_name', m.get('id'))} 缺少封面图 (image_hash 或 picture_url)，"
+                             f"Meta 要求视频广告必须提供封面图"}
+
+    for i, a in enumerate(adsets_input):
+        if not a.get("material_ids"):
+            return {"error": f"adset #{i+1} ({a.get('name', '')}) 没有分配素材"}
+        for mid in a["material_ids"]:
+            if mid not in mat_map:
+                return {"error": f"adset #{i+1} 引用了不存在的素材 ID: {mid}"}
+
     if template_type == "web_to_app":
         missing = []
         if not tpl_creative.get("page_id"):
-            missing.append("creative.page_id")
+            missing.append("page_id")
         if not tpl_creative.get("link"):
-            missing.append("creative.link (或 tracking.landing_page_url)")
+            missing.append("link")
         if not tpl_creative.get("primary_text"):
-            missing.append("creative.primary_text")
+            missing.append("primary_text")
         if not tpl_creative.get("headline"):
-            missing.append("creative.headline")
-        if not tpl_creative.get("image_hash") and not tpl_creative.get("video_id"):
-            missing.append("creative.image_hash 或 creative.video_id (至少一个)")
+            missing.append("headline")
         if missing:
             return {"error": f"Web-to-App 模板缺少必填字段: {', '.join(missing)}"}
 
-    # promoted_object pixel/event 校验
-    po = tpl_adset.get("promoted_object", {})
-    po_pixel = po.get("pixel_id", "")
-    po_event = po.get("custom_event_type", "")
-    opt_goal = tpl_adset.get("optimization_goal", "")
+    results: dict = {
+        "platform": "meta",
+        "template_type": template_type,
+        "ad_account_id": ad_account_id,
+        "campaign": None,
+        "adsets": [],
+    }
 
-    is_conversion = opt_goal in ("OFFSITE_CONVERSIONS", "APP_EVENTS")
-    if is_conversion and (not po_pixel or not po_event):
-        return {
-            "error": f"optimization_goal={opt_goal} 要求 pixel_id 和 custom_event_type 必填，"
-                     f"当前 pixel_id={'有' if po_pixel else '空'}, custom_event_type={'有' if po_event else '空'}"
-        }
-    if po_pixel and not po_event:
-        return {"error": "pixel_id 已填写但 custom_event_type 为空，两者必须成对提供"}
-    if po_event and not po_pixel:
-        return {"error": "custom_event_type 已填写但 pixel_id 为空，两者必须成对提供"}
-
-    # 获取该账户的专属 token（与 meta_assets 保持一致）
+    # 获取账户专属 token
     _acct_row = biz_account_repository.get_by_platform_account("meta", ad_account_id)
     _acct_token = (_acct_row or {}).get("access_token", "")
-    if _acct_token:
-        _client = MetaClient(access_token=_acct_token)
-        logger.info(f"[launch-meta] 使用账户专属 token (account={ad_account_id})")
-    else:
-        _client = MetaClient()
-        logger.info(f"[launch-meta] 使用全局默认 token (account={ad_account_id}, 无专属 token)")
+    _client = MetaClient(access_token=_acct_token) if _acct_token else MetaClient()
+    logger.info(f"[launch-meta] token={'专属' if _acct_token else '全局默认'}  account={ad_account_id}  "
+                f"materials={len(materials)}  adsets={len(adsets_input)}")
 
     svc_campaign = MetaCampaignService(ad_account_id, client=_client)
     svc_adset = MetaAdSetService(ad_account_id, client=_client)
     svc_ad = MetaAdService(ad_account_id, client=_client)
 
-    # ── Step 1: Campaign (ABO — 不在 campaign 层设预算) ──
-    step = "campaign"
-    campaign_payload: dict = {}
+    # ══ Step 1: Campaign ══
+    campaign_payload = {
+        "name": campaign_name,
+        "objective": tpl_campaign.get("objective", "OUTCOME_TRAFFIC"),
+        "status": tpl_campaign.get("status", "PAUSED"),
+        "special_ad_categories": json.dumps(tpl_campaign.get("special_ad_categories", [])),
+        "is_adset_budget_sharing_enabled": str(
+            tpl_campaign.get("is_adset_budget_sharing_enabled", False)
+        ).lower(),
+    }
+    safe_cp = {k: v for k, v in campaign_payload.items() if k != "access_token"}
+    logger.info(f"[launch-meta] step=campaign  payload={safe_cp}")
     try:
-        campaign_payload = {
-            "name": campaign_name,
-            "objective": tpl_campaign.get("objective", "OUTCOME_TRAFFIC"),
-            "status": tpl_campaign.get("status", "PAUSED"),
-            "special_ad_categories": json.dumps(
-                tpl_campaign.get("special_ad_categories", [])
-            ),
-            "is_adset_budget_sharing_enabled": str(
-                tpl_campaign.get("is_adset_budget_sharing_enabled", False)
-            ).lower(),
-        }
-
-        safe_cp = {k: v for k, v in campaign_payload.items() if k != "access_token"}
-        logger.info(
-            f"[launch-meta] step={step}  type={template_type}  ad_account={ad_account_id}  "
-            f"payload={safe_cp}"
-        )
         campaign_data = await svc_campaign.create(campaign_payload)
         campaign_id = campaign_data.get("id", "")
         results["campaign"] = {"success": True, "campaign_id": campaign_id}
         logger.info(f"[launch-meta] Campaign 创建成功: {campaign_id}")
     except Exception as e:
-        logger.error(
-            f"[launch-meta] Campaign 创建失败: {e}\n"
-            f"  payload_sent={safe_cp}"
-        )
-        results["campaign"] = {"success": False, "error": str(e), "step": step, "payload_sent": safe_cp}
+        logger.error(f"[launch-meta] Campaign 创建失败: {e}  payload={safe_cp}")
+        results["campaign"] = {"success": False, "error": str(e), "payload_sent": safe_cp}
         return {"data": results}
 
-    # ── Step 2: AdSet (ABO — 预算在 adset 层) ──
-    step = "adset"
-    adset_payload: dict = {}
-    try:
-        adset_name = overrides.get("adset", {}).get("name") or f"{campaign_name}_adset"
-        targeting = tpl_adset.get("targeting", {"geo_locations": {"countries": ["US"]}})
+    # ══ Step 2+3: 遍历 adsets → 每个 adset 下创建 ads ══
+    for idx, adset_cfg in enumerate(adsets_input):
+        adset_name = adset_cfg.get("name") or f"{campaign_name}_{idx+1:02d}"
+        adset_targeting = adset_cfg.get("targeting") or tpl_adset.get("targeting", {"geo_locations": {"countries": ["US"]}})
+        adset_po = adset_cfg.get("promoted_object") or tpl_adset.get("promoted_object", {})
         opt_goal = tpl_adset.get("optimization_goal", "LANDING_PAGE_VIEWS")
+        daily_budget = int(adset_cfg.get("daily_budget") or tpl_adset.get("daily_budget", 5000))
 
-        daily_budget = int(tpl_adset.get("daily_budget", 5000))
-        if budget:
-            daily_budget = int(budget * 100)
+        adset_result: dict = {"adset_name": adset_name, "success": False, "ads": []}
 
         adset_payload = {
             "campaign_id": campaign_id,
@@ -503,74 +518,80 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
             "optimization_goal": opt_goal,
             "daily_budget": daily_budget,
             "bid_strategy": tpl_adset.get("bid_strategy", "LOWEST_COST_WITHOUT_CAP"),
-            "targeting": json.dumps(targeting),
+            "targeting": json.dumps(adset_targeting),
         }
-
-        po_valid = {k: v for k, v in po.items() if v}
+        po_valid = {k: v for k, v in adset_po.items() if v}
         if po_valid:
             adset_payload["promoted_object"] = json.dumps(po_valid)
-        elif opt_goal in ("APP_INSTALLS", "APP_EVENTS", "OFFSITE_CONVERSIONS"):
-            results["adset"] = {
-                "success": False,
-                "error": f"optimization_goal={opt_goal} 需要 promoted_object（至少包含 application_id），"
-                         f"请通过 overrides.adset.promoted_object 传入",
-                "step": step,
-            }
-            logger.error(f"[launch-meta] AdSet 校验失败: promoted_object 为空, opt_goal={opt_goal}")
-            return {"data": results}
 
-        if tpl_adset.get("start_time"):
-            adset_payload["start_time"] = tpl_adset["start_time"]
-        if tpl_adset.get("end_time"):
-            adset_payload["end_time"] = tpl_adset["end_time"]
+        safe_as = {k: v for k, v in adset_payload.items() if k != "access_token"}
+        logger.info(f"[launch-meta] step=adset#{idx+1}  name={adset_name}  budget={daily_budget}  payload={safe_as}")
 
-        safe_adset = {k: v for k, v in adset_payload.items() if k != "access_token"}
-        logger.info(
-            f"[launch-meta] step={step}  type={template_type}  campaign_id={campaign_id}  "
-            f"payload={safe_adset}"
-        )
-        adset_data = await svc_adset.create(adset_payload)
-        adset_id = adset_data.get("id", "")
-        results["adset"] = {"success": True, "adset_id": adset_id}
-        logger.info(f"[launch-meta] AdSet 创建成功: {adset_id}")
-    except Exception as e:
-        logger.error(
-            f"[launch-meta] AdSet 创建失败: {e}\n"
-            f"  payload_sent={safe_adset}"
-        )
-        results["adset"] = {"success": False, "error": str(e), "step": step, "payload_sent": safe_adset}
-        return {"data": results}
+        try:
+            adset_data = await svc_adset.create(adset_payload)
+            adset_id = adset_data.get("id", "")
+            adset_result["success"] = True
+            adset_result["adset_id"] = adset_id
+            logger.info(f"[launch-meta] AdSet#{idx+1} 创建成功: {adset_id}")
+        except Exception as e:
+            logger.error(f"[launch-meta] AdSet#{idx+1} 创建失败: {e}  payload={safe_as}")
+            adset_result["error"] = str(e)
+            adset_result["payload_sent"] = safe_as
+            results["adsets"].append(adset_result)
+            continue
 
-    # ── Step 3: Ad (with inline creative) ──
-    step = "ad"
-    ad_payload: dict = {}
-    try:
-        ad_name = overrides.get("ad", {}).get("name") or f"{campaign_name}_ad"
-        page_id = tpl_creative.get("page_id", "")
-        video_id = tpl_creative.get("video_id", "")
-        image_hash = tpl_creative.get("image_hash", "")
-        link = tpl_creative.get("link", "")
+        # ── 为该 adset 创建 ads ──
+        mat_ids = adset_cfg.get("material_ids", [])
+        used_names: dict[str, int] = {}
+        for mat_id in mat_ids:
+            mat = mat_map.get(mat_id)
+            if not mat:
+                adset_result["ads"].append({"success": False, "material_id": mat_id, "error": "素材不存在"})
+                continue
 
-        creative_spec: dict = {"object_story_spec": {}}
-        if page_id:
-            story_spec: dict = {"page_id": page_id}
+            ad_name = mat.get("ad_name", mat.get("original_name", mat_id))
+            if len(adsets_input) > 1:
+                ad_name = f"{ad_name}__{idx+1:02d}"
+            if ad_name in used_names:
+                used_names[ad_name] += 1
+                ad_name = f"{ad_name}_{used_names[ad_name]}"
+            else:
+                used_names[ad_name] = 1
 
+            mat_video = mat.get("video_id", "")
+            mat_image = mat.get("image_hash", "")
+            page_id = tpl_creative.get("page_id", "")
+            link = tpl_creative.get("link", "")
             cta_block = {
                 "type": tpl_creative.get("call_to_action", "LEARN_MORE"),
                 "value": {"link": link},
             }
 
-            if video_id:
-                story_spec["video_data"] = {
-                    "video_id": video_id,
+            mat_picture_url = mat.get("picture_url", "")
+
+            story_spec: dict = {"page_id": page_id} if page_id else {}
+            if mat_video:
+                vdata: dict = {
+                    "video_id": mat_video,
                     "message": tpl_creative.get("primary_text", ""),
                     "title": tpl_creative.get("headline", ""),
                     "link_description": tpl_creative.get("description", ""),
                     "call_to_action": cta_block,
                 }
-            elif image_hash:
+                if mat_image:
+                    vdata["image_hash"] = mat_image
+                elif mat_picture_url:
+                    vdata["image_url"] = mat_picture_url
+                    logger.info(f"[launch-meta] 使用自动封面 URL: ad_name={ad_name}")
+                else:
+                    logger.warning(
+                        f"[launch-meta] 视频素材无封面图: ad_name={ad_name}, "
+                        f"video_id={mat_video}, material={mat.get('original_name')}"
+                    )
+                story_spec["video_data"] = vdata
+            elif mat_image:
                 story_spec["link_data"] = {
-                    "image_hash": image_hash,
+                    "image_hash": mat_image,
                     "message": tpl_creative.get("primary_text", ""),
                     "name": tpl_creative.get("headline", ""),
                     "description": tpl_creative.get("description", ""),
@@ -578,33 +599,38 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
                     "call_to_action": cta_block,
                 }
 
-            creative_spec["object_story_spec"] = story_spec
+            ad_payload = {
+                "name": ad_name,
+                "adset_id": adset_id,
+                "status": tpl_ad.get("status", "PAUSED"),
+                "creative": json.dumps({"object_story_spec": story_spec}),
+            }
 
-        ad_payload = {
-            "name": ad_name,
-            "adset_id": adset_id,
-            "status": tpl_ad.get("status", "PAUSED"),
-            "creative": json.dumps(creative_spec),
-        }
+            ad_result: dict = {"ad_name": ad_name, "material_name": mat.get("original_name", ""), "material_type": mat.get("type", "")}
+            logger.info(
+                f"[launch-meta] step=ad  adset={adset_id}  adset_name={adset_name}  "
+                f"ad_name={ad_name}  type={mat.get('type')}  "
+                f"video_id={mat_video or 'N'}  image_hash={mat_image[:12] + '...' if mat_image else 'N'}"
+            )
+            try:
+                ad_data = await svc_ad.create(ad_payload)
+                ad_result["success"] = True
+                ad_result["ad_id"] = ad_data.get("id", "")
+                logger.info(f"[launch-meta] Ad 创建成功: {ad_result['ad_id']}  name={ad_name}")
+            except Exception as e:
+                logger.error(
+                    f"[launch-meta] Ad 创建失败: {e}\n"
+                    f"  adset_name={adset_name}, adset_id={adset_id}\n"
+                    f"  material_name={mat.get('original_name')}, material_type={mat.get('type')}\n"
+                    f"  video_id={mat_video}, image_hash={mat_image}\n"
+                    f"  story_spec_keys={list(story_spec.keys())}"
+                )
+                ad_result["success"] = False
+                ad_result["error"] = str(e)
 
-        # tracking 字段透传到 ad 层
-        tracking_url = tpl_tracking.get("landing_page_url", "")
-        if tracking_url:
-            ad_payload["tracking_specs"] = json.dumps([{"action.type": ["offsite_conversion"], "fb_pixel": [po_pixel]}]) if po_pixel else ""
+            adset_result["ads"].append(ad_result)
 
-        logger.info(
-            f"[launch-meta] step={step}  type={template_type}  adset_id={adset_id}  ad_name={ad_name}  "
-            f"has_page_id={bool(page_id)}  has_video={bool(video_id)}  has_image={bool(image_hash)}  link={link[:80] if link else ''}"
-        )
-        ad_data = await svc_ad.create(ad_payload)
-        ext_ad_id = ad_data.get("id", "")
-        results["ad"] = {"success": True, "ad_id": ext_ad_id}
-        logger.info(f"[launch-meta] Ad 创建成功: {ext_ad_id}")
-    except Exception as e:
-        logger.error(f"[launch-meta] Ad 创建失败: {e}")
-        safe_ap = {k: v for k, v in ad_payload.items() if k != "access_token"}
-        results["ad"] = {"success": False, "error": str(e), "step": step, "payload_sent": safe_ap}
-        return {"data": results}
+        results["adsets"].append(adset_result)
 
     return {"data": results}
 
@@ -809,30 +835,55 @@ def _diff_fields(old: dict, new: dict, prefix: str = "") -> list[str]:
 
 
 def _log_launch(user, tpl_id: str, platform: str, payload: dict, resp: dict):
-    """记录模板投放操作日志。"""
+    """记录模板投放操作日志（兼容新批量结构与旧单 ad 结构）。"""
     data = resp.get("data", {})
     error = resp.get("error")
     template_type = data.get("template_type", "") if isinstance(data, dict) else ""
 
     campaign_name = payload.get("campaign_name", "")
     ad_account_id = payload.get("ad_account_id", "")
-    budget = payload.get("budget", "")
+
+    materials = payload.get("materials", [])
+    adsets_input = payload.get("adsets", [])
 
     if error:
         status = "fail"
         detail = f"template={tpl_id} | platform={platform} | error: {error}"
+    elif isinstance(data.get("adsets"), list):
+        # 新批量结构
+        camp = data.get("campaign", {})
+        camp_ok = camp.get("success", False)
+        adsets_results = data.get("adsets", [])
+        total_ads = sum(len(a.get("ads", [])) for a in adsets_results)
+        ok_adsets = sum(1 for a in adsets_results if a.get("success"))
+        ok_ads = sum(1 for a in adsets_results for ad in a.get("ads", []) if ad.get("success"))
+
+        if not camp_ok:
+            status = "fail"
+            detail = f"template={tpl_id} | campaign创建失败: {camp.get('error', 'unknown')}"
+        elif ok_adsets == 0:
+            status = "fail"
+            detail = f"template={tpl_id} | 所有adset创建失败 ({len(adsets_results)} 个)"
+        elif ok_adsets < len(adsets_results) or ok_ads < total_ads:
+            status = "partial"
+            detail = (f"template={tpl_id} | campaign={camp.get('campaign_id', '')} | "
+                      f"adsets: {ok_adsets}/{len(adsets_results)} | ads: {ok_ads}/{total_ads}")
+        else:
+            status = "success"
+            detail = (f"template={tpl_id} | campaign={camp.get('campaign_id', '')} | "
+                      f"adsets: {ok_adsets} | ads: {ok_ads}")
     else:
+        # 旧单 ad 结构（TikTok 等）
         failed_step = ""
         for step_name in ("campaign", "adset", "adgroup", "ad"):
             step_data = data.get(step_name)
             if isinstance(step_data, dict) and not step_data.get("success"):
                 failed_step = step_name
                 break
-
         if failed_step:
             step_err = data.get(failed_step, {}).get("error", "unknown")
             status = "fail"
-            detail = f"template={tpl_id} | platform={platform} | type={template_type} | failed_step={failed_step} | error: {step_err}"
+            detail = f"template={tpl_id} | failed_step={failed_step} | error: {step_err}"
         else:
             status = "success"
             ids = []
@@ -842,7 +893,7 @@ def _log_launch(user, tpl_id: str, platform: str, payload: dict, resp: dict):
                     for id_key in ("campaign_id", "adset_id", "adgroup_id", "ad_id"):
                         if v.get(id_key):
                             ids.append(f"{k}={v[id_key]}")
-            detail = f"template={tpl_id} | platform={platform} | type={template_type} | {', '.join(ids)}"
+            detail = f"template={tpl_id} | {', '.join(ids)}"
 
     if ad_account_id:
         detail += f" | account={ad_account_id}"
@@ -852,31 +903,11 @@ def _log_launch(user, tpl_id: str, platform: str, payload: dict, resp: dict):
         "template_type": template_type,
         "platform": platform,
         "campaign_name": campaign_name,
-        "budget": budget,
+        "materials_count": len(materials),
+        "adsets_count": len(adsets_input),
     }
     if ad_account_id:
         after_summary["ad_account_id"] = ad_account_id
-
-    overrides = payload.get("overrides", {})
-    ov_campaign = overrides.get("campaign", {})
-    ov_creative = overrides.get("creative", {})
-    ov_adset = overrides.get("adset", {})
-    ov_po = ov_adset.get("promoted_object", {})
-    after_summary["campaign_objective"] = ov_campaign.get("objective", "")
-    after_summary["optimization_goal"] = ov_adset.get("optimization_goal", "")
-    after_summary["creative_link"] = ov_creative.get("link", "")[:100]
-    after_summary["has_image_hash"] = bool(ov_creative.get("image_hash"))
-    after_summary["has_video_id"] = bool(ov_creative.get("video_id"))
-    after_summary["has_pixel_id"] = bool(ov_po.get("pixel_id"))
-    after_summary["pixel_id"] = ov_po.get("pixel_id", "")
-    after_summary["custom_event_type"] = ov_po.get("custom_event_type", "")
-
-    if status == "fail":
-        for step_key in ("campaign", "adset", "adgroup", "ad"):
-            step_data = data.get(step_key, {})
-            if isinstance(step_data, dict) and step_data.get("payload_sent"):
-                after_summary["failed_payload"] = step_data["payload_sent"]
-                break
 
     log_operation(
         username=user.username,

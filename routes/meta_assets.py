@@ -402,6 +402,37 @@ async def _chunked_upload_to_meta(
             "upload_mode": "chunked", "retry_count": total_retries}
 
 
+async def _poll_video_thumbnail(video_id: str, token: str, max_attempts: int = 3, delay: float = 3.0) -> str | None:
+    """上传视频后轮询获取 Meta 自动生成的封面图 URL。返回 URL 或 None。"""
+    import httpx
+    url = f"https://graph.facebook.com/v21.0/{video_id}"
+    params = {"fields": "picture,status", "access_token": token}
+
+    async with httpx.AsyncClient(timeout=15.0) as http:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await http.get(url, params=params)
+                data = resp.json()
+                pic = data.get("picture")
+                status = data.get("status", {})
+                processing = status.get("video_status", "") if isinstance(status, dict) else ""
+
+                if pic:
+                    logger.info(f"[meta-assets] 视频封面获取成功 (attempt={attempt}): video_id={video_id}, url={pic[:80]}")
+                    return pic
+
+                logger.info(f"[meta-assets] 视频封面尚未就绪 (attempt={attempt}/{max_attempts}): "
+                            f"video_id={video_id}, status={processing}")
+            except Exception as e:
+                logger.warning(f"[meta-assets] 获取视频封面异常 (attempt={attempt}): {e}")
+
+            if attempt < max_attempts:
+                await asyncio.sleep(delay)
+
+    logger.warning(f"[meta-assets] 视频封面获取超时: video_id={video_id}, 已轮询 {max_attempts} 次")
+    return None
+
+
 @router.post("/upload-video")
 async def upload_video(
     request: Request,
@@ -514,10 +545,15 @@ async def upload_video(
             f"retry_count={retry_count}, chunks={result.get('chunks', 0)}, "
             f"size={size_mb:.1f}MB, elapsed={elapsed}ms, fallback={fallback_used}"
         )
+
+        picture_url = await _poll_video_thumbnail(video_id, token)
+
+        elapsed = int((time.time() - t0) * 1000)
         return JSONResponse(content={
             "success": True, "video_id": video_id, "name": filename,
             "upload_mode": upload_mode, "retry_count": retry_count,
             "size": file_size, "upload_time_ms": elapsed,
+            "picture_url": picture_url,
         })
 
     except Exception as e:
