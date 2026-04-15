@@ -26,6 +26,9 @@ import DramaOverviewPage from '@/pages/DramaOverviewPage'
 import DesignerPerformancePage from '@/pages/DesignerPerformancePage'
 import OptimizerPerformancePage from '@/pages/OptimizerPerformancePage'
 import OptimizerDirectoryPage from '@/pages/OptimizerDirectoryPage'
+import AssetLandingPagesPage from '@/pages/AssetLandingPagesPage'
+import AssetCopyPacksPage from '@/pages/AssetCopyPacksPage'
+import AssetRegionGroupsPage from '@/pages/AssetRegionGroupsPage'
 
 function G({ panelKey, children }: { panelKey: string; children: React.ReactNode }) {
   return <AuthGuard panelKey={panelKey}>{children}</AuthGuard>
@@ -61,6 +64,9 @@ export const router = createBrowserRouter([
       { path: 'insight-config',    element: <G panelKey="insight_config"><InsightConfigPage /></G> },
       { path: 'oplog',              element: <G panelKey="oplog"><OplogPage /></G> },
       { path: 'optimizer-directory', element: <G panelKey="optimizer_directory"><OptimizerDirectoryPage /></G> },
+      { path: 'assets/landing-pages', element: <G panelKey="asset_landing_pages"><AssetLandingPagesPage /></G> },
+      { path: 'assets/copy-packs',    element: <G panelKey="asset_copy_packs"><AssetCopyPacksPage /></G> },
+      { path: 'assets/region-groups', element: <G panelKey="asset_region_groups"><AssetRegionGroupsPage /></G> },
     ],
   },
 ])

@@ -486,6 +486,74 @@ _APP_TABLES_SQL = [
         INDEX idx_created (created_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    # ── 广告资产库 ──
+    """
+    CREATE TABLE IF NOT EXISTS asset_landing_pages (
+        id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+        org_id        VARCHAR(100) NOT NULL DEFAULT '',
+        name          VARCHAR(255) NOT NULL DEFAULT '',
+        landing_page_url TEXT NOT NULL,
+        product_name  VARCHAR(255) NOT NULL DEFAULT '',
+        channel       VARCHAR(100) NOT NULL DEFAULT '',
+        language      VARCHAR(50)  NOT NULL DEFAULT '',
+        region_tags   JSON         DEFAULT NULL,
+        remark        TEXT         DEFAULT NULL,
+        status        VARCHAR(20)  NOT NULL DEFAULT 'active',
+        usage_count   INT          NOT NULL DEFAULT 0,
+        last_used_at  DATETIME     DEFAULT NULL,
+        created_by    VARCHAR(100) NOT NULL DEFAULT '',
+        created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_org (org_id),
+        INDEX idx_status (status),
+        INDEX idx_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS asset_copy_packs (
+        id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+        org_id        VARCHAR(100) NOT NULL DEFAULT '',
+        name          VARCHAR(255) NOT NULL DEFAULT '',
+        primary_text  TEXT         DEFAULT NULL,
+        headline      VARCHAR(500) NOT NULL DEFAULT '',
+        description   TEXT         DEFAULT NULL,
+        language      VARCHAR(50)  NOT NULL DEFAULT '',
+        product_name  VARCHAR(255) NOT NULL DEFAULT '',
+        channel       VARCHAR(100) NOT NULL DEFAULT '',
+        country_tags  JSON         DEFAULT NULL,
+        theme_tags    JSON         DEFAULT NULL,
+        remark        TEXT         DEFAULT NULL,
+        status        VARCHAR(20)  NOT NULL DEFAULT 'active',
+        usage_count   INT          NOT NULL DEFAULT 0,
+        last_used_at  DATETIME     DEFAULT NULL,
+        created_by    VARCHAR(100) NOT NULL DEFAULT '',
+        created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_org (org_id),
+        INDEX idx_status (status),
+        INDEX idx_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS asset_region_groups (
+        id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+        org_id        VARCHAR(100) NOT NULL DEFAULT '',
+        name          VARCHAR(255) NOT NULL DEFAULT '',
+        country_codes JSON         NOT NULL,
+        country_count INT          NOT NULL DEFAULT 0,
+        language_hint VARCHAR(100) NOT NULL DEFAULT '',
+        remark        TEXT         DEFAULT NULL,
+        status        VARCHAR(20)  NOT NULL DEFAULT 'active',
+        usage_count   INT          NOT NULL DEFAULT 0,
+        last_used_at  DATETIME     DEFAULT NULL,
+        created_by    VARCHAR(100) NOT NULL DEFAULT '',
+        created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_org (org_id),
+        INDEX idx_status (status),
+        INDEX idx_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 
@@ -516,6 +584,10 @@ _PANEL_SEED = [
     ("insight_config",         "ROI阈值配置",     "系统管理",   "/insight-config",          63),
     ("oplog",                  "操作日志",        "系统管理",   "/oplog",                   64),
     ("optimizer_directory",    "优化师名单配置",  "系统管理",   "/optimizer-directory",     65),
+    # 广告资产库
+    ("asset_landing_pages",    "落地页库",        "广告资产库", "/assets/landing-pages",    70),
+    ("asset_copy_packs",       "文案库",          "广告资产库", "/assets/copy-packs",       71),
+    ("asset_region_groups",    "地区组库",        "广告资产库", "/assets/region-groups",    72),
 ]
 
 _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
@@ -524,7 +596,8 @@ _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
     "optimizer":   ["dashboard", "ads_data", "tiktok_console", "meta_console", "ad_create",
                     "template_mgmt", "creatives", "creative_analysis", "optimizer_performance",
                     "optimizer_directory", "designer_performance", "drama_analysis",
-                    "returned_conversion", "oplog"],
+                    "returned_conversion", "oplog",
+                    "asset_landing_pages", "asset_copy_packs", "asset_region_groups"],
     "designer":    ["dashboard", "creatives", "creative_analysis", "designer_performance"],
     "analyst":     ["dashboard", "overview", "channel_analysis", "biz_analysis", "data_compare",
                     "creative_analysis", "returned_conversion", "drama_analysis", "designer_performance",

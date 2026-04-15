@@ -7,7 +7,14 @@ import { CountryMultiSelect } from '@/components/common/CountryMultiSelect'
 import {
   Send, Loader2, CheckCircle, AlertCircle,
   Image, Film, Trash2, Plus, Copy, ChevronDown, ChevronUp, Shield,
+  Package,
 } from 'lucide-react'
+import {
+  LandingPagePickerDialog,
+  CopyPackPickerDialog,
+  RegionGroupPickerDialog,
+} from '@/components/common/AssetPickerDialog'
+import type { LandingPageAsset, CopyPackAsset, RegionGroupAsset } from '@/services/ad-assets'
 import { useTemplates } from '@/hooks/use-templates'
 import {
   createAds,
@@ -136,6 +143,15 @@ export default function AdsCreatePage() {
   const [pixelsLoading, setPixelsLoading] = useState(false)
   const [pixelsError, setPixelsError] = useState('')
   const [pixelManual, setPixelManual] = useState(false)
+
+  // ── 资产库弹窗 & 引用追踪 ──
+  const [showLPPicker, setShowLPPicker] = useState(false)
+  const [showCopyPicker, setShowCopyPicker] = useState(false)
+  const [showRegionPicker, setShowRegionPicker] = useState<string | null>(null)
+
+  const [lpRef, setLpRef] = useState<{ id: number; name: string; snapshot: string } | null>(null)
+  const [copyRef, setCopyRef] = useState<{ id: number; name: string; primaryTextSnapshot: string; headlineSnapshot: string; descriptionSnapshot: string } | null>(null)
+  const [regionRefs, setRegionRefs] = useState<Record<string, { id: number; name: string; snapshot: string[] }>>({})
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -426,14 +442,20 @@ export default function AdsCreatePage() {
       ad_name: m.ad_name,
     }))
 
-    const adsetConfigs: AdSetConfig[] = adSets.map(a => ({
-      name: a.name,
-      daily_budget: Math.round(Number(a.daily_budget) * 100),
-      countries: a.countries,
-      pixel_id: a.pixel_id || w2a.pixelId,
-      custom_event_type: a.custom_event_type || w2a.customEventType,
-      material_ids: a.material_ids,
-    }))
+    const adsetConfigs: AdSetConfig[] = adSets.map(a => {
+      const rRef = regionRefs[a.key]
+      return {
+        name: a.name,
+        daily_budget: Math.round(Number(a.daily_budget) * 100),
+        countries: a.countries,
+        pixel_id: a.pixel_id || w2a.pixelId,
+        custom_event_type: a.custom_event_type || w2a.customEventType,
+        material_ids: a.material_ids,
+        region_group_id: rRef?.id,
+        region_group_name: rRef?.name,
+        country_codes_snapshot: rRef?.snapshot,
+      }
+    })
 
     setSubmitting(true); setResult(null)
     const res = await createAds({
@@ -449,6 +471,16 @@ export default function AdsCreatePage() {
       w2a: isW2a ? w2a : undefined,
       materials: mats,
       adsets: adsetConfigs,
+      assetRefs: {
+        landing_page_asset_id: lpRef?.id,
+        landing_page_asset_name: lpRef?.name,
+        landing_page_url_snapshot: lpRef?.snapshot,
+        copy_asset_id: copyRef?.id,
+        copy_asset_name: copyRef?.name,
+        primary_text_snapshot: copyRef?.primaryTextSnapshot,
+        headline_snapshot: copyRef?.headlineSnapshot,
+        description_snapshot: copyRef?.descriptionSnapshot,
+      },
     })
     setSubmitting(false); setResult(res)
   }
@@ -542,15 +574,37 @@ export default function AdsCreatePage() {
                       </>
                     )}
                   </div>
-                  {/* URL */}
+                  {/* URL + 落地页库 */}
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Landing Page URL <span className="text-red-400">*</span></label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-medium text-gray-600">Landing Page URL <span className="text-red-400">*</span></label>
+                      <button type="button" onClick={() => setShowLPPicker(true)} className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1">
+                        <Package className="w-3 h-3" />从落地页库选择
+                      </button>
+                    </div>
                     <input type="url" value={w2a.landingPageUrl} onChange={e => setField('landingPageUrl', e.target.value)} placeholder="https://example.com/landing" className={inputCls} />
+                    {lpRef && (
+                      <p className="text-xs text-blue-400 mt-1">
+                        来源资产: {lpRef.name}
+                        <button type="button" className="text-gray-400 hover:text-red-400 ml-2" onClick={() => setLpRef(null)}>清除引用</button>
+                      </p>
+                    )}
                   </div>
-                  {/* Texts */}
+                  {/* Texts + 文案库 */}
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Primary Text <span className="text-red-400">*</span></label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-medium text-gray-600">Primary Text <span className="text-red-400">*</span></label>
+                      <button type="button" onClick={() => setShowCopyPicker(true)} className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1">
+                        <Package className="w-3 h-3" />从文案库选择
+                      </button>
+                    </div>
                     <textarea value={w2a.primaryText} onChange={e => setField('primaryText', e.target.value)} rows={2} placeholder="广告主文案" className={inputCls} />
+                    {copyRef && (
+                      <p className="text-xs text-blue-400 mt-1">
+                        来源文案: {copyRef.name}
+                        <button type="button" className="text-gray-400 hover:text-red-400 ml-2" onClick={() => setCopyRef(null)}>清除引用</button>
+                      </p>
+                    )}
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
@@ -754,9 +808,20 @@ export default function AdsCreatePage() {
                         </div>
 
                         <div>
-                          <label className="block text-xs font-medium text-gray-600 mb-1">投放国家 <span className="text-red-400">*</span></label>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="block text-xs font-medium text-gray-600">投放国家 <span className="text-red-400">*</span></label>
+                            <button type="button" onClick={() => setShowRegionPicker(adSet.key)} className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1">
+                              <Package className="w-3 h-3" />选择地区组
+                            </button>
+                          </div>
                           <CountryMultiSelect value={adSet.countries}
                             onChange={c => updateAdSet(adSet.key, { countries: c })} />
+                          {regionRefs[adSet.key] && (
+                            <p className="text-xs text-blue-400 mt-1">
+                              来源地区组: {regionRefs[adSet.key].name}
+                              <button type="button" className="text-gray-400 hover:text-red-400 ml-2" onClick={() => setRegionRefs(prev => { const n = { ...prev }; delete n[adSet.key]; return n })}>清除引用</button>
+                            </p>
+                          )}
                         </div>
 
                         {/* Pixel / Event per adset (for conversion templates) */}
@@ -906,6 +971,47 @@ export default function AdsCreatePage() {
           </button>
         </div>
       </form>
+
+      {/* ── 资产库弹窗 ── */}
+      <LandingPagePickerDialog
+        open={showLPPicker}
+        onClose={() => setShowLPPicker(false)}
+        onSelect={(item: LandingPageAsset) => {
+          setField('landingPageUrl', item.landing_page_url)
+          setLpRef({ id: item.id, name: item.name, snapshot: item.landing_page_url })
+        }}
+      />
+      <CopyPackPickerDialog
+        open={showCopyPicker}
+        onClose={() => setShowCopyPicker(false)}
+        onSelect={(item: CopyPackAsset, mode: 'all' | 'empty') => {
+          if (mode === 'all') {
+            setField('primaryText', item.primary_text || '')
+            setField('headline', item.headline || '')
+            setField('description', item.description || '')
+          } else {
+            if (!w2a.primaryText) setField('primaryText', item.primary_text || '')
+            if (!w2a.headline) setField('headline', item.headline || '')
+            if (!w2a.description) setField('description', item.description || '')
+          }
+          setCopyRef({
+            id: item.id, name: item.name,
+            primaryTextSnapshot: item.primary_text || '',
+            headlineSnapshot: item.headline || '',
+            descriptionSnapshot: item.description || '',
+          })
+        }}
+      />
+      <RegionGroupPickerDialog
+        open={!!showRegionPicker}
+        onClose={() => setShowRegionPicker(null)}
+        onSelect={(item: RegionGroupAsset) => {
+          if (showRegionPicker) {
+            updateAdSet(showRegionPicker, { countries: item.country_codes })
+            setRegionRefs(prev => ({ ...prev, [showRegionPicker]: { id: item.id, name: item.name, snapshot: [...item.country_codes] } }))
+          }
+        }}
+      />
     </div>
   )
 }

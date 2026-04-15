@@ -22,6 +22,9 @@ import {
   Film,
   UserCheck,
   BookUser,
+  Package,
+  Link2,
+  Globe,
 } from 'lucide-react'
 import type { MenuItem } from '@/types/menu'
 
@@ -68,6 +71,16 @@ export const menuConfig: MenuItem[] = [
     icon: ArrowLeftRight,
     children: [
       { id: 'data-compare', label: '数据对比', icon: GitCompare, path: '/data-compare', panelKey: 'data_compare' },
+    ],
+  },
+  {
+    id: 'asset-library',
+    label: '广告资产库',
+    icon: Package,
+    children: [
+      { id: 'asset-landing-pages', label: '落地页库', icon: Link2, path: '/assets/landing-pages', panelKey: 'asset_landing_pages' },
+      { id: 'asset-copy-packs', label: '文案库', icon: FileText, path: '/assets/copy-packs', panelKey: 'asset_copy_packs' },
+      { id: 'asset-region-groups', label: '地区组库', icon: Globe, path: '/assets/region-groups', panelKey: 'asset_region_groups' },
     ],
   },
   {

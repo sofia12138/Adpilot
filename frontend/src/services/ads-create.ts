@@ -37,6 +37,20 @@ export interface AdSetConfig {
   pixel_id?: string
   custom_event_type?: string
   material_ids: string[]
+  region_group_id?: number
+  region_group_name?: string
+  country_codes_snapshot?: string[]
+}
+
+export interface AssetRefs {
+  landing_page_asset_id?: number
+  landing_page_asset_name?: string
+  landing_page_url_snapshot?: string
+  copy_asset_id?: number
+  copy_asset_name?: string
+  primary_text_snapshot?: string
+  headline_snapshot?: string
+  description_snapshot?: string
 }
 
 export interface CreateAdsParams {
@@ -52,6 +66,7 @@ export interface CreateAdsParams {
   w2a?: W2aFields
   materials?: MaterialItem[]
   adsets?: AdSetConfig[]
+  assetRefs?: AssetRefs
 }
 
 export interface AdResult {
@@ -138,7 +153,13 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
             custom_event_type: a.custom_event_type || p.w2a?.customEventType || '',
           },
           material_ids: a.material_ids,
+          region_group_id: a.region_group_id,
+          region_group_name: a.region_group_name,
+          country_codes_snapshot: a.country_codes_snapshot,
         }))
+      }
+      if (p.assetRefs) {
+        body.asset_refs = p.assetRefs
       }
     } else {
       body.advertiser_id = ''

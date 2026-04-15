@@ -4,8 +4,14 @@ import { SectionCard } from '@/components/common/SectionCard'
 import { CountryMultiSelect } from '@/components/common/CountryMultiSelect'
 import {
   Loader2, AlertCircle, Trash2, Pencil, Copy, X, Eye,
-  ToggleLeft, ToggleRight, ChevronLeft, Shield, Save,
+  ToggleLeft, ToggleRight, ChevronLeft, Shield, Save, Package,
 } from 'lucide-react'
+import {
+  LandingPagePickerDialog,
+  CopyPackPickerDialog,
+  RegionGroupPickerDialog,
+} from '@/components/common/AssetPickerDialog'
+import type { LandingPageAsset, CopyPackAsset, RegionGroupAsset } from '@/services/ad-assets'
 import {
   useTemplates, useUpdateTemplate, useDeleteTemplate, useCloneTemplate,
 } from '@/hooks/use-templates'
@@ -116,6 +122,18 @@ interface W2aEditState {
   ageMin: string
   ageMax: string
   notes: string
+  // asset refs + snapshots
+  landing_page_asset_id?: number
+  landing_page_asset_name?: string
+  landing_page_url_snapshot?: string
+  copy_asset_id?: number
+  copy_asset_name?: string
+  primary_text_snapshot?: string
+  headline_snapshot?: string
+  description_snapshot?: string
+  region_group_id?: number
+  region_group_name?: string
+  country_codes_snapshot?: string[]
 }
 
 function templateToEditState(t: Template): W2aEditState {
@@ -146,6 +164,17 @@ function templateToEditState(t: Template): W2aEditState {
     ageMin: String((targeting.age_min as number) ?? 18),
     ageMax: String((targeting.age_max as number) ?? 65),
     notes: String(t.notes ?? ''),
+    landing_page_asset_id: t.landing_page_asset_id as number | undefined,
+    landing_page_asset_name: t.landing_page_asset_name as string | undefined,
+    landing_page_url_snapshot: t.landing_page_url_snapshot as string | undefined,
+    copy_asset_id: t.copy_asset_id as number | undefined,
+    copy_asset_name: t.copy_asset_name as string | undefined,
+    primary_text_snapshot: t.primary_text_snapshot as string | undefined,
+    headline_snapshot: t.headline_snapshot as string | undefined,
+    description_snapshot: t.description_snapshot as string | undefined,
+    region_group_id: t.region_group_id as number | undefined,
+    region_group_name: t.region_group_name as string | undefined,
+    country_codes_snapshot: t.country_codes_snapshot as string[] | undefined,
   }
 }
 
@@ -157,6 +186,17 @@ function editStateToBody(s: W2aEditState): Record<string, unknown> {
     template_subtype: 'conversion',
     default_ad_account_id: s.adAccountId || undefined,
     notes: s.notes || undefined,
+    landing_page_asset_id: s.landing_page_asset_id || undefined,
+    landing_page_asset_name: s.landing_page_asset_name || undefined,
+    landing_page_url_snapshot: s.landing_page_url_snapshot || undefined,
+    copy_asset_id: s.copy_asset_id || undefined,
+    copy_asset_name: s.copy_asset_name || undefined,
+    primary_text_snapshot: s.primary_text_snapshot || undefined,
+    headline_snapshot: s.headline_snapshot || undefined,
+    description_snapshot: s.description_snapshot || undefined,
+    region_group_id: s.region_group_id || undefined,
+    region_group_name: s.region_group_name || undefined,
+    country_codes_snapshot: s.country_codes_snapshot || undefined,
     campaign: {
       objective: s.objective,
       status: 'PAUSED',
@@ -325,6 +365,11 @@ export default function TemplatesPage() {
 
   const isPending = updateMutation.isPending || cloneMutation.isPending
 
+  // ── 资产库弹窗 ──
+  const [showLPPicker, setShowLPPicker] = useState(false)
+  const [showCopyPicker, setShowCopyPicker] = useState(false)
+  const [showRegionPicker, setShowRegionPicker] = useState(false)
+
   /* ═══════════════════════════════════════════════
      渲染：查看/编辑详情页
      ═══════════════════════════════════════════════ */
@@ -432,7 +477,14 @@ export default function TemplatesPage() {
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">投放国家/地区</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-medium text-gray-600">投放国家/地区</label>
+                {!readonly && (
+                  <button type="button" onClick={() => setShowRegionPicker(true)} className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1">
+                    <Package className="w-3 h-3" />选择地区组
+                  </button>
+                )}
+              </div>
               {readonly ? (
                 <div className="flex flex-wrap gap-1.5 px-3 py-2 border border-gray-200 rounded-xl bg-gray-50 min-h-[42px]">
                   {w2aEdit.countries.map(c => (
@@ -442,6 +494,12 @@ export default function TemplatesPage() {
                 </div>
               ) : (
                 <CountryMultiSelect value={w2aEdit.countries} onChange={codes => setField('countries', codes)} />
+              )}
+              {w2aEdit.region_group_name && (
+                <p className="text-xs text-blue-400 mt-1">
+                  来源地区组: {w2aEdit.region_group_name}
+                  {!readonly && <button type="button" className="text-gray-400 hover:text-red-400 ml-2" onClick={() => setW2aEdit(prev => prev ? { ...prev, region_group_id: undefined, region_group_name: undefined, country_codes_snapshot: undefined } : prev)}>清除引用</button>}
+                </p>
               )}
             </div>
 
@@ -479,12 +537,38 @@ export default function TemplatesPage() {
         <SectionCard title="创意与预算默认值" className="mb-5">
           <div className="space-y-4">
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Landing Page URL</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-medium text-gray-600">Landing Page URL</label>
+                {!readonly && (
+                  <button type="button" onClick={() => setShowLPPicker(true)} className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1">
+                    <Package className="w-3 h-3" />从落地页库选择
+                  </button>
+                )}
+              </div>
               <input value={w2aEdit.landingPageUrl} onChange={e => setField('landingPageUrl', e.target.value)} disabled={readonly} placeholder="https://example.com/landing" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+              {w2aEdit.landing_page_asset_name && (
+                <p className="text-xs text-blue-400 mt-1">
+                  来源资产: {w2aEdit.landing_page_asset_name}
+                  {!readonly && <button type="button" className="text-gray-400 hover:text-red-400 ml-2" onClick={() => setW2aEdit(prev => prev ? { ...prev, landing_page_asset_id: undefined, landing_page_asset_name: undefined, landing_page_url_snapshot: undefined } : prev)}>清除引用</button>}
+                </p>
+              )}
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">Primary Text</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-medium text-gray-600">Primary Text</label>
+                {!readonly && (
+                  <button type="button" onClick={() => setShowCopyPicker(true)} className="text-xs text-blue-500 hover:text-blue-600 flex items-center gap-1">
+                    <Package className="w-3 h-3" />从文案库选择
+                  </button>
+                )}
+              </div>
               <textarea value={w2aEdit.primaryText} onChange={e => setField('primaryText', e.target.value)} disabled={readonly} rows={2} placeholder="广告主文案" className={`${inputCls} ${readonly ? 'bg-gray-50 text-gray-500' : ''}`} />
+              {w2aEdit.copy_asset_name && (
+                <p className="text-xs text-blue-400 mt-1">
+                  来源文案: {w2aEdit.copy_asset_name}
+                  {!readonly && <button type="button" className="text-gray-400 hover:text-red-400 ml-2" onClick={() => setW2aEdit(prev => prev ? { ...prev, copy_asset_id: undefined, copy_asset_name: undefined, primary_text_snapshot: undefined, headline_snapshot: undefined, description_snapshot: undefined } : prev)}>清除引用</button>}
+                </p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -545,6 +629,61 @@ export default function TemplatesPage() {
           onSubmit={handleClone} onClose={() => setCloneOpen(false)}
           isPending={cloneMutation.isPending} success={cloneSuccess}
         />}
+
+        {/* ── 资产库弹窗 ── */}
+        <LandingPagePickerDialog
+          open={showLPPicker}
+          onClose={() => setShowLPPicker(false)}
+          onSelect={(item: LandingPageAsset) => {
+            setField('landingPageUrl', item.landing_page_url)
+            setW2aEdit(prev => prev ? {
+              ...prev,
+              landingPageUrl: item.landing_page_url,
+              landing_page_asset_id: item.id,
+              landing_page_asset_name: item.name,
+              landing_page_url_snapshot: item.landing_page_url,
+            } : prev)
+          }}
+        />
+        <CopyPackPickerDialog
+          open={showCopyPicker}
+          onClose={() => setShowCopyPicker(false)}
+          onSelect={(item: CopyPackAsset, mode: 'all' | 'empty') => {
+            setW2aEdit(prev => {
+              if (!prev) return prev
+              const next = { ...prev,
+                copy_asset_id: item.id,
+                copy_asset_name: item.name,
+                primary_text_snapshot: item.primary_text || '',
+                headline_snapshot: item.headline || '',
+                description_snapshot: item.description || '',
+              }
+              if (mode === 'all') {
+                next.primaryText = item.primary_text || ''
+                next.headline = item.headline || ''
+                next.description = item.description || ''
+              } else {
+                if (!prev.primaryText) next.primaryText = item.primary_text || ''
+                if (!prev.headline) next.headline = item.headline || ''
+                if (!prev.description) next.description = item.description || ''
+              }
+              return next
+            })
+          }}
+        />
+        <RegionGroupPickerDialog
+          open={showRegionPicker}
+          onClose={() => setShowRegionPicker(false)}
+          onSelect={(item: RegionGroupAsset) => {
+            setW2aEdit(prev => prev ? {
+              ...prev,
+              countries: item.country_codes,
+              region_group_id: item.id,
+              region_group_name: item.name,
+              country_codes_snapshot: [...item.country_codes],
+            } : prev)
+          }}
+        />
       </div>
     )
   }

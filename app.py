@@ -189,6 +189,7 @@ def _register_routers(application: FastAPI):
     from routes.optimizer_performance import router as optimizer_performance_router
     from routes.optimizer_directory import router as optimizer_directory_router
     from routes.meta_assets import router as meta_assets_router
+    from routes.ad_assets import router as ad_assets_router
 
     for r in [
         auth_router, users_router, campaign_router, adgroup_router,
@@ -198,7 +199,7 @@ def _register_routers(application: FastAPI):
         template_router, biz_router, panels_router, insight_router,
         accounts_router, analysis_router, sync_router, drama_router,
         designer_performance_router, optimizer_performance_router,
-        optimizer_directory_router, meta_assets_router,
+        optimizer_directory_router, meta_assets_router, ad_assets_router,
     ]:
         application.include_router(r, prefix="/api")
 
