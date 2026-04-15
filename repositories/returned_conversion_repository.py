@@ -476,7 +476,7 @@ def upsert(
     Meta:
       - registrations_returned:   来自 actions 数组中 action_type=complete_registration 的 value
       - purchase_value_returned:  来自 action_values 数组中 action_type=purchase 的 value（金额）
-      - subscribe_value_returned: 降级为 0（Meta 无独立订阅金额字段）
+      - subscribe_value_returned: 通过 action_breakdowns=action_type 拆分后从 action_values 提取订阅事件金额
       - d1_value_returned:        降级为 0（Meta Insights 无 D1 cohort 拆分）
 
     TikTok:

@@ -335,6 +335,7 @@ async def _fetch_meta_insights_paged(client, ad_account_id: str,
         "time_increment": "1",
         "level": level,
         "limit": 500,
+        "use_account_attribution_setting": "true",
     }
     all_data: list[dict] = []
     resp = await client.get(f"{ad_account_id}/insights", params)
@@ -383,6 +384,24 @@ def _parse_meta_action_values(raw_list: list | None) -> dict[str, float]:
     return result
 
 
+def _extract_subscribe_value(item: dict) -> float:
+    """从 Meta Insights 的 conversion_values 字段提取订阅价值。
+
+    Ads Manager "订阅价值" 列来自 conversion_values（非 action_values）。
+    优先取 subscribe_total（跨渠道汇总），降级取 subscribe_website。
+    """
+    raw = item.get("conversion_values")
+    if not raw:
+        return 0.0
+    cv: dict[str, float] = {}
+    for entry in raw:
+        if isinstance(entry, dict):
+            atype = entry.get("action_type", "")
+            if atype:
+                cv[atype] = float(entry.get("value", 0.0) or 0.0)
+    return cv.get("subscribe_total", 0.0) or cv.get("subscribe_website", 0.0)
+
+
 def _meta_insight_to_row(item: dict, ad_account_id: str, level: str) -> dict:
     # actions / action_values 均为数组，必须通过 _parse_meta_* 函数提取
     actions = _parse_meta_actions(item.get("actions"))
@@ -419,12 +438,15 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
     - registrations_returned:   omni_complete_registration（优先）or complete_registration
                                   omni 是跨渠道汇总，已包含 app 注册，不与 complete 相加
     - purchase_value_returned:  omni_purchase（优先）or purchase，来自 action_values 数组（金额）
-    - subscribe_value_returned: 0（Meta 无独立订阅价值字段）
+    - subscribe_value_returned: 来自 conversion_values 中的 subscribe_total / subscribe_website
+                                  （Ads Manager "订阅价值"列的实际数据源）
     - d1_value_returned:        0（Meta Insights 无 D1 cohort 拆分）
     - installs:                 actions 数组中 action_type=mobile_app_install 的 value
     """
     actions = _parse_meta_actions(item.get("actions"))
     action_values = _parse_meta_action_values(item.get("action_values"))
+
+    subscribe_val = _extract_subscribe_value(item)
 
     returned: dict = {
         "stat_date":                item.get("date_start", ""),
@@ -442,21 +464,15 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
         "clicks":                   int(item.get("clicks", 0) or 0),
         "installs":                 actions.get("mobile_app_install", 0),
         "spend":                    float(item.get("spend", 0) or 0),
-        # Meta 支持：注册数优先取 omni_complete_registration（跨渠道汇总），
-        # 若无则回退到 complete_registration（仅 App）。
-        # 两者互斥：omni 已包含 App 注册，不能相加避免重复计数。
         "registrations_returned":   (
             actions.get("omni_complete_registration", 0)
             or actions.get("complete_registration", 0)
         ),
-        # Meta 支持：从 action_values 数组精确匹配 purchase（金额，非次数）；
-        # omni_purchase 是跨渠道汇总版，优先使用。
         "purchase_value_returned":  (
             action_values.get("omni_purchase", 0.0)
             or action_values.get("purchase", 0.0)
         ),
-        # Meta 不支持：无独立订阅价值字段，固定为 0
-        "subscribe_value_returned":    0.0,
+        "subscribe_value_returned":    subscribe_val,
         # Meta 不支持：无 D1 cohort 拆分，固定为 0
         "d1_value_returned":           0.0,
         # D0 Cohort：Meta 标准 Insights API 无法拆分 D0 cohort，固定为 0
@@ -604,10 +620,10 @@ async def sync_meta_campaigns(ad_account_id: str,
         biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
         logger.error(f"[Meta] ad 列表同步失败: {e}")
 
-    # action_values 字段必须加入，用于提取 purchase 金额（purchase_value_returned）
-    campaign_fields = "campaign_id,campaign_name,spend,impressions,clicks,actions,action_values"
-    adset_fields = "campaign_id,campaign_name,adset_id,adset_name,spend,impressions,clicks,actions,action_values"
-    ad_fields = "campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,actions,action_values"
+    # action_values: purchase 金额; conversion_values: subscribe 金额(Ads Manager "订阅价值"列)
+    campaign_fields = "campaign_id,campaign_name,spend,impressions,clicks,actions,action_values,conversions,conversion_values"
+    adset_fields = "campaign_id,campaign_name,adset_id,adset_name,spend,impressions,clicks,actions,action_values,conversions,conversion_values"
+    ad_fields = "campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,actions,action_values,conversions,conversion_values"
 
     from repositories import returned_conversion_repository
 
