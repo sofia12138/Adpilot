@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+*.pem
+*.key
 
 # Python
 __pycache__/
@@ -25,6 +27,11 @@ frontend/dist/
 backend/test_upload.mp4
 scripts/
 .git_commit_msg.txt
+_remote.py
+_deploy_step.py
+
+# 日志
+*.log
 
 # IDE
 .idea/
