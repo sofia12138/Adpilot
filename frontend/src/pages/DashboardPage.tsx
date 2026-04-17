@@ -18,7 +18,7 @@ export default function DashboardPage() {
 
   const { data: overview, isLoading: ovLoading, isError: ovError } = useBizOverview(dateRange)
   const { data: topCampaigns } = useBizTopCampaigns({ ...dateRange, limit: 50 })
-  const { data: dailyData, isLoading: dailyLoading } = useCampaignDaily({ ...dateRange, page_size: 2000 })
+  const { data: dailyData, isLoading: dailyLoading } = useCampaignDaily({ ...dateRange, page_size: 200 })
   const { data: insightCfg } = useInsightConfig()
 
   const roiThreshold = insightCfg?.roi?.low ?? 1.5

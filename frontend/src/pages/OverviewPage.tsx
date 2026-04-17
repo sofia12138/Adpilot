@@ -49,7 +49,7 @@ export default function OverviewPage() {
 
   const { data: tiktokOverview } = useBizOverview({ ...dateRange, platform: 'tiktok' })
   const { data: metaOverview }   = useBizOverview({ ...dateRange, platform: 'meta' })
-  const { data: dailyData, isLoading: dailyLoading } = useCampaignDaily({ ...dateRange, platform: apiPlatform, page_size: 2000 })
+  const { data: dailyData, isLoading: dailyLoading } = useCampaignDaily({ ...dateRange, platform: apiPlatform, page_size: 200 })
   const { data: insightCfg } = useInsightConfig()
 
   const hasData = overview && overview.total_spend > 0
