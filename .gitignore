@@ -14,17 +14,16 @@ venv/
 .pytest_cache/
 
 # 本地用户/日志（可能含敏感信息）
-users.json
-oplog.json
+backend/users.json
+backend/oplog.json
 
 # 前端
 frontend/node_modules/
 frontend/dist/
 
-# 大文件 / 临时脚本（按需保留本地）
-test_upload.mp4
-_check_diff.py
-_verify_3db.py
+# 大文件 / 临时脚本
+backend/test_upload.mp4
+scripts/
 .git_commit_msg.txt
 
 # IDE
