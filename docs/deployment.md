@@ -112,12 +112,34 @@ sudo systemctl reload nginx
 
 ## 7. 更新部署
 
+### 方式一：一键部署（推荐）
+
+本地执行，自动推送代码并触发服务器更新：
+
 ```bash
-cd /var/www/adpilot
+bash deploy/remote-deploy.sh
+```
+
+该脚本会依次执行：`git push` → SSH 到服务器 → 运行 `deploy/update.sh`
+
+### 方式二：服务器手动执行
+
+SSH 登录服务器后运行：
+
+```bash
+bash /opt/adpilot/deploy/update.sh
+```
+
+`update.sh` 会自动完成：拉取代码 → 安装后端依赖 → 构建前端 → 更新静态文件 → 重启服务
+
+### 方式三：逐步手动更新
+
+```bash
+cd /opt/adpilot
 git pull origin main
 
 # 后端更新
-source venv/bin/activate
+source .venv/bin/activate
 pip install -r backend/requirements.txt
 sudo systemctl restart adpilot
 
@@ -125,7 +147,17 @@ sudo systemctl restart adpilot
 cd frontend
 npm install
 npm run build
-# Nginx 自动读取新的 dist/，无需重启
+sudo rm -rf /var/www/adpilot/*
+sudo cp -r dist/* /var/www/adpilot/
+```
+
+### 回滚
+
+```bash
+cd /opt/adpilot
+git log --oneline -10                  # 查看历史版本
+git checkout <commit-hash> -- .        # 回退到指定版本
+bash deploy/update.sh                  # 跳过 git pull，直接重建部署
 ```
 
 ## 8. 常见问题
