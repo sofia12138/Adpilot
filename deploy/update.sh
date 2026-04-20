@@ -35,7 +35,7 @@ echo ""
 
 echo "[5/5] 重启后端服务..."
 sudo systemctl restart adpilot
-sleep 3
+sleep 5
 echo ""
 
 echo "========================================"
@@ -43,5 +43,6 @@ echo "  部署完成"
 echo "========================================"
 sudo systemctl status adpilot --no-pager | head -8
 echo ""
-curl -s http://127.0.0.1:8000/health
+echo "Health check:"
+curl -s --max-time 10 http://127.0.0.1:8000/health || echo "(服务仍在启动中，请稍后手动检查)"
 echo ""
