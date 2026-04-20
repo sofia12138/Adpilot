@@ -6,6 +6,7 @@ export interface Template {
   platform: string
   template_type?: string
   template_subtype?: string
+  is_builtin?: boolean
   created_at: string
   updated_at: string
   [key: string]: unknown

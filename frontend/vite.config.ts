@@ -4,10 +4,6 @@ import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
 export default defineConfig({
-  test: {
-    environment: 'node',
-    include: ['src/**/__tests__/**/*.test.ts', 'src/**/*.test.ts'],
-  },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
@@ -16,7 +12,7 @@ export default defineConfig({
   },
   server: {
     host: true,
-    port: 3000,
+    port: 4000,
     strictPort: true,
     allowedHosts: ['.ngrok-free.dev'],
     proxy: {

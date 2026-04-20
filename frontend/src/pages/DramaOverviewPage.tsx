@@ -58,10 +58,6 @@ function fmtNum(v: number): string {
   return String(v)
 }
 
-function fmtPct(v: number): string {
-  return `${v.toFixed(2)}%`
-}
-
 function fmtRoas(v: number): string {
   return `${v.toFixed(2)}x`
 }
@@ -175,7 +171,7 @@ export default function DramaOverviewPage() {
   const [keyword, setKeyword] = useState('')
   const [sourceType, setSourceType] = useState('')
   const [platform, setPlatform] = useState('')
-  const [country, setCountry] = useState('')
+  const [country, _setCountry] = useState('')
   const [languageCode, setLanguageCode] = useState('')
 
   // 展开状态（content_key set）

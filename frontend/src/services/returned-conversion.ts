@@ -43,6 +43,8 @@ export interface ReturnedSummary {
   cumulative_roi_returned: number
   /** D0 ROI（回传口径）= total_value / spend */
   d0_roi_returned: number
+  /** D0 ROI 是否为 fallback（无 D0 cohort 时等同累计 ROI） */
+  d0_roi_is_fallback?: boolean
   /** D1 回传价值（平台不支持 D1 cohort 时为 0） */
   d1_value_returned: number
   /** D1 ROI（回传口径）= d1_value / spend */
