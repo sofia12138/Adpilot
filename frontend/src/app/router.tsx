@@ -29,6 +29,7 @@ import OptimizerDirectoryPage from '@/pages/OptimizerDirectoryPage'
 import AssetLandingPagesPage from '@/pages/AssetLandingPagesPage'
 import AssetCopyPacksPage from '@/pages/AssetCopyPacksPage'
 import AssetRegionGroupsPage from '@/pages/AssetRegionGroupsPage'
+import TikTokMaterialsPage from '@/pages/TikTokMaterialsPage'
 
 function G({ panelKey, children }: { panelKey: string; children: React.ReactNode }) {
   return <AuthGuard panelKey={panelKey}>{children}</AuthGuard>
@@ -67,6 +68,7 @@ export const router = createBrowserRouter([
       { path: 'assets/landing-pages', element: <G panelKey="asset_landing_pages"><AssetLandingPagesPage /></G> },
       { path: 'assets/copy-packs',    element: <G panelKey="asset_copy_packs"><AssetCopyPacksPage /></G> },
       { path: 'assets/region-groups', element: <G panelKey="asset_region_groups"><AssetRegionGroupsPage /></G> },
+      { path: 'tiktok-materials',     element: <G panelKey="tiktok_materials"><TikTokMaterialsPage /></G> },
     ],
   },
 ])

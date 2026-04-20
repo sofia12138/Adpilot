@@ -32,6 +32,7 @@ import {
   validateImageFile, validateVideoFile,
   type MetaPageOption, type MetaPixelOption,
 } from '@/services/meta-assets'
+import { getVideoDuration } from '@/services/tiktok-materials'
 
 const MAX_MATERIALS = 20
 const MAX_ADSETS = 20
@@ -80,7 +81,10 @@ interface UploadingMaterial {
   abort?: () => void
   thumbnail_uploading?: boolean
   thumbnail_error?: string
+  duration_sec?: number
 }
+
+const LONG_VIDEO_THRESHOLD = 600 // 10 min
 
 // ─── AdSet 本地状态 ──
 interface AdSetLocal {
@@ -291,6 +295,10 @@ export default function AdsCreatePage() {
           setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, status: 'error', error: err } : m))
           continue
         }
+        try {
+          const dur = await getVideoDuration(item.file)
+          setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, duration_sec: dur } : m))
+        } catch { /* duration detection optional */ }
         const { promise, abort } = uploadMetaVideo(adAccountId, item.file, pct => {
           setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, progress: pct } : m))
         })
@@ -629,6 +637,15 @@ export default function AdsCreatePage() {
             {/* ══ 素材池 ══ */}
             <SectionCard title={`素材池 (${readyMaterials.length}/${MAX_MATERIALS})`} className="mb-6">
               <div className="space-y-4">
+                {materials.some(m => m.type === 'video' && m.duration_sec != null && m.duration_sec > LONG_VIDEO_THRESHOLD) && (
+                  <div className="flex items-start gap-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-sm text-amber-800">
+                    <AlertCircle className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <div className="font-medium">包含超过 10 分钟的长视频素材</div>
+                      <div className="text-amber-700 mt-0.5">TikTok Non-Spark Ads 视频时长上限为 10 分钟。长视频是否可直接用于广告投放，以 TikTok 广告规格和账户能力为准。</div>
+                    </div>
+                  </div>
+                )}
                 <div className="flex items-center gap-3">
                   <input ref={fileInputRef} type="file" multiple
                     accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.mp4,.mov,.avi,.mkv,.webm,.m4v"
@@ -682,6 +699,11 @@ export default function AdsCreatePage() {
                             <td className="px-3 py-2 text-gray-500 font-mono text-[11px] max-w-[100px] truncate">
                               {m.type === 'video' ? (m.video_id || '-') : (m.image_hash || '-')}
                               {m.error && !m.video_id && !m.image_hash && <span className="text-red-400 font-sans">{m.error}</span>}
+                              {m.type === 'video' && m.duration_sec != null && m.duration_sec > LONG_VIDEO_THRESHOLD && (
+                                <div className="mt-1 flex items-center gap-1 text-amber-600 font-sans text-[10px]" title="该视频超过 10 分钟，是否可直接用于广告投放以 TikTok 广告规格和账户能力为准">
+                                  <AlertCircle className="w-3 h-3" />长视频
+                                </div>
+                              )}
                             </td>
                             {/* 封面图列 */}
                             <td className="px-3 py-2">

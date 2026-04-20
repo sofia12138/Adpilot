@@ -588,6 +588,8 @@ _PANEL_SEED = [
     ("asset_landing_pages",    "落地页库",        "广告资产库", "/assets/landing-pages",    70),
     ("asset_copy_packs",       "文案库",          "广告资产库", "/assets/copy-packs",       71),
     ("asset_region_groups",    "地区组库",        "广告资产库", "/assets/region-groups",    72),
+    # TikTok 素材上传
+    ("tiktok_materials",       "TikTok素材上传",  "素材中心",   "/tiktok-materials",       33),
 ]
 
 _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
@@ -597,7 +599,8 @@ _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
                     "template_mgmt", "creatives", "creative_analysis", "optimizer_performance",
                     "optimizer_directory", "designer_performance", "drama_analysis",
                     "returned_conversion", "oplog",
-                    "asset_landing_pages", "asset_copy_packs", "asset_region_groups"],
+                    "asset_landing_pages", "asset_copy_packs", "asset_region_groups",
+                    "tiktok_materials"],
     "designer":    ["dashboard", "creatives", "creative_analysis", "designer_performance"],
     "analyst":     ["dashboard", "overview", "channel_analysis", "biz_analysis", "data_compare",
                     "creative_analysis", "returned_conversion", "drama_analysis", "designer_performance",
@@ -1079,6 +1082,35 @@ _BIZ_TABLES_SQL = [
         INDEX idx_is_active (is_active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     COMMENT='优化师名单配置表'
+    """,
+    # ─── TikTok 素材上传记录表 ────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS tiktok_material_uploads (
+        id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+        advertiser_id       VARCHAR(100)  NOT NULL COMMENT 'TikTok 广告主 ID',
+        local_file_name     VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '原始文件名',
+        file_size_bytes     BIGINT        NOT NULL DEFAULT 0,
+        duration_sec        DECIMAL(10,2) DEFAULT NULL COMMENT '视频时长（秒）',
+        upload_channel      VARCHAR(20)   NOT NULL DEFAULT 'api' COMMENT 'manual / api',
+        tiktok_video_id     VARCHAR(200)  DEFAULT NULL COMMENT 'TikTok 返回的 video_id',
+        tiktok_file_name    VARCHAR(500)  DEFAULT NULL COMMENT 'TikTok 侧文件名',
+        tiktok_url          TEXT          DEFAULT NULL COMMENT 'TikTok 素材预览 URL',
+        tiktok_width        INT           DEFAULT NULL,
+        tiktok_height       INT           DEFAULT NULL,
+        tiktok_format       VARCHAR(20)   DEFAULT NULL,
+        upload_status       VARCHAR(20)   NOT NULL DEFAULT 'pending' COMMENT 'pending/uploading/success/failed',
+        error_code          VARCHAR(50)   DEFAULT NULL,
+        error_message       TEXT          DEFAULT NULL,
+        can_use_for_ad      TINYINT       NOT NULL DEFAULT 0 COMMENT '是否可直接用于广告投放',
+        ad_usage_note       VARCHAR(500)  NOT NULL DEFAULT '' COMMENT '投放适用性说明',
+        created_by          VARCHAR(100)  NOT NULL DEFAULT '',
+        created_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at          DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_advertiser (advertiser_id),
+        INDEX idx_status (upload_status),
+        INDEX idx_created (created_at DESC)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='TikTok 素材 API 上传记录'
     """,
 ]
 

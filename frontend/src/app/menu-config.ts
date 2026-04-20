@@ -25,6 +25,7 @@ import {
   Package,
   Link2,
   Globe,
+  Upload,
 } from 'lucide-react'
 import type { MenuItem } from '@/types/menu'
 
@@ -50,6 +51,7 @@ export const menuConfig: MenuItem[] = [
       { id: 'creatives', label: '素材库', icon: FolderOpen, path: '/creatives', panelKey: 'creatives' },
       { id: 'creative-analysis', label: '素材分析', icon: LineChart, path: '/creative-analysis', panelKey: 'creative_analysis' },
       { id: 'designer-performance', label: '设计师人效', icon: UserCheck, path: '/designer-performance', panelKey: 'designer_performance' },
+      { id: 'tiktok-materials', label: 'TikTok素材上传', icon: Upload, path: '/tiktok-materials', panelKey: 'tiktok_materials' },
     ],
   },
   {
