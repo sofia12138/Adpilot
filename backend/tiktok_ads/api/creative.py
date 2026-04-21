@@ -24,8 +24,15 @@ def _file_md5(path: str) -> str:
     return h.hexdigest()
 
 
+_DEFAULT_READ_CHUNK = 4 * 1024 * 1024  # 4MB
+
+
 class _ProgressReader:
-    """包装文件对象，每次 read 时回调已发送字节数。"""
+    """包装文件对象，每次 read 时回调已发送字节数。
+
+    httpx 的 multipart 在底层多次调用 read(-1)，将其映射为固定 4MB，
+    可显著降低单次 syscall 大小、减少回调抖动，并提升网络写入吞吐。
+    """
 
     def __init__(self, fp, total: int, callback: Callable[[int, int], None]):
         self._fp = fp
@@ -34,6 +41,8 @@ class _ProgressReader:
         self._cb = callback
 
     def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = _DEFAULT_READ_CHUNK
         data = self._fp.read(size)
         if data:
             self._sent += len(data)
@@ -102,18 +111,24 @@ class CreativeService:
         file_path: str,
         file_name: str | None = None,
         on_progress: Callable[[int, int], None] | None = None,
+        file_md5: str | None = None,
     ) -> dict:
         """通过本地文件上传视频到 TikTok Asset Library。
         TikTok API: POST file/video/ad/upload/
         必填字段: advertiser_id, upload_type=UPLOAD_BY_FILE, video_file, video_signature(MD5)
         on_progress(sent_bytes, total_bytes) 在每次网络写入时回调。
+        file_md5 若由调用方在接收阶段同步算出，则跳过本地重复扫描。
         返回 {'video_id': '...', ...}
         """
         url = f"{self.client.base_url}/file/video/ad/upload/"
         fname = file_name or Path(file_path).name
         file_size = Path(file_path).stat().st_size
 
-        video_sig = _file_md5(file_path)
+        if file_md5:
+            video_sig = file_md5
+            logger.info(f"[tiktok-upload] 使用预计算 MD5: {video_sig}")
+        else:
+            video_sig = _file_md5(file_path)
 
         logger.info(
             f"[tiktok-upload] 开始上传视频: advertiser={self.advertiser_id}, "

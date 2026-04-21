@@ -1,6 +1,8 @@
 """TikTok 素材上传路由 — 上传 / 查询 / 列表"""
 from __future__ import annotations
 
+import hashlib
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -17,6 +19,10 @@ router = APIRouter(prefix="/materials/tiktok", tags=["TikTok 素材上传"])
 
 _ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 _VIDEO_MAX = 1024 * 1024 * 1024  # 1 GB
+_RECV_CHUNK = 4 * 1024 * 1024  # 4MB，减少 syscall 次数
+
+# 优先使用内存盘（Linux tmpfs），避免落到云盘；Windows / 无 /dev/shm 时回退默认 tmp
+_TMP_DIR = "/dev/shm" if os.path.isdir("/dev/shm") and os.access("/dev/shm", os.W_OK) else None
 
 
 @router.post("/upload")
@@ -46,15 +52,19 @@ async def upload_video(
 
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        md5 = hashlib.md5()
+        recv_t0 = time.time()
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False, dir=_TMP_DIR) as tmp:
             tmp_path = tmp.name
             file_size = 0
             while True:
-                chunk = await file.read(1024 * 1024)
+                chunk = await file.read(_RECV_CHUNK)
                 if not chunk:
                     break
                 tmp.write(chunk)
+                md5.update(chunk)
                 file_size += len(chunk)
+        precomputed_md5 = md5.hexdigest()
 
         if file_size == 0:
             return JSONResponse(content={"success": False, "error": "接收到的文件为空（0 字节）"})
@@ -64,9 +74,11 @@ async def upload_video(
                 "error": f"文件 {file_size / 1024 / 1024:.0f}MB 超过 1GB 限制",
             })
 
+        recv_ms = int((time.time() - recv_t0) * 1000)
         logger.info(
             f"[tiktok-materials] 文件缓存完成: size={file_size} "
-            f"({file_size / 1024 / 1024:.1f}MB), duration={duration_sec}s"
+            f"({file_size / 1024 / 1024:.1f}MB), duration={duration_sec}s, "
+            f"recv={recv_ms}ms, tmp_dir={_TMP_DIR or 'system_default'}, md5={precomputed_md5}"
         )
 
         record = await tiktok_material_service.upload_video(
@@ -76,6 +88,7 @@ async def upload_video(
             file_size=file_size,
             duration_sec=duration_sec,
             created_by=_user.username,
+            file_md5=precomputed_md5,
         )
 
         elapsed = int((time.time() - t0) * 1000)

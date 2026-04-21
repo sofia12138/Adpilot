@@ -51,8 +51,12 @@ async def upload_video(
     file_size: int,
     duration_sec: float | None,
     created_by: str = "",
+    file_md5: str | None = None,
 ) -> dict:
-    """核心上传流程：创建记录 → 调用 TikTok API → 补全信息 → 更新状态"""
+    """核心上传流程：创建记录 → 调用 TikTok API → 补全信息 → 更新状态。
+
+    file_md5 由路由层在接收文件时同步算出，传入后可避免在 creative 层再扫一遍文件。
+    """
 
     upload_channel = _determine_upload_channel(duration_sec)
     can_use, usage_note = _build_ad_usage(duration_sec)
@@ -82,7 +86,9 @@ async def upload_video(
         _tiktok_progress[record_id] = {"sent": sent, "total": total, "pct": pct, "phase": "tiktok"}
 
     try:
-        upload_data = await svc.upload_video_by_file(file_path, file_name, on_progress=_on_progress)
+        upload_data = await svc.upload_video_by_file(
+            file_path, file_name, on_progress=_on_progress, file_md5=file_md5,
+        )
     except TikTokApiError as e:
         logger.error(
             f"[tiktok-material] TikTok API 上传失败: record={record_id}, "
