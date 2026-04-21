@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo, useSyncExternalStore } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import {
   Upload, Loader2, AlertCircle, CheckCircle2, XCircle, Clock,
@@ -81,11 +81,13 @@ export default function TikTokMaterialsPage() {
   }
   const queue = queueRef.current
 
-  // 订阅队列快照，自动 re-render
-  const snapshot = useSyncExternalStore(
-    useCallback((cb) => queue.subscribe(cb), [queue]),
-    useCallback(() => queue.snapshot(), [queue]),
-  )
+  // 订阅队列快照：只有队列 notify 时才更新 state，避免 useSyncExternalStore 因
+  // 每次 getSnapshot 返回新对象而陷入无限渲染（React error #185）
+  const [snapshot, setSnapshot] = useState(() => queue.snapshot())
+  useEffect(() => {
+    const unsub = queue.subscribe(() => setSnapshot(queue.snapshot()))
+    return unsub
+  }, [queue])
 
   const [concurrency, setConcurrencyState] = useState<number>(loadConcurrency())
   const onConcurrencyChange = useCallback((n: number) => {
