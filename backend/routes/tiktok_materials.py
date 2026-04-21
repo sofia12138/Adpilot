@@ -146,6 +146,7 @@ async def get_material(
 
 
 @router.get("")
+@router.get("/", include_in_schema=False)
 async def list_materials(
     advertiser_id: Optional[str] = Query(None),
     status: Optional[str] = Query(None, description="pending/uploading/success/failed"),
