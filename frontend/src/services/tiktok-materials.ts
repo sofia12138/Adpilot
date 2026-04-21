@@ -96,11 +96,28 @@ export function uploadTikTokVideo(
     xhr.addEventListener('load', () => {
       const raw = xhr.responseText ?? ''
       if (xhr.status === 0) { resolve({ success: false, error: '连接中断，请重试' }); return }
+      if (xhr.status === 413) {
+        resolve({ success: false, error: '文件超过网关大小限制（请压缩视频或联系运维调大 client_max_body_size）' })
+        return
+      }
+      if (xhr.status === 504 || xhr.status === 502) {
+        resolve({
+          success: false,
+          error: '网关超时（大文件上传需将 Nginx proxy_read_timeout 调至 30 分钟以上，见 deploy/nginx/adpilot.conf.example）',
+        })
+        return
+      }
       if (!raw.trim()) { resolve({ success: false, error: `空响应 (HTTP ${xhr.status})` }); return }
       try { resolve(JSON.parse(raw)) }
       catch { resolve({ success: false, error: `非 JSON 响应: ${raw.slice(0, 200)}` }) }
     })
-    xhr.addEventListener('error', () => resolve({ success: false, error: '网络错误' }))
+    // 连接被网关/防火墙断开时多为 error，无 HTTP 状态码（常见于 Nginx 默认 60s client_body_timeout 或 120s proxy 超时）
+    xhr.addEventListener('error', () =>
+      resolve({
+        success: false,
+        error: '网络错误（若文件较大或网速较慢，多为网关超时：请运维按 deploy/nginx/adpilot.conf.example 调大 TikTok 上传相关超时）',
+      }),
+    )
     xhr.addEventListener('abort', () => resolve({ success: false, error: '已取消' }))
     xhr.addEventListener('timeout', () => resolve({ success: false, error: '上传超时' }))
 

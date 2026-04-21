@@ -88,17 +88,18 @@ ls frontend/dist/index.html  # 确认文件存在
 ```bash
 sudo cp deploy/nginx/adpilot.conf.example /etc/nginx/sites-available/adpilot.conf
 sudo nano /etc/nginx/sites-available/adpilot.conf
-# 修改 <YOUR_DOMAIN>，确认 root 路径指向 frontend/dist
+# 修改 <YOUR_DOMAIN>；root 需与静态资源实际目录一致（一键部署脚本将 dist 拷到 /var/www/adpilot）
 
 sudo ln -s /etc/nginx/sites-available/adpilot.conf /etc/nginx/sites-enabled/
 sudo nginx -t        # 检查配置
 sudo systemctl reload nginx
 ```
 
-**Nginx 代理逻辑**：
-- `/` → 前端静态文件（`frontend/dist/`），SPA 回退到 `index.html`
+**Nginx 代理逻辑**（详见仓库内 `deploy/nginx/adpilot.conf.example`）：
+- `/` → 前端静态文件，SPA 回退到 `index.html`
+- `/api/materials/tiktok/` → 单独加长超时与 body 限制（大视频上传必需）
 - `/api/` → 反向代理到 `http://127.0.0.1:8000/api/`
-- `/health` → 后端健康检查
+- `/health`、`/docs`、`/openapi.json` → 后端
 
 ## 6. 数据库说明
 
@@ -172,3 +173,20 @@ sudo journalctl -u adpilot -n 50 --no-pager  # 查看最近 50 行日志
 
 ### 数据库连接失败
 确认 MySQL 服务运行中，且 `.env` 中的数据库连接信息正确。APP 和 BIZ 库需在本机或可达的 MySQL 实例上预先创建。
+
+### TikTok 素材上传提示「网络错误」或网关超时
+
+单条上传请求会持续到「浏览器传完文件 + 后端转发 TikTok API 完成」。若 Nginx 使用默认或较短的 `proxy_read_timeout`（如 120s）、`client_body_timeout`（默认 60s），连接会被提前断开，浏览器 XHR 常表现为「网络错误」。
+
+**处理**：用仓库中的 [deploy/nginx/adpilot.conf.example](deploy/nginx/adpilot.conf.example) 覆盖或合并到线上配置，确保至少包含：
+
+- `client_max_body_size`、`client_body_timeout`、`send_timeout` 足够大
+- `location ^~ /api/materials/tiktok/` 内 `proxy_read_timeout` / `proxy_send_timeout` 设为 3600s 左右
+
+修改后执行：
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**自查**：`sudo tail -f /var/log/nginx/error.log`，上传失败时若出现 `upstream timed out` 或 `client timed out`，即为超时问题。
