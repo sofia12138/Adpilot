@@ -7,6 +7,10 @@ export interface Template {
   template_type?: string
   template_subtype?: string
   is_builtin?: boolean
+  is_system?: boolean
+  is_editable?: boolean
+  template_key?: string | null
+  parent_template_id?: string | null
   created_at: string
   updated_at: string
   [key: string]: unknown

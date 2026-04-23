@@ -1,4 +1,4 @@
-import { createBrowserRouter, Navigate } from 'react-router-dom'
+import { createBrowserRouter, Navigate, useLocation } from 'react-router-dom'
 import { MainLayout } from '@/components/layout/main-layout'
 import { AuthGuard } from '@/components/auth/AuthGuard'
 
@@ -35,6 +35,12 @@ function G({ panelKey, children }: { panelKey: string; children: React.ReactNode
   return <AuthGuard panelKey={panelKey}>{children}</AuthGuard>
 }
 
+/** 保留 query string 的 redirect，用于旧链接兼容 */
+function RedirectKeepQuery({ to }: { to: string }) {
+  const loc = useLocation()
+  return <Navigate to={`${to}${loc.search}`} replace />
+}
+
 export const router = createBrowserRouter([
   { path: '/login', element: <LoginPage /> },
   {
@@ -48,6 +54,8 @@ export const router = createBrowserRouter([
       { path: 'console/tiktok',     element: <G panelKey="tiktok_console"><TikTokConsolePage /></G> },
       { path: 'console/meta',       element: <G panelKey="meta_console"><MetaConsolePage /></G> },
       { path: 'ads/create',         element: <G panelKey="ad_create"><AdsCreatePage /></G> },
+      // 旧链接兼容：保留 ?template_id= 透传，重定向到统一新建广告页
+      { path: 'ads/create-tiktok-minis', element: <RedirectKeepQuery to="/ads/create" /> },
       { path: 'templates',          element: <G panelKey="template_mgmt"><TemplatesPage /></G> },
       { path: 'creatives',          element: <G panelKey="creatives"><CreativesPage /></G> },
       { path: 'creative-analysis',  element: <G panelKey="creative_analysis"><CreativeAnalysisPage /></G> },

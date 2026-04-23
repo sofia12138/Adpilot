@@ -16,10 +16,21 @@ def _row_to_dict(row: dict) -> dict:
         "id": row["tpl_id"],
         "name": row["name"],
         "platform": row["platform"],
+        "is_builtin": bool(row.get("is_builtin", 0)),
+        "is_system": bool(row.get("is_system", 0)),
+        "is_editable": bool(row.get("is_editable", 1)),
+        "template_key": row.get("template_key") or None,
+        "parent_template_id": row.get("parent_template_id") or None,
         "created_at": row["created_at"].isoformat() if row.get("created_at") else "",
         "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else "",
     }
-    result.update(content)
+    # content 中允许包含模板特有字段；不要让它覆盖上面这些"行级"字段
+    reserved = {"id", "name", "platform", "is_builtin", "is_system",
+                "is_editable", "template_key", "parent_template_id",
+                "created_at", "updated_at"}
+    for k, v in content.items():
+        if k not in reserved:
+            result[k] = v
     return result
 
 
@@ -38,15 +49,30 @@ def get_by_tpl_id(tpl_id: str) -> Optional[dict]:
     return _row_to_dict(row) if row else None
 
 
+def get_by_key(template_key: str) -> Optional[dict]:
+    with get_app_conn() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM app_templates WHERE template_key = %s LIMIT 1", (template_key,))
+        row = cur.fetchone()
+    return _row_to_dict(row) if row else None
+
+
 def create(*, tpl_id: str, name: str, platform: str,
            content: dict, is_builtin: bool = False,
+           is_system: bool = False, is_editable: bool = True,
+           template_key: Optional[str] = None,
+           parent_template_id: Optional[str] = None,
            created_by: str = "", created_at: str | None = None) -> dict:
     with get_app_conn() as conn:
         cur = conn.cursor()
-        sql = """INSERT INTO app_templates (tpl_id, name, platform, is_builtin, content, created_by, created_at)
-                 VALUES (%s, %s, %s, %s, %s, %s, %s)"""
+        sql = """INSERT INTO app_templates
+                    (tpl_id, template_key, name, platform,
+                     is_builtin, is_system, is_editable, parent_template_id,
+                     content, created_by, created_at)
+                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
         cur.execute(sql, (
-            tpl_id, name, platform, int(is_builtin),
+            tpl_id, template_key, name, platform,
+            int(is_builtin), int(is_system), int(is_editable), parent_template_id,
             json.dumps(content, ensure_ascii=False),
             created_by,
             created_at or None,

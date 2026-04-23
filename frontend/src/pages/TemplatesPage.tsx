@@ -1,10 +1,12 @@
 import { useState, useEffect, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { PageHeader } from '@/components/common/PageHeader'
 import { SectionCard } from '@/components/common/SectionCard'
 import { CountryMultiSelect } from '@/components/common/CountryMultiSelect'
 import {
   Loader2, AlertCircle, Trash2, Pencil, Copy, X, Eye,
   ToggleLeft, ToggleRight, ChevronLeft, Shield, Save, Package,
+  Send,
 } from 'lucide-react'
 import {
   LandingPagePickerDialog,
@@ -16,6 +18,7 @@ import {
   useTemplates, useUpdateTemplate, useDeleteTemplate, useCloneTemplate,
 } from '@/hooks/use-templates'
 import type { Template } from '@/services/templates'
+import { locationIdsToCodes as locationIdsToCodesPreview } from '@/constants/tiktok-locations'
 import { fetchMetaAccounts, type MetaAccount } from '@/services/advertisers'
 import {
   fetchMetaPages, fetchMetaPixels,
@@ -42,6 +45,23 @@ function isMetaW2aConv(t: Template): boolean {
   return t.platform === 'meta'
     && t.template_type === 'web_to_app'
     && t.template_subtype === 'conversion'
+}
+
+function isSystemMaster(t: Template): boolean {
+  return Boolean(t.is_system)
+}
+
+function isTikTokMinisBasic(t: Template): boolean {
+  return t.platform === 'tiktok' && t.template_type === 'tiktok_minis_basic'
+}
+
+function isTikTokWebToApp(t: Template): boolean {
+  return t.platform === 'tiktok' && t.template_type === 'tiktok_web_to_app'
+}
+
+/** 是否支持从模板管理页跳转到新建广告页直接使用 */
+function canLaunchFromTemplatesPage(t: Template): boolean {
+  return isTikTokMinisBasic(t) || isTikTokWebToApp(t)
 }
 
 /* ═══════════════════════════════════════════════════
@@ -237,10 +257,14 @@ function editStateToBody(s: W2aEditState): Record<string, unknown> {
    主组件
    ═══════════════════════════════════════════════════ */
 export default function TemplatesPage() {
+  const navigate = useNavigate()
   const { data: templates, isLoading, isError } = useTemplates()
   const updateMutation = useUpdateTemplate()
   const deleteMutation = useDeleteTemplate()
   const cloneMutation = useCloneTemplate()
+
+  // 系统母版只读预览弹窗
+  const [systemPreview, setSystemPreview] = useState<Template | null>(null)
 
   // 视图状态
   type View = 'list' | 'view' | 'edit'
@@ -289,12 +313,17 @@ export default function TemplatesPage() {
       .finally(() => setPixelsLoading(false))
   }, [currentAdAccount])
 
-  /* ── 列表筛选：只显示 Meta W2A Conv ABO ── */
+  /* ── 列表筛选 ── */
+  // 系统母版区：所有 is_system === true 的模板（含 TikTok Minis、Meta W2A Conv ABO）
+  const systemTemplates = useMemo(
+    () => (templates ?? []).filter(isSystemMaster),
+    [templates],
+  )
+  // Meta W2A 业务模板：用户基于 Meta W2A 母版另存的副本，在下方「我的业务模板」展示
   const w2aTemplates = useMemo(() =>
     (templates ?? []).filter(isMetaW2aConv),
     [templates],
   )
-  const defaultTpl = useMemo(() => w2aTemplates.find(isBuiltin), [w2aTemplates])
   const businessTpls = useMemo(() => w2aTemplates.filter(t => !isBuiltin(t)), [w2aTemplates])
 
   /* ── 操作 ── */
@@ -693,7 +722,64 @@ export default function TemplatesPage() {
      ═══════════════════════════════════════════════ */
   return (
     <div className="max-w-6xl mx-auto">
-      <PageHeader title="模板管理" description="Meta Web to App Conversion (ABO) 模板配置" />
+      <PageHeader title="模板管理" description="系统母版（只读） + 我的业务模板" />
+
+      {/* ─── 系统母版区（含 TikTok Minis、Meta W2A 等所有 is_system 模板） ─── */}
+      {!isLoading && !isError && systemTemplates.length > 0 && (
+        <SectionCard
+          title={`系统母版（${systemTemplates.length}）`}
+          className="mb-5"
+          extra={<span className="inline-flex items-center gap-1 text-amber-500 font-medium"><Shield className="w-3.5 h-3.5" /> 只读 · 可另存为</span>}
+        >
+          <div className="divide-y divide-gray-100">
+            {systemTemplates.map(t => {
+              const canLaunch = canLaunchFromTemplatesPage(t)
+              const platformLabel = t.platform === 'tiktok' ? 'TikTok' : t.platform === 'meta' ? 'Meta' : String(t.platform)
+              const platformBg = t.platform === 'tiktok' ? 'bg-pink-50 text-pink-600' : 'bg-indigo-50 text-indigo-600'
+              return (
+                <div key={t.id} className="flex items-center justify-between py-3 first:pt-0 last:pb-0">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-semibold text-gray-800 truncate">{t.name}</p>
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-medium ${platformBg}`}>{platformLabel}</span>
+                      <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-600 border border-amber-200">系统母版</span>
+                      {t.template_type ? (
+                        <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500">{String(t.template_type)}</span>
+                      ) : null}
+                    </div>
+                    <p className="text-xs text-gray-400 mt-1">
+                      {t.template_key ? `key: ${String(t.template_key)}` : `id: ${t.id}`}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 ml-4">
+                    {canLaunch && (
+                      <button
+                        onClick={() => navigate(`/ads/create?template_id=${encodeURIComponent(t.id)}`)}
+                        className="flex items-center gap-1.5 px-3 py-2 text-xs text-white bg-pink-500 rounded-lg hover:bg-pink-600 transition font-medium"
+                        title="使用此模板创建 TikTok 广告"
+                      >
+                        <Send className="w-3.5 h-3.5" /> 用此模板新建广告
+                      </button>
+                    )}
+                    <button
+                      onClick={() => isMetaW2aConv(t) ? openView(t) : setSystemPreview(t)}
+                      className="flex items-center gap-1.5 px-3 py-2 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
+                    >
+                      <Eye className="w-3.5 h-3.5" /> 查看
+                    </button>
+                    <button
+                      onClick={() => openCloneDialog(t.id, t.name)}
+                      className="flex items-center gap-1.5 px-3 py-2 text-xs text-white bg-blue-500 rounded-lg hover:bg-blue-600 transition font-medium"
+                    >
+                      <Copy className="w-3.5 h-3.5" /> 另存为
+                    </button>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </SectionCard>
+      )}
 
       {isLoading && (
         <div className="flex items-center justify-center py-32 text-gray-400">
@@ -708,46 +794,13 @@ export default function TemplatesPage() {
 
       {!isLoading && !isError && (
         <>
-          {/* 默认模板（母版） */}
-          {defaultTpl && (
-            <SectionCard title="系统默认模板（母版）" className="mb-5"
-              extra={<span className="inline-flex items-center gap-1 text-amber-500 font-medium"><Shield className="w-3.5 h-3.5" /> 只读</span>}>
-              <div className="flex items-center justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-semibold text-gray-800">{defaultTpl.name}</p>
-                    <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-600">Meta</span>
-                    <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-600 border border-amber-200">系统默认</span>
-                  </div>
-                  <p className="text-xs text-gray-400 mt-1">
-                    {(defaultTpl.campaign as Record<string, unknown>)?.objective as string || 'OUTCOME_SALES'}
-                    {' · '}
-                    {(defaultTpl.adset as Record<string, unknown>)?.optimization_goal as string || 'OFFSITE_CONVERSIONS'}
-                    {' · '}
-                    预算 ${Number((defaultTpl.adset as Record<string, unknown>)?.daily_budget ?? 5000) / 100}/天
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button onClick={() => openView(defaultTpl)}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition">
-                    <Eye className="w-3.5 h-3.5" /> 查看
-                  </button>
-                  <button onClick={() => openCloneDialog(defaultTpl.id, defaultTpl.name)}
-                    className="flex items-center gap-1.5 px-3 py-2 text-xs text-white bg-blue-500 rounded-lg hover:bg-blue-600 transition font-medium">
-                    <Copy className="w-3.5 h-3.5" /> 另存为
-                  </button>
-                </div>
-              </div>
-            </SectionCard>
-          )}
-
           {/* 业务模板列表 */}
           <SectionCard title={`我的业务模板（${businessTpls.length}）`} className="mb-5">
             {businessTpls.length === 0 ? (
               <div className="flex flex-col items-center py-12 text-gray-400">
                 <Copy className="w-8 h-8 mb-3 opacity-50" />
                 <p className="text-sm">暂无业务模板</p>
-                <p className="text-xs mt-1">点击上方默认模板的「另存为」创建第一个业务模板</p>
+                <p className="text-xs mt-1">点击上方系统母版的「另存为」创建第一个业务模板</p>
               </div>
             ) : (
               <div className="divide-y divide-gray-100">
@@ -803,6 +856,122 @@ export default function TemplatesPage() {
         onSubmit={handleClone} onClose={() => setCloneOpen(false)}
         isPending={cloneMutation.isPending} success={cloneSuccess}
       />}
+
+      {/* 系统母版只读预览弹窗（非 Meta-W2A 母版用此） */}
+      {systemPreview && <SystemTemplatePreviewDialog
+        tpl={systemPreview}
+        onClose={() => setSystemPreview(null)}
+        onClone={() => {
+          openCloneDialog(systemPreview.id, systemPreview.name)
+          setSystemPreview(null)
+        }}
+        onLaunch={isTikTokMinisBasic(systemPreview) ? () => {
+          navigate(`/ads/create?template_id=${encodeURIComponent(systemPreview.id)}`)
+        } : undefined}
+      />}
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════
+   系统母版只读预览弹窗
+   ═══════════════════════════════════════════════════ */
+interface SystemTemplatePreviewDialogProps {
+  tpl: Template
+  onClose: () => void
+  onClone: () => void
+  onLaunch?: () => void
+}
+
+function SystemTemplatePreviewDialog({ tpl, onClose, onClone, onLaunch }: SystemTemplatePreviewDialogProps) {
+  // 排除行级字段，只展示模板内容
+  const reserved = new Set([
+    'id', 'name', 'platform', 'is_builtin', 'is_system', 'is_editable',
+    'template_key', 'parent_template_id', 'created_at', 'updated_at',
+  ])
+  const content: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(tpl)) {
+    if (!reserved.has(k)) content[k] = v
+  }
+  // 友好预览：投放地区与默认 identity（仅 TikTok Minis 模板有意义）
+  const defaults = (tpl.defaults as Record<string, unknown> | undefined) ?? {}
+  const selection = defaults.location_selection as { country_codes?: string[]; group_key?: string | null } | undefined
+  const locationIds = Array.isArray(defaults.location_ids) ? (defaults.location_ids as unknown[]).map(String) : []
+  const locationCountryCodes = selection?.country_codes && selection.country_codes.length > 0
+    ? selection.country_codes
+    : locationIdsToCodesPreview(locationIds)
+  const locationGroupKey = selection?.group_key
+  const defaultIdentityId = (defaults.identity_id as string | undefined) || ''
+  const showLocationPreview = locationIds.length > 0 || locationCountryCodes.length > 0
+  const showIdentityPreview = !!defaultIdentityId
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-base font-semibold text-gray-800">{tpl.name}</h3>
+              <span className="inline-block px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-600 border border-amber-200">系统母版</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-1">
+              platform: {tpl.platform}
+              {tpl.template_type ? ` · type: ${String(tpl.template_type)}` : ''}
+              {tpl.template_key ? ` · key: ${String(tpl.template_key)}` : ''}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="flex items-start gap-3 mx-6 mt-4 p-3 bg-amber-50 border border-amber-200 rounded-xl">
+          <Shield className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+          <p className="text-xs text-amber-700">
+            系统母版为只读模板，不支持直接编辑或删除。如需修改，请「另存为」生成业务模板副本。
+          </p>
+        </div>
+        <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
+          {(showLocationPreview || showIdentityPreview) && (
+            <div className="grid grid-cols-2 gap-3">
+              {showLocationPreview && (
+                <div className="p-3 border border-gray-200 rounded-xl bg-white">
+                  <div className="text-[11px] text-gray-400 mb-1.5">默认投放地区</div>
+                  <div className="flex flex-wrap gap-1">
+                    {locationCountryCodes.length > 0
+                      ? locationCountryCodes.map(c => (
+                        <span key={c} className="inline-block px-2 py-0.5 rounded-md bg-blue-50 text-blue-600 text-xs font-medium">{c}</span>
+                      ))
+                      : <span className="text-xs text-gray-400">无可识别国家代码</span>}
+                    {locationGroupKey && (
+                      <span className="inline-block px-2 py-0.5 rounded-md bg-pink-50 text-pink-500 text-[11px]">group: {locationGroupKey}</span>
+                    )}
+                  </div>
+                  <div className="mt-1.5 text-[11px] font-mono text-gray-400 break-all">
+                    location_ids = [{locationIds.map(id => `"${id}"`).join(', ')}]
+                  </div>
+                </div>
+              )}
+              {showIdentityPreview && (
+                <div className="p-3 border border-gray-200 rounded-xl bg-white">
+                  <div className="text-[11px] text-gray-400 mb-1.5">默认 Identity</div>
+                  <div className="text-xs font-mono text-gray-700 break-all">{defaultIdentityId}</div>
+                </div>
+              )}
+            </div>
+          )}
+          <pre className="text-xs bg-gray-50 border border-gray-200 rounded-xl p-4 overflow-auto whitespace-pre-wrap break-all text-gray-700">
+            {JSON.stringify(content, null, 2)}
+          </pre>
+        </div>
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-gray-100 bg-gray-50/50 rounded-b-2xl">
+          {onLaunch && (
+            <button onClick={onLaunch} className="px-4 py-2 text-sm text-white bg-pink-500 rounded-xl hover:bg-pink-600 transition font-medium flex items-center gap-1.5">
+              <Send className="w-4 h-4" /> 用此模板新建广告
+            </button>
+          )}
+          <button onClick={onClone} className="px-4 py-2 text-sm text-white bg-blue-500 rounded-xl hover:bg-blue-600 transition font-medium flex items-center gap-1.5">
+            <Copy className="w-4 h-4" /> 另存为业务模板
+          </button>
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 bg-gray-100 rounded-xl hover:bg-gray-200 transition">关闭</button>
+        </div>
+      </div>
     </div>
   )
 }

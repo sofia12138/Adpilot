@@ -76,6 +76,198 @@ BUILTIN_TEMPLATES: list[dict] = [
         "app_id": "7613116626166104080",
         "created_at": "2026-03-13T20:30:00",
     },
+    # ── TikTok Minis 系统母版（不可直接编辑/删除，可另存为）──
+    # 默认值反提自已跑通广告链路：
+    #   campaign_id=1863044185193761 / adgroup_id=1863044185193777
+    # 仅保留"环境无关"的策略字段；
+    # advertiser_id / identity / video / minis_id 等环境字段每次创建时由用户提供。
+    {
+        "id": "tpl_tiktok_minis_basic",
+        "template_key": "tpl_tiktok_minis_basic",
+        "name": "TikTok Minis 系统母版",
+        "platform": "tiktok",
+        "template_type": "tiktok_minis_basic",
+        "is_system": True,
+        "is_editable": False,
+        "campaign": {
+            # ─────────────────────────────────────────────────────────
+            #  TikTok Minis Campaign 创建依赖广告主开通 Smart+ OpenAPI 写权限。
+            #  申请之前 campaign/create/ 必报 [40002] Enter a valid Campaign Type。
+            #  申请通过后，下面这套字段与源 campaign 1863044185193761 完全对齐：
+            #    objective_type=APP_PROMOTION
+            #    campaign_type=REGULAR_CAMPAIGN
+            #    campaign_automation_type=UPGRADED_SMART_PLUS
+            #    budget_mode=BUDGET_MODE_DYNAMIC_DAILY_BUDGET（Smart+ 唯一接受的预算模式）
+            #  budget 金额从 payload 透传到 adgroup 层；campaign 层 budget 不传金额。
+            # ─────────────────────────────────────────────────────────
+            "objective_type": "APP_PROMOTION",
+            "campaign_type": "REGULAR_CAMPAIGN",
+            "campaign_automation_type": "UPGRADED_SMART_PLUS",
+            "budget_mode": "BUDGET_MODE_DYNAMIC_DAILY_BUDGET",
+            "operation_status": "ENABLE",
+        },
+        "adgroup": {
+            "promotion_type": "MINI_APP",
+            "placement_type": "PLACEMENT_TYPE_NORMAL",
+            "placements": ["PLACEMENT_TIKTOK"],
+            "billing_event": "OCPM",
+            "bid_type": "BID_TYPE_NO_BID",
+            "optimization_goal": "VALUE",
+            "optimization_event": "ACTIVE_PAY",
+            "secondary_optimization_event": "PURCHASE_ROI",
+            "deep_bid_type": "VO_MIN_ROAS",
+            "vbo_window": "ZERO_DAY",
+            "schedule_type": "SCHEDULE_FROM_NOW",
+            "budget_mode": "BUDGET_MODE_DAY",
+            "age_groups": ["AGE_18_24", "AGE_25_34", "AGE_35_44", "AGE_45_54", "AGE_55_100"],
+            "gender": "GENDER_UNLIMITED",
+            "languages": ["en"],
+            "operating_systems": [],
+            "skip_learning_phase": True,
+            "pacing": "PACING_MODE_SMOOTH",
+            "operation_status": "ENABLE",
+            # 默认建议值，可被 payload.budget / payload.roas_bid 覆盖
+            "default_budget": 50,
+            "default_roas_bid": 0.8,
+        },
+        "ad": {
+            "ad_format": "SINGLE_VIDEO",
+        },
+        # 业务线默认 minis（可在 payload 中覆盖）
+        "defaults": {
+            "app_id": "7613116626166104080",
+            "minis_id": "mnu8f8spjpxjy7oa",
+            # 发单时仍以 location_ids 为准；location_selection 是结构化记录，
+            # 用于前端按"国家代码 + 地区组"回显选择器，二者并存以兼容老数据。
+            "location_ids": ["2077456", "2635167", "2186224", "6251999"],
+            "location_selection": {
+                "group_key": "tier1",
+                "country_codes": ["US", "GB", "CA", "AU"],
+            },
+        },
+        "created_at": "2026-04-22T00:00:00",
+    },
+    # ──────────────────────────────────────────────────────────
+    #  TikTok Web to App 系统母版（只读，可另存为）
+    #  · source_ids 指向已跑通广告链：
+    #      advertiser_id=7483423834243366928
+    #      campaign_id=1856089130041841
+    #      adgroup_id=1856089495835090
+    #      ad_id=7602545102489210123
+    #  · defaults 为母版快照；发单时只允许 editable_fields 白名单字段从 payload 覆盖
+    #  · defaults 首次固化的初始值参考 tpl_web_to_app 旧系统模板 + TikTok W2A 通用默认
+    #    后续可通过 GET /api/templates/system/tiktok-w2a/probe 从源链路重新抽取后替换
+    # ──────────────────────────────────────────────────────────
+    {
+        "id": "tpl_tiktok_web_to_app_system",
+        "template_key": "tpl_tiktok_web_to_app_system",
+        "name": "TikTok Web to App 母版",
+        "platform": "tiktok",
+        "template_type": "tiktok_web_to_app",
+        "is_system": True,
+        "is_editable": False,
+        "is_builtin": True,
+        "created_by": "system",
+        "source_ids": {
+            "advertiser_id": "7483423834243366928",
+            "campaign_id": "1856089130041841",
+            "adgroup_id": "1856089495835090",
+            "ad_id": "7602545102489210123",
+        },
+        # launch_from_template 直接读取 campaign/adgroup/ad 扁平节点，这里同时提供：
+        "campaign": {
+            "objective_type": "WEB_CONVERSIONS",
+            "campaign_type": "REGULAR_CAMPAIGN",
+            "budget_mode": "BUDGET_MODE_INFINITE",
+            "operation_status": "ENABLE",
+        },
+        "adgroup": {
+            "promotion_type": "WEBSITE",
+            "placement_type": "PLACEMENT_TYPE_AUTOMATIC",
+            "placements": ["PLACEMENT_TIKTOK"],
+            "billing_event": "OCPM",
+            "bid_type": "BID_TYPE_NO_BID",
+            "optimization_goal": "CONVERT",
+            "optimization_event": "SHOPPING",
+            "pacing": "PACING_MODE_SMOOTH",
+            "schedule_type": "SCHEDULE_FROM_NOW",
+            "budget_mode": "BUDGET_MODE_DAY",
+            "operating_systems": [],
+            "age_groups": ["AGE_18_24", "AGE_25_34", "AGE_35_44", "AGE_45_54", "AGE_55_100"],
+            "gender": "GENDER_UNLIMITED",
+            "languages": ["en"],
+            "operation_status": "ENABLE",
+            "default_budget": 50,
+        },
+        "ad": {
+            "ad_format": "SINGLE_VIDEO",
+            "call_to_action": "LEARN_MORE",
+        },
+        "defaults": {
+            "objective_type": "WEB_CONVERSIONS",
+            "campaign_budget_mode": "BUDGET_MODE_INFINITE",
+            "campaign_status": "ENABLE",
+            "adgroup_budget_mode": "BUDGET_MODE_DAY",
+            "billing_event": "OCPM",
+            "optimization_goal": "CONVERT",
+            "bid_type": "BID_TYPE_NO_BID",
+            "pacing": "PACING_MODE_SMOOTH",
+            "schedule_type": "SCHEDULE_FROM_NOW",
+            "operating_system": [],
+            "placement": {
+                "placement_type": "PLACEMENT_TYPE_AUTOMATIC",
+                "placements": ["PLACEMENT_TIKTOK"],
+            },
+            "targeting": {
+                "age_groups": ["AGE_18_24", "AGE_25_34", "AGE_35_44", "AGE_45_54", "AGE_55_100"],
+                "gender": "GENDER_UNLIMITED",
+                "languages": ["en"],
+                "location_ids": ["2077456"],
+                "location_selection": {
+                    "group_key": "north_america",
+                    "country_codes": ["US"],
+                },
+            },
+            "identity": {
+                "identity_type": "CUSTOMIZED_USER",
+            },
+            "tracking": {
+                "pixel_id": "",
+                "optimization_event": "SHOPPING",
+                "tracking_url": "",
+            },
+            "creative_format": "SINGLE_VIDEO",
+            "call_to_action": "LEARN_MORE",
+            "landing_page_template": "",
+        },
+        "editable_fields": [
+            "campaign_name",
+            "adgroup_name",
+            "ad_name",
+            "budget",
+            "bid",
+            "country",
+            "region_group",
+            "age",
+            "gender",
+            "audience",
+            "landing_page_url",
+            "tracking_params",
+            "video_id",
+            "ad_text",
+            "ad_title",
+            "call_to_action",
+            "schedule",
+        ],
+        "launch_rules": {
+            "create_campaign": True,
+            "create_adgroup": True,
+            "create_ad": True,
+            "multi_adgroup_supported": False,
+            "multi_creative_supported": False,
+        },
+        "created_at": "2026-04-22T00:00:00",
+    },
     {
         "id": "tpl_meta_us_aeo",
         "name": "Meta US AEO Basic",
@@ -165,10 +357,14 @@ BUILTIN_TEMPLATES: list[dict] = [
     },
     {
         "id": "tpl_meta_web_to_app_conv_abo",
+        "template_key": "tpl_meta_web_to_app_conv_abo",
         "name": "Meta Web to App Conversion (ABO)",
         "platform": "meta",
         "template_type": "web_to_app",
         "template_subtype": "conversion",
+        # 与 TikTok Minis 母版统一归入「系统母版」分组，只读、可另存为。
+        "is_system": True,
+        "is_editable": False,
         "campaign": {
             "objective": "OUTCOME_SALES",
             "status": "PAUSED",
@@ -252,9 +448,11 @@ async def update_template(tpl_id: str, tpl: dict = Body(...), user: User = Depen
     old = template_service.get_template(tpl_id)
     if not old:
         return {"error": "模板不存在"}
+    if old.get("is_system") and not old.get("is_editable", True):
+        return {"error": "系统母版不允许直接编辑，请使用「另存为」创建副本后修改"}
     result = template_service.update_template(tpl_id, tpl)
     if not result:
-        return {"error": "模板不存在"}
+        return {"error": "模板不存在或不可编辑"}
 
     changed = _diff_fields(old, result)
     detail = f"changed_fields: {', '.join(changed)}" if changed else "无字段变更"
@@ -279,6 +477,8 @@ async def delete_template(tpl_id: str, user: User = Depends(get_current_user)):
     old = template_service.get_template(tpl_id)
     if not old:
         return {"error": "模板不存在"}
+    if old.get("is_system"):
+        return {"error": "系统母版不可删除"}
     template_service.delete_template(tpl_id)
     log_operation(
         username=user.username,
@@ -304,8 +504,11 @@ async def clone_template(tpl_id: str, body: dict = Body(...), user: User = Depen
         return {"error": "新模板名称不能为空"}
 
     clone_data = {k: v for k, v in source.items()
-                  if k not in ("id", "name", "created_at", "updated_at", "is_builtin")}
+                  if k not in ("id", "name", "created_at", "updated_at",
+                               "is_builtin", "is_system", "is_editable",
+                               "template_key", "parent_template_id")}
     clone_data["name"] = new_name
+    clone_data["parent_template_id"] = source.get("id", "")
     if body.get("notes"):
         clone_data["notes"] = body["notes"]
 
@@ -354,10 +557,15 @@ async def launch_from_template(payload: dict = Body(...), _user: User = Depends(
         return {"error": "模板不存在"}
 
     platform = tpl.get("platform", "tiktok")
-    logger.info(f"[launch] template_id={tpl_id}  platform={platform}")
+    template_type = (tpl.get("template_type") or "").lower()
+    logger.info(f"[launch] template_id={tpl_id}  platform={platform}  type={template_type}")
 
     if platform == "meta":
         resp = await _launch_meta(tpl, payload)
+    elif template_type == "tiktok_minis_basic":
+        resp = await _launch_tiktok_minis(tpl, payload)
+    elif template_type == "tiktok_web_to_app":
+        resp = await _launch_tiktok_web_to_app(tpl, payload)
     else:
         resp = await _launch_tiktok(tpl, payload)
 
@@ -784,6 +992,582 @@ async def _launch_tiktok(tpl: dict, payload: dict) -> dict:
             results["summary"]["fail"] += 1
 
     return {"data": results}
+
+
+# ══════════════════════════════════════════════════════════
+#  TikTok Minis 系统母版投放（最小可用版本）
+#  · 单 campaign / 单 adgroup / 单 ad / 单素材
+#  · 模板提供策略默认值，环境字段必须由 payload 提供
+# ══════════════════════════════════════════════════════════
+
+async def _launch_tiktok_minis(tpl: dict, payload: dict) -> dict:
+    tpl_campaign = dict(tpl.get("campaign", {}))
+    tpl_adgroup = dict(tpl.get("adgroup", {}))
+    tpl_ad = dict(tpl.get("ad", {}))
+    tpl_defaults = dict(tpl.get("defaults", {}))
+
+    advertiser_id = (payload.get("advertiser_id") or "").strip()
+    campaign_name = (payload.get("campaign_name") or "").strip()
+    adgroup_name = (payload.get("adgroup_name") or campaign_name or "").strip()
+    ad_name = (payload.get("ad_name") or adgroup_name or "Ad").strip()
+
+    if not advertiser_id:
+        return {"error": "缺少 advertiser_id"}
+    if not campaign_name:
+        return {"error": "campaign_name 不能为空"}
+
+    budget = float(payload.get("budget") or tpl_adgroup.get("default_budget") or 50)
+    roas_bid = float(payload.get("roas_bid") or tpl_adgroup.get("default_roas_bid") or 0.8)
+
+    location_ids = payload.get("location_ids") or tpl_defaults.get("location_ids") or []
+    languages = payload.get("languages") or tpl_adgroup.get("languages") or ["en"]
+    age_groups = payload.get("age_groups") or tpl_adgroup.get("age_groups") or []
+    gender = payload.get("gender") or tpl_adgroup.get("gender") or "GENDER_UNLIMITED"
+
+    schedule_start_time = payload.get("schedule_start_time")
+    schedule_end_time = payload.get("schedule_end_time")
+    schedule_type = payload.get("schedule_type") or tpl_adgroup.get(
+        "schedule_type", "SCHEDULE_FROM_NOW"
+    )
+
+    app_id = payload.get("app_id") or tpl_defaults.get("app_id")
+    minis_id = payload.get("minis_id") or tpl_defaults.get("minis_id")
+    if not app_id or not minis_id:
+        return {"error": "缺少 app_id 或 minis_id（小程序投放必填）"}
+
+    identity_id = payload.get("identity_id")
+    identity_type = payload.get("identity_type") or "CUSTOMIZED_USER"
+    if not identity_id:
+        return {"error": "缺少 identity_id（TikTok 广告必填）"}
+
+    video_id = payload.get("video_id")
+    if not video_id:
+        return {"error": "缺少 video_id（请先在 TikTok 素材库上传视频）"}
+
+    ad_text = payload.get("ad_text") or ""
+    landing_url = payload.get("landing_url") or ""  # minis path / destination
+
+    client = TikTokClient()
+    results: dict = {
+        "platform": "tiktok",
+        "template_type": "tiktok_minis_basic",
+        "campaign": None,
+        "adgroup": None,
+        "ad": None,
+        "summary": {"total": 1, "success": 0, "fail": 0},
+    }
+
+    # ── Step 1: Campaign ──
+    # 注意：本接口依赖 TikTok 给 advertiser 开通 Smart+ Campaign OpenAPI 写权限。
+    # 未开通时 campaign/create/ 必报 [40002] Enter a valid Campaign Type，
+    # 这是业务能力问题，不是字段问题（字段已与源 campaign 1863044185193761 完全对齐）。
+    campaign_payload = {
+        "advertiser_id": advertiser_id,
+        "campaign_name": campaign_name,
+        "objective_type": tpl_campaign.get("objective_type", "APP_PROMOTION"),
+        "campaign_type": tpl_campaign.get("campaign_type", "REGULAR_CAMPAIGN"),
+        "campaign_automation_type": tpl_campaign.get(
+            "campaign_automation_type", "UPGRADED_SMART_PLUS"
+        ),
+        "budget_mode": tpl_campaign.get("budget_mode", "BUDGET_MODE_DYNAMIC_DAILY_BUDGET"),
+        "operation_status": tpl_campaign.get("operation_status", "ENABLE"),
+    }
+    try:
+        camp_data = await client.post("campaign/create/", campaign_payload)
+        campaign_id = camp_data.get("campaign_id") or (camp_data.get("campaign_ids") or [""])[0]
+        results["campaign"] = {"success": True, "campaign_id": campaign_id}
+        logger.info(f"[launch-minis] Campaign 创建成功: {campaign_id}")
+    except Exception as e:
+        logger.error(f"[launch-minis] Campaign 创建失败: {e}  payload={campaign_payload}")
+        # 把"能力未开通"识别成更友好的提示，避免反复纠结字段
+        err_str = str(e)
+        friendly_hint = ""
+        if "Enter a valid Campaign Type" in err_str:
+            friendly_hint = (
+                "该广告主未开通 Smart+ Campaign OpenAPI 写权限，请联系 TikTok BC "
+                f"为 advertiser_id={advertiser_id} 申请「Smart+ Campaign API write」能力。"
+            )
+        elif "dynamic daily budget is not supported" in err_str:
+            friendly_hint = (
+                "该广告主已识别但 Smart+ 能力未完全开通（DYNAMIC_DAILY_BUDGET 被业务侧拒），"
+                f"请联系 TikTok BC 检查 advertiser_id={advertiser_id} 的 Smart+ OpenAPI 配置。"
+            )
+        results["campaign"] = {
+            "success": False,
+            "error": err_str,
+            "hint": friendly_hint,
+            "payload_sent": campaign_payload,
+        }
+        # campaign 失败时，下游两步不会执行 —— 给前端一个明确的 skipped 状态，
+        # 避免 UI 渲染成 undefined。
+        results["adgroup"] = {
+            "success": False,
+            "skipped": True,
+            "reason": "未执行（因 Campaign 创建失败）",
+        }
+        results["ad"] = {
+            "success": False,
+            "skipped": True,
+            "reason": "未执行（因 Campaign 创建失败）",
+        }
+        results["summary"]["fail"] = 1
+        return {"data": results}
+
+    # ── Step 2: Ad Group ──
+    adgroup_payload: dict = {
+        "advertiser_id": advertiser_id,
+        "campaign_id": campaign_id,
+        "adgroup_name": adgroup_name,
+        "promotion_type": tpl_adgroup.get("promotion_type", "MINI_APP"),
+        "placement_type": tpl_adgroup.get("placement_type", "PLACEMENT_TYPE_NORMAL"),
+        "placements": tpl_adgroup.get("placements", ["PLACEMENT_TIKTOK"]),
+        "billing_event": tpl_adgroup.get("billing_event", "OCPM"),
+        "bid_type": tpl_adgroup.get("bid_type", "BID_TYPE_NO_BID"),
+        "optimization_goal": tpl_adgroup.get("optimization_goal", "VALUE"),
+        "optimization_event": tpl_adgroup.get("optimization_event", "ACTIVE_PAY"),
+        "secondary_optimization_event": tpl_adgroup.get(
+            "secondary_optimization_event", "PURCHASE_ROI"
+        ),
+        "deep_bid_type": tpl_adgroup.get("deep_bid_type", "VO_MIN_ROAS"),
+        "vbo_window": tpl_adgroup.get("vbo_window", "ZERO_DAY"),
+        "schedule_type": schedule_type,
+        "budget_mode": tpl_adgroup.get("budget_mode", "BUDGET_MODE_DAY"),
+        "budget": budget,
+        "roas_bid": roas_bid,
+        "app_id": app_id,
+        "minis_id": minis_id,
+        "location_ids": location_ids,
+        "languages": languages,
+        "gender": gender,
+        "operation_status": tpl_adgroup.get("operation_status", "ENABLE"),
+        "skip_learning_phase": tpl_adgroup.get("skip_learning_phase", True),
+        "pacing": tpl_adgroup.get("pacing", "PACING_MODE_SMOOTH"),
+    }
+    if age_groups:
+        adgroup_payload["age_groups"] = age_groups
+    if schedule_start_time:
+        adgroup_payload["schedule_start_time"] = schedule_start_time
+    if schedule_end_time:
+        adgroup_payload["schedule_end_time"] = schedule_end_time
+
+    try:
+        ag_data = await client.post("adgroup/create/", adgroup_payload)
+        adgroup_id = ag_data.get("adgroup_id") or (ag_data.get("adgroup_ids") or [""])[0]
+        results["adgroup"] = {"success": True, "adgroup_id": adgroup_id}
+        logger.info(f"[launch-minis] AdGroup 创建成功: {adgroup_id}")
+    except Exception as e:
+        logger.error(f"[launch-minis] AdGroup 创建失败: {e}  payload={adgroup_payload}")
+        results["adgroup"] = {"success": False, "error": str(e), "payload_sent": adgroup_payload}
+        results["summary"]["fail"] = 1
+        return {"data": results}
+
+    # ── Step 3: Ad ──
+    ad_payload: dict = {
+        "advertiser_id": advertiser_id,
+        "adgroup_id": adgroup_id,
+        "ad_name": ad_name,
+        "ad_text": ad_text,
+        "ad_format": tpl_ad.get("ad_format", "SINGLE_VIDEO"),
+        "video_id": video_id,
+        "identity_id": identity_id,
+        "identity_type": identity_type,
+    }
+    if landing_url:
+        ad_payload["landing_page_url"] = landing_url
+
+    try:
+        ad_data = await client.post("ad/create/", ad_payload)
+        ad_id = ad_data.get("ad_id") or (ad_data.get("ad_ids") or [""])[0]
+        results["ad"] = {"success": True, "ad_id": ad_id, "ad_name": ad_name}
+        results["summary"]["success"] = 1
+        logger.info(f"[launch-minis] Ad 创建成功: {ad_id}")
+    except Exception as e:
+        logger.error(f"[launch-minis] Ad 创建失败: {e}  payload={ad_payload}")
+        results["ad"] = {"success": False, "error": str(e), "payload_sent": ad_payload}
+        results["summary"]["fail"] = 1
+
+    return {"data": results}
+
+
+# ══════════════════════════════════════════════════════════
+#  TikTok Web to App 系统母版投放（最小可用版本）
+#  · 单 campaign / 单 adgroup / 单 ad
+#  · 只允许 editable_fields 白名单字段从 payload 覆盖 defaults
+#  · 与 _launch_tiktok_minis 保持相同的错误展示风格（skipped + hint）
+# ══════════════════════════════════════════════════════════
+
+TIKTOK_W2A_EDITABLE_FIELDS: set[str] = {
+    "campaign_name", "adgroup_name", "ad_name",
+    "budget", "bid", "bid_price",
+    "country", "countries", "location_ids", "region_group", "region_group_id",
+    "age_groups", "gender", "audience", "languages",
+    "landing_page_url", "tracking_params", "tracking_url", "deeplink",
+    "video_id", "creative_id", "image_ids",
+    "ad_text", "ad_title", "call_to_action",
+    "schedule", "schedule_type", "schedule_start_time", "schedule_end_time",
+    "identity_id", "identity_type",
+    "pixel_id", "optimization_event",
+}
+
+
+async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
+    tpl_campaign = dict(tpl.get("campaign", {}))
+    tpl_adgroup = dict(tpl.get("adgroup", {}))
+    tpl_ad = dict(tpl.get("ad", {}))
+    tpl_defaults = dict(tpl.get("defaults", {}))
+    tpl_targeting = dict(tpl_defaults.get("targeting", {}))
+    tpl_identity = dict(tpl_defaults.get("identity", {}))
+    tpl_tracking = dict(tpl_defaults.get("tracking", {}))
+
+    # ── 白名单覆盖 ──
+    overrides = {k: v for k, v in payload.items() if k in TIKTOK_W2A_EDITABLE_FIELDS}
+
+    advertiser_id = payload.get("advertiser_id", "").strip()
+    if not advertiser_id:
+        return {"error": "缺少 advertiser_id（TikTok 广告账户必填）"}
+
+    # ── 为该 advertiser 找 access_token ──
+    acc_row = biz_account_repository.get_by_platform_account("tiktok", advertiser_id)
+    if not acc_row or not acc_row.get("access_token"):
+        return {"error": f"未找到 advertiser_id={advertiser_id} 对应的 TikTok access_token，请在「账号管理」先配置"}
+    access_token = acc_row["access_token"]
+
+    campaign_name = overrides.get("campaign_name") or payload.get("campaign_name") or ""
+    adgroup_name = overrides.get("adgroup_name") or campaign_name or "AdGroup_01"
+    ad_name = overrides.get("ad_name") or f"{campaign_name}_Ad_01"
+    if not campaign_name:
+        return {"error": "campaign_name 不能为空"}
+
+    budget = float(overrides.get("budget", tpl_adgroup.get("default_budget", 50)))
+    bid_price = overrides.get("bid") or overrides.get("bid_price")
+
+    # targeting
+    location_ids = (
+        overrides.get("location_ids")
+        or tpl_targeting.get("location_ids")
+        or []
+    )
+    if not location_ids:
+        return {"error": "至少选择 1 个投放地区（location_ids 或 country / region_group）"}
+    languages = overrides.get("languages") or tpl_targeting.get("languages") or ["en"]
+    age_groups = overrides.get("age_groups") or tpl_targeting.get("age_groups") or []
+    gender = overrides.get("gender") or tpl_targeting.get("gender") or "GENDER_UNLIMITED"
+
+    # schedule
+    schedule_type = overrides.get("schedule_type") or tpl_adgroup.get(
+        "schedule_type", "SCHEDULE_FROM_NOW"
+    )
+    schedule_start_time = overrides.get("schedule_start_time")
+    schedule_end_time = overrides.get("schedule_end_time")
+
+    # identity
+    identity_id = overrides.get("identity_id")
+    identity_type = overrides.get("identity_type") or tpl_identity.get(
+        "identity_type", "CUSTOMIZED_USER"
+    )
+    if not identity_id:
+        return {"error": "缺少 identity_id（TikTok 广告必填）"}
+
+    # creative
+    video_id = overrides.get("video_id")
+    if not video_id:
+        return {"error": "缺少 video_id（请先上传 TikTok 视频素材）"}
+
+    # landing & tracking
+    landing_url = overrides.get("landing_page_url") or ""
+    if not landing_url:
+        return {"error": "缺少 landing_page_url（Web to App 必填）"}
+    tracking_url = overrides.get("tracking_url") or overrides.get("tracking_params") or ""
+
+    # pixel (用于 WEB_CONVERSIONS objective 的 promoted_object)
+    pixel_id = overrides.get("pixel_id") or tpl_tracking.get("pixel_id") or ""
+    optimization_event = (
+        overrides.get("optimization_event")
+        or tpl_tracking.get("optimization_event")
+        or tpl_adgroup.get("optimization_event")
+        or "SHOPPING"
+    )
+
+    ad_text = overrides.get("ad_text") or ""
+    call_to_action = overrides.get("call_to_action") or tpl_ad.get(
+        "call_to_action", "LEARN_MORE"
+    )
+
+    client = TikTokClient(access_token=access_token)
+    results: dict = {
+        "platform": "tiktok",
+        "template_type": "tiktok_web_to_app",
+        "campaign": None,
+        "adgroup": None,
+        "ad": None,
+        "summary": {"total": 1, "success": 0, "fail": 0},
+    }
+
+    # ── Step 1: Campaign ──
+    campaign_payload = {
+        "advertiser_id": advertiser_id,
+        "campaign_name": campaign_name,
+        "objective_type": tpl_campaign.get("objective_type", "WEB_CONVERSIONS"),
+        "campaign_type": tpl_campaign.get("campaign_type", "REGULAR_CAMPAIGN"),
+        "budget_mode": tpl_campaign.get("budget_mode", "BUDGET_MODE_INFINITE"),
+        "operation_status": tpl_campaign.get("operation_status", "ENABLE"),
+    }
+    try:
+        camp_data = await client.post("campaign/create/", campaign_payload)
+        campaign_id = camp_data.get("campaign_id") or (camp_data.get("campaign_ids") or [""])[0]
+        results["campaign"] = {"success": True, "campaign_id": campaign_id}
+        logger.info(f"[launch-w2a] Campaign 创建成功: {campaign_id}")
+    except Exception as e:
+        logger.error(f"[launch-w2a] Campaign 创建失败: {e}  payload={campaign_payload}")
+        results["campaign"] = {"success": False, "error": str(e), "payload_sent": campaign_payload}
+        results["adgroup"] = {"success": False, "skipped": True, "reason": "未执行（因 Campaign 创建失败）"}
+        results["ad"] = {"success": False, "skipped": True, "reason": "未执行（因 Campaign 创建失败）"}
+        results["summary"]["fail"] = 1
+        return {"data": results}
+
+    # ── Step 2: Ad Group ──
+    adgroup_payload: dict = {
+        "advertiser_id": advertiser_id,
+        "campaign_id": campaign_id,
+        "adgroup_name": adgroup_name,
+        "promotion_type": tpl_adgroup.get("promotion_type", "WEBSITE"),
+        "placement_type": tpl_adgroup.get("placement_type", "PLACEMENT_TYPE_AUTOMATIC"),
+        "billing_event": tpl_adgroup.get("billing_event", "OCPM"),
+        "bid_type": tpl_adgroup.get("bid_type", "BID_TYPE_NO_BID"),
+        "optimization_goal": tpl_adgroup.get("optimization_goal", "CONVERT"),
+        "schedule_type": schedule_type,
+        "budget_mode": tpl_adgroup.get("budget_mode", "BUDGET_MODE_DAY"),
+        "budget": budget,
+        "location_ids": location_ids,
+        "languages": languages,
+        "gender": gender,
+        "operation_status": tpl_adgroup.get("operation_status", "ENABLE"),
+        "pacing": tpl_adgroup.get("pacing", "PACING_MODE_SMOOTH"),
+        "landing_page_url": landing_url,
+    }
+    if age_groups:
+        adgroup_payload["age_groups"] = age_groups
+    if tpl_adgroup.get("placement_type") == "PLACEMENT_TYPE_NORMAL" and tpl_adgroup.get("placements"):
+        adgroup_payload["placements"] = tpl_adgroup["placements"]
+    if schedule_start_time:
+        adgroup_payload["schedule_start_time"] = schedule_start_time
+    if schedule_end_time:
+        adgroup_payload["schedule_end_time"] = schedule_end_time
+    if pixel_id and optimization_event:
+        adgroup_payload["pixel_id"] = pixel_id
+        adgroup_payload["optimization_event"] = optimization_event
+    if bid_price:
+        adgroup_payload["bid_price"] = float(bid_price)
+        adgroup_payload["bid_type"] = "BID_TYPE_CUSTOM"
+
+    try:
+        ag_data = await client.post("adgroup/create/", adgroup_payload)
+        adgroup_id = ag_data.get("adgroup_id") or (ag_data.get("adgroup_ids") or [""])[0]
+        results["adgroup"] = {"success": True, "adgroup_id": adgroup_id}
+        logger.info(f"[launch-w2a] AdGroup 创建成功: {adgroup_id}")
+    except Exception as e:
+        logger.error(f"[launch-w2a] AdGroup 创建失败: {e}  payload={adgroup_payload}")
+        results["adgroup"] = {"success": False, "error": str(e), "payload_sent": adgroup_payload}
+        results["ad"] = {"success": False, "skipped": True, "reason": "未执行（因 AdGroup 创建失败）"}
+        results["summary"]["fail"] = 1
+        return {"data": results}
+
+    # ── Step 3: Ad ──
+    # TikTok v1.3 ad/create/ 在 WEB_CONVERSIONS + SINGLE_VIDEO 等新组合下，
+    # 强制要求把素材维度字段放进 creatives 数组里，顶层只保留 advertiser_id / adgroup_id。
+    creative_item: dict = {
+        "ad_name": ad_name,
+        "ad_text": ad_text,
+        "ad_format": tpl_ad.get("ad_format", "SINGLE_VIDEO"),
+        "video_id": video_id,
+        "identity_id": identity_id,
+        "identity_type": identity_type,
+        "call_to_action": call_to_action,
+        "landing_page_url": landing_url,
+    }
+    if tracking_url:
+        creative_item["tracking_url"] = tracking_url
+    if overrides.get("deeplink"):
+        creative_item["deeplink"] = overrides["deeplink"]
+    # ad_title 历史上被错误地映射成 display_name(那是 identity 的字段)。
+    # v1.3 creatives 没有 display_name；把它当成展示名留作后续接入，本次先不下发。
+
+    ad_payload: dict = {
+        "advertiser_id": advertiser_id,
+        "adgroup_id": adgroup_id,
+        "creatives": [creative_item],
+    }
+
+    try:
+        ad_data = await client.post("ad/create/", ad_payload)
+        # creatives 数组写法下 TikTok 通常返回 ad_ids: [...]
+        ad_id = (
+            ad_data.get("ad_id")
+            or (ad_data.get("ad_ids") or [""])[0]
+            or ((ad_data.get("creatives") or [{}])[0].get("ad_id"))
+        )
+        results["ad"] = {"success": True, "ad_id": ad_id, "ad_name": ad_name}
+        results["summary"]["success"] = 1
+        logger.info(f"[launch-w2a] Ad 创建成功: {ad_id}")
+    except Exception as e:
+        logger.error(f"[launch-w2a] Ad 创建失败: {e}  payload={ad_payload}")
+        results["ad"] = {"success": False, "error": str(e), "payload_sent": ad_payload}
+        results["summary"]["fail"] = 1
+
+    return {"data": results}
+
+
+# ══════════════════════════════════════════════════════════
+#  源广告链探测（用于 TikTok Web to App 系统母版 defaults 固化）
+#  GET /api/templates/system/tiktok-w2a/probe
+#    ?advertiser_id=&campaign_id=&adgroup_id=&ad_id=
+#  返回抽取后的 defaults JSON；运维将结果回填到 BUILTIN_TEMPLATES 后重启即可
+# ══════════════════════════════════════════════════════════
+
+# 运行态字段黑名单（不会被写进 defaults）
+TIKTOK_W2A_RUNTIME_KEYS: set[str] = {
+    # IDs
+    "campaign_id", "adgroup_id", "ad_id",
+    "creative_material_mode", "creative_material_id",
+    # 时间戳
+    "create_time", "modify_time", "expires_at", "launch_time",
+    # 实时状态/审核
+    "status", "secondary_status", "operation_status_running",
+    "approval_status", "approved_status", "review_status", "audit_status",
+    "review_message", "rejection_reason", "approved_ad_accounts",
+    "is_new_structure",
+    # 报表/表现
+    "spend", "impressions", "clicks", "conversions", "cpa", "cpc", "cpm",
+    "ctr", "cvr", "reach", "result_rate", "budget_remaining",
+    # URL 资源（每次投放都是新的）
+    "video_cover_url", "video_preview_url", "image_url",
+    "material_url", "thumbnail_url", "image_web_uri",
+    # 学习态
+    "learning_phase", "is_learning_phase",
+}
+
+
+def _clean_runtime(d: dict) -> dict:
+    """深度过滤 TikTok API 返回结构中的运行态字段。"""
+    if not isinstance(d, dict):
+        return d
+    out = {}
+    for k, v in d.items():
+        if k in TIKTOK_W2A_RUNTIME_KEYS:
+            continue
+        if isinstance(v, dict):
+            out[k] = _clean_runtime(v)
+        elif isinstance(v, list):
+            out[k] = [
+                _clean_runtime(x) if isinstance(x, dict) else x
+                for x in v
+                if not (isinstance(x, dict) and all(k2 in TIKTOK_W2A_RUNTIME_KEYS for k2 in x))
+            ]
+        else:
+            out[k] = v
+    return out
+
+
+@router.get("/system/tiktok-w2a/probe")
+async def probe_tiktok_w2a_source(
+    advertiser_id: str = Query(..., description="TikTok advertiser_id"),
+    campaign_id: str = Query(..., description="源 campaign_id"),
+    adgroup_id: str = Query(..., description="源 adgroup_id"),
+    ad_id: str = Query(..., description="源 ad_id"),
+    _user: User = Depends(get_current_user),
+):
+    """从源广告链抽取可复用 defaults，供运维回填 BUILTIN_TEMPLATES。
+
+    返回结构：
+      source_ids: {...}
+      defaults:  抽取后的模板默认值（可直接贴回 tpl_tiktok_web_to_app_system.defaults）
+      raw:       campaign/adgroup/ad 原始返回（已过滤运行态），便于人工核对
+    """
+    acc_row = biz_account_repository.get_by_platform_account("tiktok", advertiser_id)
+    if not acc_row or not acc_row.get("access_token"):
+        return {"error": f"未找到 advertiser_id={advertiser_id} 对应的 TikTok access_token"}
+    client = TikTokClient(access_token=acc_row["access_token"])
+
+    try:
+        campaign_resp = await client.get("campaign/get/", {
+            "advertiser_id": advertiser_id,
+            "filtering": json.dumps({"campaign_ids": [campaign_id]}),
+            "page_size": 1,
+        })
+        adgroup_resp = await client.get("adgroup/get/", {
+            "advertiser_id": advertiser_id,
+            "filtering": json.dumps({"campaign_ids": [campaign_id], "adgroup_ids": [adgroup_id]}),
+            "page_size": 1,
+        })
+        ad_resp = await client.get("ad/get/", {
+            "advertiser_id": advertiser_id,
+            "filtering": json.dumps({"adgroup_ids": [adgroup_id], "ad_ids": [ad_id]}),
+            "page_size": 1,
+        })
+    except Exception as e:
+        logger.error(f"[probe-w2a] TikTok API 调用失败: {e}")
+        return {"error": f"TikTok API 调用失败: {e}"}
+
+    campaign = (campaign_resp.get("list") or [{}])[0] if isinstance(campaign_resp, dict) else {}
+    adgroup = (adgroup_resp.get("list") or [{}])[0] if isinstance(adgroup_resp, dict) else {}
+    ad = (ad_resp.get("list") or [{}])[0] if isinstance(ad_resp, dict) else {}
+
+    campaign_clean = _clean_runtime(campaign)
+    adgroup_clean = _clean_runtime(adgroup)
+    ad_clean = _clean_runtime(ad)
+
+    # 抽取可复用 defaults
+    defaults = {
+        "objective_type": campaign_clean.get("objective_type"),
+        "campaign_budget_mode": campaign_clean.get("budget_mode"),
+        "campaign_status": campaign_clean.get("operation_status"),
+        "adgroup_budget_mode": adgroup_clean.get("budget_mode"),
+        "billing_event": adgroup_clean.get("billing_event"),
+        "optimization_goal": adgroup_clean.get("optimization_goal"),
+        "bid_type": adgroup_clean.get("bid_type"),
+        "pacing": adgroup_clean.get("pacing"),
+        "schedule_type": adgroup_clean.get("schedule_type"),
+        "operating_system": adgroup_clean.get("operating_systems") or [],
+        "placement": {
+            "placement_type": adgroup_clean.get("placement_type"),
+            "placements": adgroup_clean.get("placements") or [],
+        },
+        "targeting": {
+            "age_groups": adgroup_clean.get("age_groups") or [],
+            "gender": adgroup_clean.get("gender"),
+            "languages": adgroup_clean.get("languages") or [],
+            "location_ids": adgroup_clean.get("location_ids") or [],
+        },
+        "identity": {
+            "identity_type": ad_clean.get("identity_type"),
+        },
+        "tracking": {
+            "pixel_id": adgroup_clean.get("pixel_id"),
+            "optimization_event": adgroup_clean.get("optimization_event")
+                or adgroup_clean.get("event"),
+            "tracking_url": ad_clean.get("tracking_url"),
+        },
+        "creative_format": ad_clean.get("ad_format"),
+        "call_to_action": ad_clean.get("call_to_action"),
+        "landing_page_template": ad_clean.get("landing_page_url"),
+    }
+
+    return {
+        "data": {
+            "source_ids": {
+                "advertiser_id": advertiser_id,
+                "campaign_id": campaign_id,
+                "adgroup_id": adgroup_id,
+                "ad_id": ad_id,
+            },
+            "defaults": defaults,
+            "raw": {
+                "campaign": campaign_clean,
+                "adgroup": adgroup_clean,
+                "ad": ad_clean,
+            },
+        }
+    }
 
 
 def _age_groups_from_min(age_min: int) -> list[str]:

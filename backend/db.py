@@ -455,16 +455,23 @@ _APP_TABLES_SQL = [
     """,
     """
     CREATE TABLE IF NOT EXISTS app_templates (
-        id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-        tpl_id      VARCHAR(64)  NOT NULL UNIQUE,
-        name        VARCHAR(255) NOT NULL DEFAULT '',
-        platform    VARCHAR(50)  NOT NULL DEFAULT 'tiktok',
-        is_builtin  TINYINT      NOT NULL DEFAULT 0,
-        content     JSON         NOT NULL,
-        created_by  VARCHAR(100) NOT NULL DEFAULT '',
-        created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        INDEX idx_platform (platform)
+        id                 BIGINT AUTO_INCREMENT PRIMARY KEY,
+        tpl_id             VARCHAR(64)  NOT NULL UNIQUE,
+        template_key       VARCHAR(64)  DEFAULT NULL,
+        name               VARCHAR(255) NOT NULL DEFAULT '',
+        platform           VARCHAR(50)  NOT NULL DEFAULT 'tiktok',
+        is_builtin         TINYINT      NOT NULL DEFAULT 0,
+        is_system          TINYINT      NOT NULL DEFAULT 0,
+        is_editable        TINYINT      NOT NULL DEFAULT 1,
+        parent_template_id VARCHAR(64)  DEFAULT NULL,
+        content            JSON         NOT NULL,
+        created_by         VARCHAR(100) NOT NULL DEFAULT '',
+        created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_platform (platform),
+        INDEX idx_template_key (template_key),
+        INDEX idx_is_system (is_system),
+        INDEX idx_parent_tpl (parent_template_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
@@ -1332,8 +1339,52 @@ def _migrate_users(cur, conn):
     logger.info(f"已从 users.json 迁移 {count} 个用户到 APP.app_users")
 
 
+def _migrate_app_templates_columns(cur):
+    """为 app_templates 补齐系统母版相关列（幂等）。
+
+    新增列：
+      - template_key       : 系统母版唯一标识（如 tpl_tiktok_minis_basic）
+      - is_system          : 是否系统母版（不可编辑/删除，但可另存为）
+      - is_editable        : 是否允许直接编辑
+      - parent_template_id : 自定义模板克隆来源
+    """
+    cur.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'app_templates'")
+    existing = {r["COLUMN_NAME"] for r in cur.fetchall()}
+    migrations = [
+        ("template_key",
+         "ADD COLUMN template_key VARCHAR(64) DEFAULT NULL COMMENT '系统母版唯一标识' AFTER tpl_id"),
+        ("is_system",
+         "ADD COLUMN is_system TINYINT NOT NULL DEFAULT 0 COMMENT '是否系统母版' AFTER is_builtin"),
+        ("is_editable",
+         "ADD COLUMN is_editable TINYINT NOT NULL DEFAULT 1 COMMENT '是否允许直接编辑' AFTER is_system"),
+        ("parent_template_id",
+         "ADD COLUMN parent_template_id VARCHAR(64) DEFAULT NULL COMMENT '克隆来源模板 tpl_id' AFTER is_editable"),
+    ]
+    for col, ddl in migrations:
+        if col not in existing:
+            cur.execute(f"ALTER TABLE app_templates {ddl}")
+    # 索引（幂等：通过 INFORMATION_SCHEMA 查询是否存在）
+    cur.execute("SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'app_templates'")
+    idx_existing = {r["INDEX_NAME"] for r in cur.fetchall()}
+    for idx_name, idx_ddl in [
+        ("idx_template_key", "ADD INDEX idx_template_key (template_key)"),
+        ("idx_is_system",    "ADD INDEX idx_is_system (is_system)"),
+        ("idx_parent_tpl",   "ADD INDEX idx_parent_tpl (parent_template_id)"),
+    ]:
+        if idx_name not in idx_existing:
+            try:
+                cur.execute(f"ALTER TABLE app_templates {idx_ddl}")
+            except Exception:
+                pass
+
+
 def _migrate_templates(cur, conn):
     from routes.templates import BUILTIN_TEMPLATES
+
+    _migrate_app_templates_columns(cur)
+    conn.commit()
 
     is_empty = _table_is_empty(cur, "app_templates")
 
@@ -1368,8 +1419,17 @@ def _migrate_templates(cur, conn):
         name = t.get("name", "")
         platform = t.get("platform", "tiktok")
         is_builtin = 1 if tpl_id in builtin_ids else 0
+        is_system = 1 if t.get("is_system") else 0
+        is_editable = 0 if (is_system and t.get("is_editable") is False) else (
+            1 if t.get("is_editable", True) else 0
+        )
+        template_key = t.get("template_key") or None
+        parent_template_id = t.get("parent_template_id") or None
         created_at = t.get("created_at")
-        content = {k: v for k, v in t.items() if k not in ("id", "name", "platform", "created_at", "updated_at")}
+        content = {k: v for k, v in t.items()
+                   if k not in ("id", "name", "platform", "created_at", "updated_at",
+                                "is_system", "is_editable", "template_key",
+                                "parent_template_id", "is_builtin")}
         content_json = json.dumps(content, ensure_ascii=False)
 
         cur.execute("SELECT 1 FROM app_templates WHERE tpl_id = %s", (tpl_id,))
@@ -1377,17 +1437,26 @@ def _migrate_templates(cur, conn):
             if tpl_id in builtin_ids:
                 cur.execute(
                     """UPDATE app_templates
-                          SET name = %s, platform = %s, content = %s, is_builtin = 1
+                          SET name = %s, platform = %s, content = %s,
+                              is_builtin = 1,
+                              is_system = %s,
+                              is_editable = %s,
+                              template_key = %s
                         WHERE tpl_id = %s""",
-                    (name, platform, content_json, tpl_id),
+                    (name, platform, content_json,
+                     is_system, is_editable, template_key, tpl_id),
                 )
                 updated += 1
             continue
 
         cur.execute(
-            """INSERT INTO app_templates (tpl_id, name, platform, is_builtin, content, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
-            (tpl_id, name, platform, is_builtin,
+            """INSERT INTO app_templates
+                  (tpl_id, template_key, name, platform,
+                   is_builtin, is_system, is_editable, parent_template_id,
+                   content, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (tpl_id, template_key, name, platform,
+             is_builtin, is_system, is_editable, parent_template_id,
              content_json,
              created_at or time.strftime("%Y-%m-%d %H:%M:%S")),
         )

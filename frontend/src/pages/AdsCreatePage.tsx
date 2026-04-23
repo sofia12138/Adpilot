@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { PageHeader } from '@/components/common/PageHeader'
 import { SectionCard } from '@/components/common/SectionCard'
@@ -33,6 +33,14 @@ import {
   type MetaPageOption, type MetaPixelOption,
 } from '@/services/meta-assets'
 import { getVideoDuration } from '@/services/tiktok-materials'
+import TikTokMinisCreateForm, {
+  isTikTokMinisBasicTpl,
+  useMinisTemplates,
+} from '@/components/ads-create/TikTokMinisCreateForm'
+import TikTokWebToAppCreateForm, {
+  isTikTokWebToAppTpl,
+  useW2aTemplates,
+} from '@/components/ads-create/TikTokWebToAppCreateForm'
 
 const MAX_MATERIALS = 20
 const MAX_ADSETS = 20
@@ -105,12 +113,14 @@ function nextAdSetKey() { return `as_${Date.now()}_${++_adsetKeyCounter}` }
 
 export default function AdsCreatePage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const { data: allTemplates } = useTemplates()
   const { data: metaAccountsResp } = useQuery({ queryKey: ['meta-accounts'], queryFn: fetchMetaAccounts })
   const metaAccounts: MetaAccount[] = metaAccountsResp?.data ?? []
 
   const MASTER_TPL_ID = 'tpl_meta_web_to_app_conv_abo'
-  const templates = useMemo(() => {
+  // Meta W2A Conversion 系列模板（既有逻辑）
+  const metaTemplates = useMemo(() => {
     if (!allTemplates) return []
     return allTemplates.filter(t =>
       t.platform === 'meta'
@@ -118,9 +128,34 @@ export default function AdsCreatePage() {
       && (t.template_subtype === 'conversion' || t.id === MASTER_TPL_ID),
     )
   }, [allTemplates])
+  // TikTok Minis 系列模板（系统母版 + 业务模板）
+  const minisTemplates = useMinisTemplates(allTemplates)
+  // TikTok Web to App 系列模板（系统母版 + 业务模板）
+  const tiktokW2aTemplates = useW2aTemplates(allTemplates)
 
-  const defaultTpls = useMemo(() => templates.filter(t => t.id === MASTER_TPL_ID || Boolean(t.is_builtin)), [templates])
-  const businessTpls = useMemo(() => templates.filter(t => t.id !== MASTER_TPL_ID && !t.is_builtin), [templates])
+  // 统一模板池：本页的"投放模板"下拉同时容纳 Meta W2A / TikTok Minis / TikTok W2A
+  const templates = useMemo(
+    () => [...metaTemplates, ...minisTemplates, ...tiktokW2aTemplates],
+    [metaTemplates, minisTemplates, tiktokW2aTemplates],
+  )
+
+  // 与「模板管理」页一致：所有 is_system === true（或老数据兜底：is_builtin / 内置 Meta 母版 ID）归为「系统母版」
+  // 其余统一进入「我的业务模板」（Meta W2A 副本 + TikTok Minis 自定义副本混合）
+  const isSystemTplOption = useCallback(
+    (t: { id: string; is_system?: boolean; is_builtin?: boolean }) =>
+      Boolean(t.is_system) || t.id === MASTER_TPL_ID || Boolean(t.is_builtin),
+    [],
+  )
+  const systemTpls = useMemo(
+    () => templates.filter(isSystemTplOption),
+    [templates, isSystemTplOption],
+  )
+  const businessTpls = useMemo(
+    () => templates.filter(t => !isSystemTplOption(t)),
+    [templates, isSystemTplOption],
+  )
+  const platformPrefix = (p?: string) =>
+    p === 'tiktok' ? '[TikTok]' : p === 'meta' ? '[Meta]' : ''
 
   // ── 模板 & 全局配置 ──
   const [selectedTpl, setSelectedTpl] = useState('')
@@ -165,6 +200,33 @@ export default function AdsCreatePage() {
   const isW2a = isMeta && currentTpl?.template_type === 'web_to_app'
   const isW2aConversion = isW2a && (currentTpl?.template_subtype === 'conversion'
     || currentTpl?.id === 'tpl_meta_web_to_app_conv_abo')
+  const isMinis = isTikTokMinisBasicTpl(currentTpl)
+  const isTikTokW2a = isTikTokWebToAppTpl(currentTpl)
+  // 只要是"TikTok 单表单"模板（minis 或 W2A），就走独立子表单分支，跳过 Meta 批量创建 UI
+  const isTikTokSingleForm = isMinis || isTikTokW2a
+
+  // ── URL ?template_id=xxx 同步 ──
+  // 进入页面时（或外部跳转）若 URL 带 template_id，且模板池已加载，则自动选中
+  useEffect(() => {
+    const urlTplId = searchParams.get('template_id')
+    if (!urlTplId) return
+    if (selectedTpl === urlTplId) return
+    if (templates.find(t => t.id === urlTplId)) {
+      setSelectedTpl(urlTplId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [templates.length, searchParams])
+  // 用户在页面内手动改模板时，把 URL 同步上去（便于刷新/分享）
+  useEffect(() => {
+    if (!selectedTpl) return
+    if (searchParams.get('template_id') === selectedTpl) return
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      next.set('template_id', selectedTpl)
+      return next
+    }, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTpl])
 
   const readyMaterials = useMemo(() =>
     materials.filter(m => m.status === 'success'),
@@ -200,11 +262,18 @@ export default function AdsCreatePage() {
       .finally(() => setPixelsLoading(false))
   }, [adAccountId, isW2a])
 
-  // ── 模板选择后预填 ──
+  // ── 模板选择后预填（仅对 Meta 模板生效；minis 模板由 TikTokMinisCreateForm 自管）──
   useEffect(() => {
     if (!selectedTpl || !templates) return
     const tpl = templates.find(t => t.id === selectedTpl)
     if (!tpl) return
+    if (isTikTokMinisBasicTpl(tpl) || isTikTokWebToAppTpl(tpl)) {
+      // 选中 TikTok 单表单模板时，重置 Meta 批量创建的临时状态，避免上次残留
+      setMaterials([])
+      setAdSets([])
+      setResult(null)
+      return
+    }
 
     setCampaignName(`${tpl.name}_${new Date().toISOString().slice(5, 10)}`)
 
@@ -507,25 +576,41 @@ export default function AdsCreatePage() {
               <label className="block text-sm font-medium text-gray-700 mb-1.5">投放模板 <span className="text-red-400">*</span></label>
               <select value={selectedTpl} onChange={e => { setSelectedTpl(e.target.value); setResult(null) }} className={`${inputCls} bg-white`}>
                 <option value="">请选择模板</option>
-                {defaultTpls.length > 0 && (
-                  <optgroup label="系统默认模板">
-                    {defaultTpls.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                {systemTpls.length > 0 && (
+                  <optgroup label={`系统母版（${systemTpls.length}）`}>
+                    {systemTpls.map(t => (
+                      <option key={t.id} value={t.id}>{platformPrefix(t.platform)} {t.name}</option>
+                    ))}
                   </optgroup>
                 )}
                 {businessTpls.length > 0 && (
-                  <optgroup label="我的业务模板">
-                    {businessTpls.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  <optgroup label={`我的业务模板（${businessTpls.length}）`}>
+                    {businessTpls.map(t => (
+                      <option key={t.id} value={t.id}>{platformPrefix(t.platform)} {t.name}</option>
+                    ))}
                   </optgroup>
                 )}
               </select>
             </div>
             {currentTpl && (
               <div className="flex items-center gap-2 text-xs text-gray-400">
-                <span className="inline-block px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600">Meta</span>
-                <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">W2A Conversion (ABO)</span>
-                {(currentTpl.id === MASTER_TPL_ID || currentTpl.is_builtin) && (
+                {tplPlatform === 'tiktok' ? (
+                  <span className="inline-block px-2 py-0.5 rounded-full font-medium bg-pink-50 text-pink-600">TikTok</span>
+                ) : (
+                  <span className="inline-block px-2 py-0.5 rounded-full font-medium bg-indigo-50 text-indigo-600">Meta</span>
+                )}
+                {isMinis && (
+                  <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Minis Basic</span>
+                )}
+                {isTikTokW2a && (
+                  <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Web to App</span>
+                )}
+                {!isMinis && !isTikTokW2a && isMeta && (
+                  <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">W2A Conversion (ABO)</span>
+                )}
+                {(currentTpl.is_system || currentTpl.id === MASTER_TPL_ID || currentTpl.is_builtin) && (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-600 font-medium">
-                    <Shield className="w-3 h-3" /> 系统默认
+                    <Shield className="w-3 h-3" /> {currentTpl.is_system ? '系统母版' : '系统默认'}
                   </span>
                 )}
               </div>
@@ -533,7 +618,15 @@ export default function AdsCreatePage() {
           </div>
         </SectionCard>
 
-        {currentTpl && (
+        {currentTpl && isMinis && (
+          <TikTokMinisCreateForm tpl={currentTpl} />
+        )}
+
+        {currentTpl && isTikTokW2a && (
+          <TikTokWebToAppCreateForm tpl={currentTpl} />
+        )}
+
+        {currentTpl && !isTikTokSingleForm && (
           <>
             {/* ══ 投放配置（全局） ══ */}
             <SectionCard title="投放配置" className="mb-6">
