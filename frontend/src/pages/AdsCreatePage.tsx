@@ -362,29 +362,30 @@ export default function AdsCreatePage() {
     setMaterials(prev => [...prev, ...newItems])
 
     for (const item of newItems) {
+      const file = item.file as File
       if (item.type === 'image') {
-        const err = validateImageFile(item.file)
+        const err = validateImageFile(file)
         if (err) {
           setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, status: 'error', error: err } : m))
           continue
         }
-        const r = await uploadMetaImage(adAccountId, item.file)
+        const r = await uploadMetaImage(adAccountId, file)
         setMaterials(prev => prev.map(m => m.id === item.id
           ? r.success && r.image_hash
             ? { ...m, status: 'success', image_hash: r.image_hash, progress: 100 }
             : { ...m, status: 'error', error: r.error || '上传失败' }
           : m))
       } else {
-        const err = validateVideoFile(item.file)
+        const err = validateVideoFile(file)
         if (err) {
           setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, status: 'error', error: err } : m))
           continue
         }
         try {
-          const dur = await getVideoDuration(item.file)
+          const dur = await getVideoDuration(file)
           setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, duration_sec: dur } : m))
         } catch { /* duration detection optional */ }
-        const { promise, abort } = uploadMetaVideo(adAccountId, item.file, pct => {
+        const { promise, abort } = uploadMetaVideo(adAccountId, file, pct => {
           setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, progress: pct } : m))
         })
         setMaterials(prev => prev.map(m => m.id === item.id ? { ...m, abort } : m))
