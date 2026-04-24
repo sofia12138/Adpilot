@@ -115,6 +115,80 @@ async def upload_video(
             Path(tmp_path).unlink(missing_ok=True)
 
 
+@router.get("/account-library")
+async def list_account_library_videos(
+    advertiser_id: str = Query(..., description="TikTok 广告主 ID"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    keyword: Optional[str] = Query(None, description="按文件名/video_id 模糊匹配（前端层做）"),
+    _user: User = Depends(get_current_user),
+):
+    """拉取 TikTok 账户内已上传素材（含手动在广告平台上传的素材）。
+    封装 TikTok API: GET file/video/ad/search/
+
+    返回: { data: { items: [...], page, page_size, total, has_more } }
+    items 字段: video_id, file_name, video_cover_url, duration, width, height,
+              format, size, create_time, material_id(可选)
+    """
+    from repositories import biz_account_repository
+    from tiktok_ads.api.client import TikTokClient
+    from tiktok_ads.api.creative import CreativeService
+
+    acc_row = biz_account_repository.get_by_platform_account("tiktok", advertiser_id)
+    if not acc_row or not acc_row.get("access_token"):
+        return JSONResponse(status_code=400, content={
+            "error": f"未找到 advertiser_id={advertiser_id} 对应的 TikTok access_token",
+        })
+
+    client = TikTokClient(access_token=acc_row["access_token"])
+    svc = CreativeService(client=client, advertiser_id=advertiser_id)
+
+    try:
+        raw = await svc.search_videos(page=page, page_size=page_size)
+    except Exception as e:
+        logger.warning(f"[account-library] TikTok search_videos 失败: {e}")
+        return JSONResponse(status_code=502, content={"error": f"TikTok 接口异常: {e}"})
+
+    raw_list = raw.get("list") or []
+    page_info = raw.get("page_info") or {}
+    total = int(page_info.get("total_number") or 0)
+    total_page = int(page_info.get("total_page") or 0)
+
+    items = []
+    for v in raw_list:
+        if not isinstance(v, dict):
+            continue
+        items.append({
+            "video_id": v.get("video_id") or "",
+            "file_name": v.get("file_name") or v.get("material_name") or "",
+            "video_cover_url": v.get("video_cover_url") or v.get("poster_url") or v.get("preview_url") or "",
+            "duration": v.get("duration") or v.get("video_length") or 0,
+            "width": v.get("width") or 0,
+            "height": v.get("height") or 0,
+            "format": v.get("format") or v.get("file_format") or "",
+            "size": v.get("size") or 0,
+            "create_time": v.get("create_time") or "",
+            "material_id": v.get("material_id") or "",
+        })
+
+    # 关键词在前端层匹配（避免 TikTok 端不支持 keyword 参数）；这里仅返回服务端过滤后的字段
+    if keyword:
+        kw = keyword.strip().lower()
+        items = [it for it in items if kw in (it["file_name"] or "").lower() or kw in (it["video_id"] or "").lower()]
+
+    has_more = page < total_page if total_page else len(raw_list) >= page_size
+    return {
+        "data": {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_page": total_page,
+            "has_more": has_more,
+        }
+    }
+
+
 @router.delete("/{material_id}")
 async def delete_material(
     material_id: int,

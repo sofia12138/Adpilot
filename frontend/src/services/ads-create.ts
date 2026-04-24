@@ -28,6 +28,10 @@ export interface MaterialItem {
   picture_url?: string
   original_name: string
   ad_name: string
+  /** 素材来源：本地批量上传 / 账户已上传素材；用于操作日志统计 */
+  source?: 'local_upload' | 'account_asset'
+  /** 账户素材的 Meta 资产 ID（video_id 或 image_hash 一致即可） */
+  meta_asset_id?: string
 }
 
 export interface AdSetConfig {
@@ -53,6 +57,15 @@ export interface AssetRefs {
   description_snapshot?: string
 }
 
+export interface MetaScheduleFields {
+  /** ISO 8601 with timezone offset, e.g. 2026-04-25T10:00:00-0700 */
+  start_time: string
+  /** ISO 8601, optional. 不填表示长期投放 */
+  end_time?: string
+  /** 友好展示用，eg "America/Los_Angeles"；后端只透传 + 日志 */
+  timezone?: string
+}
+
 export interface CreateAdsParams {
   mode: 'template'
   platform: 'tiktok' | 'meta'
@@ -67,6 +80,8 @@ export interface CreateAdsParams {
   materials?: MaterialItem[]
   adsets?: AdSetConfig[]
   assetRefs?: AssetRefs
+  /** Meta 投放时间（写入 AdSet）；不传 → 不传给 Meta API */
+  metaSchedule?: MetaScheduleFields
 }
 
 export interface AdResult {
@@ -160,6 +175,14 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
       }
       if (p.assetRefs) {
         body.asset_refs = p.assetRefs
+      }
+      // 投放时间（写入 AdSet 的 start_time / end_time）
+      if (p.metaSchedule && p.metaSchedule.start_time) {
+        body.meta_schedule = {
+          start_time: p.metaSchedule.start_time,
+          end_time: p.metaSchedule.end_time || undefined,
+          timezone: p.metaSchedule.timezone || undefined,
+        }
       }
     } else {
       body.advertiser_id = ''

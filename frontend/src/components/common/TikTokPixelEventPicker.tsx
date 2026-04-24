@@ -35,6 +35,17 @@ interface PixelResp {
   }
 }
 
+/**
+ * 业务白名单：调用方可指定"只允许选这些 event_code"，并提供前端展示名映射。
+ *  - 不传 allowedEvents → 维持原有动态拉取行为，展示 Pixel 全量事件
+ *  - 传了 allowedEvents → 二级下拉只展示白名单里的事件（不论 Pixel 实际配置如何），
+ *    并使用 label 作为显示名；提交值仍是 event_code
+ */
+export interface AllowedEvent {
+  code: string
+  label: string
+}
+
 interface Props {
   advertiserId: string
   pixelId: string
@@ -42,6 +53,7 @@ interface Props {
   onChange: (next: { pixel_id: string; optimization_event: string }) => void
   disabled?: boolean
   className?: string
+  allowedEvents?: AllowedEvent[]
 }
 
 // ── 拉取失败/无 pixel 时的标准事件兜底（仅 fallback，不参与正常路径） ──
@@ -79,6 +91,7 @@ export function TikTokPixelEventPicker({
   onChange,
   disabled = false,
   className = '',
+  allowedEvents,
 }: Props) {
   const enabled = !!advertiserId
   const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
@@ -103,11 +116,28 @@ export function TikTokPixelEventPicker({
   // 优化事件来源：
   //  · 优先选中 pixel 自带的 events
   //  · 当 API 失败 / pixel 列表为空 / 选中 pixel 没有 events 时，回落到 FALLBACK_EVENTS
+  //  · 若调用方传入 allowedEvents（业务白名单），最后再 filter+remap：
+  //    - 只保留白名单中的 event_code
+  //    - 用 label 替换显示名（event_name），这样下拉显示业务名而非平台原始名
+  //    - 即使 Pixel 上没有这些 event_code，也注入为可选项（保证业务能力始终可用）
   const eventOptions: TikTokPixelEvent[] = useMemo(() => {
-    if (selectedPixel && selectedPixel.events.length > 0) return selectedPixel.events
-    if (pixelId && (apiErrorMsg || pixelList.length === 0 || !selectedPixel)) return FALLBACK_EVENTS
-    return []
-  }, [selectedPixel, pixelId, apiErrorMsg, pixelList.length])
+    let base: TikTokPixelEvent[]
+    if (selectedPixel && selectedPixel.events.length > 0) base = selectedPixel.events
+    else if (pixelId && (apiErrorMsg || pixelList.length === 0 || !selectedPixel)) base = FALLBACK_EVENTS
+    else base = []
+
+    if (!allowedEvents || allowedEvents.length === 0) return base
+
+    const baseMap = new Map(base.map(e => [e.event_code, e]))
+    return allowedEvents.map(allow => {
+      const hit = baseMap.get(allow.code)
+      return {
+        event_code: allow.code,
+        event_name: allow.label,
+        event_type: hit?.event_type || 'STANDARD',
+      }
+    })
+  }, [selectedPixel, pixelId, apiErrorMsg, pixelList.length, allowedEvents])
 
   const eventInList = useMemo(
     () => eventOptions.some(e => e.event_code === optimizationEvent),
@@ -149,16 +179,18 @@ export function TikTokPixelEventPicker({
   }, [pixelList, pixelId])
 
   // 同样地：optimizationEvent 不在新 options 里时保留为临时选项
+  // 当调用方传 allowedEvents 时，事件名已经是业务名（如 "Purchase"），就不再追加 (event_code)
+  const useBusinessLabel = !!(allowedEvents && allowedEvents.length > 0)
   const eventSelectOptions = useMemo(() => {
     const opts = eventOptions.map(e => ({
       event_code: e.event_code,
-      label: `${e.event_name} (${e.event_code})`,
+      label: useBusinessLabel ? e.event_name : `${e.event_name} (${e.event_code})`,
     }))
     if (optimizationEvent && !eventInList) {
       opts.unshift({ event_code: optimizationEvent, label: `（手动/历史值）${optimizationEvent}` })
     }
     return opts
-  }, [eventOptions, optimizationEvent, eventInList])
+  }, [eventOptions, optimizationEvent, eventInList, useBusinessLabel])
 
   return (
     <div className={`grid grid-cols-2 gap-4 ${className}`}>
@@ -261,7 +293,9 @@ export function TikTokPixelEventPicker({
         {/* 数据来源提示，便于排查 */}
         {enabled && pixelId && eventOptions.length > 0 && (
           <p className="text-[11px] text-gray-400 mt-1">
-            {selectedPixel && selectedPixel.events.length > 0
+            {useBusinessLabel
+              ? `事件来源：业务白名单（${eventOptions.length} 个）`
+              : selectedPixel && selectedPixel.events.length > 0
               ? `事件来源：Pixel "${selectedPixel.pixel_name}" 配置（${selectedPixel.events.length} 个）`
               : `事件来源：兜底标准事件（API 暂未返回 events，${eventOptions.length} 个）`}
           </p>

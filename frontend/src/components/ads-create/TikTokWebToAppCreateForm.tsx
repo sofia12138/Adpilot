@@ -11,15 +11,20 @@
  */
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, AlertCircle, CheckCircle, Send, Shield } from 'lucide-react'
+import { Loader2, AlertCircle, CheckCircle, Send, Shield, Library, Globe, X, FileVideo, Plus } from 'lucide-react'
 import { SectionCard } from '@/components/common/SectionCard'
 import type { Template } from '@/services/templates'
 import { fetchTikTokAdvertisers, type Advertiser } from '@/services/advertisers'
-import { fetchMaterialList, type TikTokMaterialRecord } from '@/services/tiktok-materials'
 import { apiFetch } from '@/services/api'
 import { TikTokLocationPicker, resolveCountryCodesFromTemplate } from '@/components/common/TikTokLocationPicker'
 import { TikTokIdentityPicker } from '@/components/common/TikTokIdentityPicker'
 import { TikTokPixelEventPicker } from '@/components/common/TikTokPixelEventPicker'
+import {
+  LandingPagePickerDialog,
+  CopyPackPickerDialog,
+  RegionGroupPickerDialog,
+} from '@/components/common/AssetPickerDialog'
+import { TikTokVideoMaterialPicker, type PickedVideo } from '@/components/common/TikTokVideoMaterialPicker'
 import { codesToLocationIds, type LocationSelection } from '@/constants/tiktok-locations'
 
 const inputCls = 'w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-pink-500/20 focus:border-pink-400 transition'
@@ -34,13 +39,40 @@ const CTA_OPTIONS = [
   'GET_QUOTE', 'APPLY_NOW', 'BOOK_NOW', 'VIEW_NOW', 'ORDER_NOW',
 ]
 
+// W2A 业务白名单：仅允许两个优化事件，前端按业务名展示
+const W2A_ALLOWED_EVENTS = [
+  { code: 'SHOPPING',         label: 'Purchase'  },
+  { code: 'ON_WEB_SUBSCRIBE', label: 'Subscribe' },
+] as const
+
+/** 去掉文件名后缀，用作默认 Ad Name */
+function stripExt(name: string): string {
+  if (!name) return ''
+  const i = name.lastIndexOf('.')
+  return i > 0 ? name.slice(0, i) : name
+}
+
+interface AdResultItem {
+  success: boolean
+  ad_id?: string
+  ad_name?: string
+  video_id?: string
+  error?: string
+  skipped?: boolean
+  reason?: string
+  hint?: string
+}
+
 interface LaunchResult {
   data?: {
     platform?: string
     template_type?: string
     campaign?: { success: boolean; campaign_id?: string; error?: string; skipped?: boolean; reason?: string; hint?: string }
     adgroup?: { success: boolean; adgroup_id?: string; error?: string; skipped?: boolean; reason?: string; hint?: string }
-    ad?: { success: boolean; ad_id?: string; ad_name?: string; error?: string; skipped?: boolean; reason?: string; hint?: string }
+    /** 单条兼容（始终等于 ads[0]） */
+    ad?: AdResultItem | null
+    /** 批量结果（一对一对应 materials） */
+    ads?: AdResultItem[]
     summary?: { total: number; success: number; fail: number }
   }
   error?: string
@@ -82,14 +114,32 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
   const [identityId, setIdentityId] = useState('')
   const [identityType, setIdentityType] = useState('CUSTOMIZED_USER')
   const [countryCodes, setCountryCodes] = useState<string[]>([])
+  // 投放地区模式：'countries' = 用户手选国家；'group' = 引用资产库地区组
+  const [regionMode, setRegionMode] = useState<'countries' | 'group'>('countries')
+  const [regionGroupId, setRegionGroupId] = useState<number | null>(null)
+  const [regionGroupName, setRegionGroupName] = useState('')
+  const [showRegionPicker, setShowRegionPicker] = useState(false)
+
   const [landingPageUrl, setLandingPageUrl] = useState('')
+  const [landingPageId, setLandingPageId] = useState<number | null>(null)
+  const [landingPageName, setLandingPageName] = useState('')
+  const [showLandingPicker, setShowLandingPicker] = useState(false)
+
   const [trackingUrl, setTrackingUrl] = useState('')
   const [pixelId, setPixelId] = useState('')
   const [optimizationEvent, setOptimizationEvent] = useState('SHOPPING')
   const [adText, setAdText] = useState('')
   const [adTitle, setAdTitle] = useState('')
   const [callToAction, setCallToAction] = useState('LEARN_MORE')
-  const [videoMaterialId, setVideoMaterialId] = useState<number | null>(null)
+  const [copyPackId, setCopyPackId] = useState<number | null>(null)
+  const [copyPackName, setCopyPackName] = useState('')
+  const [showCopyPicker, setShowCopyPicker] = useState(false)
+
+  // 视频素材：批量多选；每条素材对应一个 Ad
+  const [pickedVideos, setPickedVideos] = useState<PickedVideo[]>([])
+  // 已选素材的 ad_name 编辑（key: `${source}-${video_id}`）
+  const [adNameOverrides, setAdNameOverrides] = useState<Record<string, string>>({})
+  const [showVideoPicker, setShowVideoPicker] = useState(false)
 
   // 切换模板时回填默认值
   useEffect(() => {
@@ -104,6 +154,25 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
       ? (targeting.location_ids as unknown[]).map(String)
       : []
     setCountryCodes(resolveCountryCodesFromTemplate(selection, fallbackIds))
+
+    // 模板地区组快照（资产库引用）
+    const tplRegionMode = targeting.region_mode === 'group' ? 'group' : 'countries'
+    setRegionMode(tplRegionMode)
+    const tplRegionId = typeof targeting.region_group_id === 'number' ? targeting.region_group_id : null
+    setRegionGroupId(tplRegionId)
+    setRegionGroupName(String(targeting.region_group_name_snapshot || ''))
+
+    // 模板落地页快照（资产库引用）
+    const landing = (defaults.landing as Record<string, unknown>) ?? {}
+    const tplLandingId = typeof landing.landing_page_id === 'number' ? landing.landing_page_id : null
+    setLandingPageId(tplLandingId)
+    setLandingPageName(String(landing.landing_page_name_snapshot || ''))
+
+    // 模板文案快照（资产库引用）
+    const copy = (defaults.copy as Record<string, unknown>) ?? {}
+    const tplCopyId = typeof copy.copy_pack_id === 'number' ? copy.copy_pack_id : null
+    setCopyPackId(tplCopyId)
+    setCopyPackName(String(copy.copy_pack_name_snapshot || ''))
 
     const identity = (defaults.identity as Record<string, unknown>) ?? {}
     const tplIdentityId = (identity.identity_id as string | undefined) || ''
@@ -123,17 +192,29 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tpl?.id])
 
-  // ── 拉取所选广告主下的 TikTok 视频素材 ──
-  const { data: matsResp } = useQuery({
-    queryKey: ['tiktok-materials', advertiserId, 'success'],
-    queryFn: () => fetchMaterialList({ advertiser_id: advertiserId, status: 'success', page_size: 50 }),
-    enabled: !!advertiserId,
-  })
-  const materials: TikTokMaterialRecord[] = matsResp?.data?.items ?? []
-
   const [submitting, setSubmitting] = useState(false)
   const [result, setResult] = useState<LaunchResult | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
+
+  // 切换广告主时清空已选素材（避免跨账户串号）
+  useEffect(() => {
+    setPickedVideos([])
+    setAdNameOverrides({})
+  }, [advertiserId])
+
+  /** 计算每条素材最终的 ad_name（含重名加序号） */
+  const computedMaterials = useMemo(() => {
+    const seen: Record<string, number> = {}
+    return pickedVideos.map((v) => {
+      const key = `${v.source}-${v.video_id}`
+      const userOverride = (adNameOverrides[key] || '').trim()
+      const auto = stripExt(v.file_name) || `${campaignName.trim() || 'Ad'}`
+      const base = userOverride || auto
+      const n = (seen[base] = (seen[base] || 0) + 1)
+      const final = n === 1 ? base : `${base}_${String(n).padStart(2, '0')}`
+      return { ...v, key, final_ad_name: final, source_base_name: auto }
+    })
+  }, [pickedVideos, adNameOverrides, campaignName])
 
   function validate(): string | null {
     if (!advertiserId) return '请选择广告主'
@@ -141,9 +222,7 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
     if (!identityId.trim()) return '请选择 Identity（TikTok 广告必填）'
     if (countryCodes.length === 0) return '请至少选择 1 个投放国家'
     if (!landingPageUrl.trim()) return 'Landing Page URL 不能为空（Web to App 必填）'
-    if (!videoMaterialId) return '请选择视频素材'
-    const mat = materials.find(m => m.id === videoMaterialId)
-    if (!mat?.tiktok_video_id) return '所选素材没有 tiktok_video_id（请确认素材已上传成功）'
+    if (pickedVideos.length === 0) return '请至少选择 1 个视频素材'
     const b = Number(budget)
     if (!Number.isFinite(b) || b <= 0) return '日预算必须为正数'
     return null
@@ -153,18 +232,28 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
     setErrorMsg(''); setResult(null)
     const err = validate()
     if (err) { setErrorMsg(err); return }
-    const mat = materials.find(m => m.id === videoMaterialId)!
+
+    // 构造批量 materials（一对一对应每个 Ad）
+    const materialsPayload = computedMaterials.map(m => ({
+      video_id: m.video_id,
+      ad_name: m.final_ad_name,
+      file_name: m.file_name,
+    }))
+    const firstMaterial = computedMaterials[0]!
 
     const payload: Record<string, unknown> = {
       template_id: tpl.id,
       advertiser_id: advertiserId,
       campaign_name: campaignName.trim(),
       adgroup_name: adgroupName.trim() || campaignName.trim(),
-      ad_name: adName.trim() || adgroupName.trim() || campaignName.trim(),
+      // 顶层 ad_name/video_id 仅供单素材兼容路径使用；后端有 materials 时优先用 materials
+      ad_name: adName.trim() || firstMaterial.final_ad_name,
+      material_name: firstMaterial.source_base_name,
+      video_id: firstMaterial.video_id,
+      materials: materialsPayload,
       budget: Number(budget),
       identity_id: identityId.trim(),
       identity_type: identityType,
-      video_id: mat.tiktok_video_id,
       ad_text: adText,
       ad_title: adTitle.trim(),
       call_to_action: callToAction,
@@ -177,6 +266,22 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
     if (optimizationEvent) payload.optimization_event = optimizationEvent
     if (scheduleStartTime) payload.schedule_start_time = scheduleStartTime
     if (scheduleEndTime) payload.schedule_end_time = scheduleEndTime
+
+    // 资产库引用 + 快照（后端只用于日志/operation_log 与模板回填，不影响 TikTok 主调用）
+    payload.region_mode = regionMode
+    if (regionGroupId) {
+      payload.region_group_id = regionGroupId
+      payload.region_group_name_snapshot = regionGroupName
+    }
+    if (landingPageId) {
+      payload.landing_page_id = landingPageId
+      payload.landing_page_name_snapshot = landingPageName
+      payload.landing_page_url_snapshot = landingPageUrl.trim()
+    }
+    if (copyPackId) {
+      payload.copy_pack_id = copyPackId
+      payload.copy_pack_name_snapshot = copyPackName
+    }
 
     setSubmitting(true)
     try {
@@ -196,7 +301,9 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
   const isSystemTpl = Boolean(tpl.is_system)
   const summary = result?.data?.summary
   const created = result?.data
-  const overallSuccess = !!created && created.campaign?.success && created.adgroup?.success && created.ad?.success
+  const adsList: AdResultItem[] = created?.ads ?? (created?.ad ? [created.ad] : [])
+  const allAdsOk = adsList.length > 0 && adsList.every(a => a.success)
+  const overallSuccess = !!created && created.campaign?.success && created.adgroup?.success && allAdsOk
 
   return (
     <>
@@ -223,16 +330,26 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Campaign Name <span className="text-red-400">*</span></label>
-            <input value={campaignName} onChange={e => setCampaignName(e.target.value)} className={inputCls} placeholder="例：102-W2A-US-LandingXX-20260422-01" />
+            <input
+              value={campaignName}
+              onChange={e => setCampaignName(e.target.value)}
+              onBlur={() => {
+                // 失焦时若 AdGroup Name 为空，自动继承 Campaign Name
+                const c = campaignName.trim()
+                if (c && !adgroupName.trim()) setAdgroupName(c)
+              }}
+              className={inputCls}
+              placeholder="例：102-W2A-US-LandingXX-20260422-01"
+            />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">AdGroup Name</label>
-              <input value={adgroupName} onChange={e => setAdgroupName(e.target.value)} className={inputCls} placeholder="留空则使用 Campaign Name" />
+              <input value={adgroupName} onChange={e => setAdgroupName(e.target.value)} className={inputCls} placeholder="留空将自动继承 Campaign Name" />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Ad Name</label>
-              <input value={adName} onChange={e => setAdName(e.target.value)} className={inputCls} placeholder="留空则使用 AdGroup Name" />
+              <input value={adName} onChange={e => setAdName(e.target.value)} className={inputCls} placeholder="留空将自动取所选素材文件名" />
             </div>
           </div>
         </div>
@@ -265,17 +382,105 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
       {/* 定向与落地 */}
       <SectionCard title="定向与落地" className="mb-5">
         <div className="space-y-4">
+          {/* 投放地区：Tabs（按国家 / 地区组） */}
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">投放地区 <span className="text-red-400">*</span></label>
-            <TikTokLocationPicker
-              value={countryCodes}
-              onChange={({ country_codes }) => setCountryCodes(country_codes)}
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">投放地区 <span className="text-red-400">*</span></label>
+              <div className="inline-flex border border-gray-200 rounded-lg overflow-hidden text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setRegionMode('countries')}
+                  className={`px-2.5 py-1 ${regionMode === 'countries' ? 'bg-pink-50 text-pink-600 font-medium' : 'text-gray-500 hover:bg-gray-50'}`}
+                >按国家</button>
+                <button
+                  type="button"
+                  onClick={() => setRegionMode('group')}
+                  className={`px-2.5 py-1 border-l border-gray-200 ${regionMode === 'group' ? 'bg-pink-50 text-pink-600 font-medium' : 'text-gray-500 hover:bg-gray-50'}`}
+                >地区组</button>
+              </div>
+            </div>
+
+            {regionMode === 'countries' ? (
+              <TikTokLocationPicker
+                value={countryCodes}
+                onChange={({ country_codes }) => {
+                  setCountryCodes(country_codes)
+                  // 切换到手选 → 清掉资产库引用
+                  setRegionGroupId(null)
+                  setRegionGroupName('')
+                }}
+              />
+            ) : (
+              <div className="space-y-2">
+                {regionGroupId ? (
+                  <div className="flex items-center gap-2 p-3 bg-blue-50/40 border border-blue-100 rounded-xl">
+                    <Globe className="w-4 h-4 text-blue-400" />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-800 truncate">{regionGroupName || `地区组 #${regionGroupId}`}</div>
+                      <div className="text-xs text-gray-500 mt-0.5">
+                        共 {countryCodes.length} 个国家 · 展开为 {codesToLocationIds(countryCodes).length} 个 TikTok location_id
+                        {countryCodes.length > codesToLocationIds(countryCodes).length && (
+                          <span className="text-amber-600 ml-1">（{countryCodes.length - codesToLocationIds(countryCodes).length} 个未匹配本地映射，将被忽略）</span>
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowRegionPicker(true)}
+                      className="px-2.5 py-1 text-xs text-blue-500 border border-blue-200 rounded-lg hover:bg-blue-50"
+                    >更换</button>
+                    <button
+                      type="button"
+                      onClick={() => { setRegionGroupId(null); setRegionGroupName(''); setCountryCodes([]) }}
+                      className="p-1 text-gray-400 hover:bg-gray-100 rounded-md"
+                      title="清除"
+                    ><X className="w-3.5 h-3.5" /></button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowRegionPicker(true)}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 border border-dashed border-gray-300 rounded-xl text-sm text-gray-500 hover:border-blue-300 hover:text-blue-500 hover:bg-blue-50/30"
+                  >
+                    <Library className="w-4 h-4" />
+                    从地区组库选择
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Landing Page URL（支持手填或从落地页库选择） */}
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">Landing Page URL <span className="text-red-400">*</span></label>
+              <button
+                type="button"
+                onClick={() => setShowLandingPicker(true)}
+                className="text-[11px] text-blue-500 hover:text-blue-600 flex items-center gap-1"
+              >
+                <Library className="w-3 h-3" />
+                从落地页库选择
+              </button>
+            </div>
+            <input
+              value={landingPageUrl}
+              onChange={e => {
+                setLandingPageUrl(e.target.value)
+                // 手动改 URL → 清掉资产库引用
+                if (landingPageId) { setLandingPageId(null); setLandingPageName('') }
+              }}
+              className={inputCls}
+              placeholder="https://your.landing.page/xxx"
             />
+            {landingPageId && (
+              <p className="text-[11px] text-blue-500 mt-1 flex items-center gap-1">
+                <Library className="w-3 h-3" />
+                来自落地页库：{landingPageName || `#${landingPageId}`}
+              </p>
+            )}
           </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">Landing Page URL <span className="text-red-400">*</span></label>
-            <input value={landingPageUrl} onChange={e => setLandingPageUrl(e.target.value)} className={inputCls} placeholder="https://your.landing.page/xxx" />
-          </div>
+
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Tracking URL（可选）</label>
             <input value={trackingUrl} onChange={e => setTrackingUrl(e.target.value)} className={inputCls} placeholder="第三方监测链接" />
@@ -284,6 +489,7 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
             advertiserId={advertiserId}
             pixelId={pixelId}
             optimizationEvent={optimizationEvent}
+            allowedEvents={[...W2A_ALLOWED_EVENTS]}
             onChange={({ pixel_id, optimization_event }) => {
               setPixelId(pixel_id)
               setOptimizationEvent(optimization_event)
@@ -307,24 +513,80 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">视频素材 <span className="text-red-400">*</span></label>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">视频素材 <span className="text-red-400">*</span></label>
+              <span className="text-[11px] text-gray-400">
+                共 {pickedVideos.length} 个 · 将创建 {pickedVideos.length} 个 Ad
+              </span>
+            </div>
             {!advertiserId ? (
               <p className="text-xs text-gray-400">请先选择广告主</p>
-            ) : materials.length === 0 ? (
-              <p className="text-xs text-gray-400">该广告主下暂无成功上传的视频素材，请先在「TikTok 素材上传」页上传</p>
             ) : (
-              <select value={videoMaterialId ?? ''} onChange={e => setVideoMaterialId(e.target.value ? Number(e.target.value) : null)} className={`${inputCls} bg-white`}>
-                <option value="">请选择视频</option>
-                {materials.filter(m => m.tiktok_video_id).map(m => (
-                  <option key={m.id} value={m.id}>{m.local_file_name} · {m.tiktok_video_id}</option>
-                ))}
-              </select>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowVideoPicker(true)}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 border border-dashed border-gray-300 rounded-xl text-sm text-gray-600 hover:border-pink-300 hover:text-pink-600 hover:bg-pink-50/30"
+                >
+                  <Plus className="w-4 h-4" />
+                  {pickedVideos.length === 0 ? '选择视频素材（系统素材 / 本地上传 / 账户素材）' : '继续添加 / 调整素材'}
+                </button>
+
+                {/* 已选素材列表（每条可编辑 ad_name） */}
+                {computedMaterials.length > 0 && (
+                  <div className="mt-3 border border-gray-100 rounded-xl divide-y divide-gray-50 overflow-hidden">
+                    {computedMaterials.map((m, idx) => (
+                      <div key={m.key} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50">
+                        <span className="text-[11px] text-gray-400 w-5 text-right">#{idx + 1}</span>
+                        <FileVideo className="w-4 h-4 text-blue-400 shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs text-gray-700 truncate" title={m.file_name}>{m.file_name || m.video_id}</div>
+                          <div className="text-[10px] text-gray-400 mt-0.5">
+                            {m.source === 'system' && '系统素材'}
+                            {m.source === 'local' && '本地上传'}
+                            {m.source === 'account' && '账户素材'}
+                            <span className="mx-1">·</span>
+                            {m.video_id}
+                          </div>
+                        </div>
+                        <input
+                          value={adNameOverrides[m.key] ?? ''}
+                          onChange={e => setAdNameOverrides(prev => ({ ...prev, [m.key]: e.target.value }))}
+                          placeholder={m.final_ad_name}
+                          className="px-2 py-1 w-44 border border-gray-200 rounded-md text-[11px] focus:outline-none focus:ring-1 focus:ring-pink-200"
+                          title="留空将自动取素材名（重名自动加序号）"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPickedVideos(prev => prev.filter(v => !(v.video_id === m.video_id && v.source === m.source)))
+                            setAdNameOverrides(prev => { const p = { ...prev }; delete p[m.key]; return p })
+                          }}
+                          className="text-gray-300 hover:text-red-500 p-0.5"
+                          title="移除"
+                        ><X className="w-3.5 h-3.5" /></button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {pickedVideos.length === 0 && (
+                  <p className="text-[11px] text-gray-400 mt-2">未选择素材时无法创建广告。多选素材时，将共用同一套 Campaign / AdGroup / 文案配置，每个素材生成一个 Ad。</p>
+                )}
+              </>
             )}
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Ad Title (Display Name)</label>
-              <input value={adTitle} onChange={e => setAdTitle(e.target.value)} className={inputCls} placeholder="广告标题" />
+              <input
+                value={adTitle}
+                onChange={e => {
+                  setAdTitle(e.target.value)
+                  if (copyPackId) { setCopyPackId(null); setCopyPackName('') }
+                }}
+                className={inputCls}
+                placeholder="广告标题"
+              />
             </div>
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">Call to Action</label>
@@ -334,8 +596,33 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
             </div>
           </div>
           <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">广告文案 (Ad Text)</label>
-            <textarea value={adText} onChange={e => setAdText(e.target.value)} className={inputCls} rows={3} placeholder="广告描述文案" />
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-medium text-gray-600">广告文案 (Ad Text)</label>
+              <button
+                type="button"
+                onClick={() => setShowCopyPicker(true)}
+                className="text-[11px] text-blue-500 hover:text-blue-600 flex items-center gap-1"
+              >
+                <Library className="w-3 h-3" />
+                从文案库选择
+              </button>
+            </div>
+            <textarea
+              value={adText}
+              onChange={e => {
+                setAdText(e.target.value)
+                if (copyPackId) { setCopyPackId(null); setCopyPackName('') }
+              }}
+              className={inputCls}
+              rows={3}
+              placeholder="广告描述文案"
+            />
+            {copyPackId && (
+              <p className="text-[11px] text-blue-500 mt-1 flex items-center gap-1">
+                <Library className="w-3 h-3" />
+                来自文案库：{copyPackName || `#${copyPackId}`}
+              </p>
+            )}
           </div>
         </div>
       </SectionCard>
@@ -365,17 +652,107 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
           {overallSuccess && (
             <div className="flex items-center gap-2 p-3 mb-3 bg-green-50 border border-green-200 rounded-xl text-sm text-green-700">
               <CheckCircle className="w-4 h-4" />
-              <span>已成功创建 1 个 Campaign / 1 个 AdGroup / 1 个 Ad</span>
+              <span>已成功创建 1 个 Campaign / 1 个 AdGroup / {adsList.length} 个 Ad</span>
             </div>
           )}
           <div className="text-xs space-y-1 font-mono text-gray-600">
             <div>Campaign: {renderStepResult(created?.campaign, 'campaign_id')}</div>
             <div>AdGroup:  {renderStepResult(created?.adgroup, 'adgroup_id')}</div>
-            <div>Ad:       {renderStepResult(created?.ad, 'ad_id')}</div>
-            {summary && <div className="text-gray-400">summary: total={summary.total} success={summary.success} fail={summary.fail}</div>}
           </div>
+
+          {/* Ad 批量结果表 */}
+          {adsList.length > 0 && (
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-medium text-gray-700">Ad 创建结果（{adsList.length} 个）</span>
+                {summary && (
+                  <span className="text-[11px] text-gray-400">
+                    total={summary.total} · <span className="text-green-600">success={summary.success}</span> · <span className="text-red-500">fail={summary.fail}</span>
+                  </span>
+                )}
+              </div>
+              <div className="border border-gray-100 rounded-lg overflow-hidden">
+                <table className="w-full text-[11px]">
+                  <thead className="bg-gray-50 text-gray-500">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left font-medium w-8">#</th>
+                      <th className="px-2 py-1.5 text-left font-medium">Ad Name</th>
+                      <th className="px-2 py-1.5 text-left font-medium">video_id</th>
+                      <th className="px-2 py-1.5 text-left font-medium">状态</th>
+                      <th className="px-2 py-1.5 text-left font-medium">ad_id / 失败原因</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {adsList.map((a, i) => (
+                      <tr key={i} className={a.success ? '' : 'bg-red-50/30'}>
+                        <td className="px-2 py-1.5 text-gray-400">{i + 1}</td>
+                        <td className="px-2 py-1.5 text-gray-700 font-mono">{a.ad_name || '-'}</td>
+                        <td className="px-2 py-1.5 text-gray-500 font-mono truncate max-w-[140px]" title={a.video_id || ''}>{a.video_id || '-'}</td>
+                        <td className="px-2 py-1.5">
+                          {a.success ? (
+                            <span className="inline-flex items-center gap-1 text-green-600"><CheckCircle className="w-3 h-3" /> 成功</span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-red-500"><AlertCircle className="w-3 h-3" /> {a.skipped ? '已拦截' : '失败'}</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1.5 text-gray-600 font-mono break-all">
+                          {a.success ? (a.ad_id || '-') : (a.error || a.reason || '-')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </SectionCard>
       )}
+
+      {/* ───── 资产库 PickerDialog（懒挂载） ───── */}
+      <RegionGroupPickerDialog
+        open={showRegionPicker}
+        onClose={() => setShowRegionPicker(false)}
+        onSelect={(item) => {
+          // 把地区组的 country_codes 直接同步到 countryCodes，
+          // codesToLocationIds 只会保留本地映射里有的国家（其余忽略，UI 会提示）
+          setCountryCodes(item.country_codes)
+          setRegionGroupId(item.id)
+          setRegionGroupName(item.name)
+          setRegionMode('group')
+        }}
+      />
+
+      <LandingPagePickerDialog
+        open={showLandingPicker}
+        onClose={() => setShowLandingPicker(false)}
+        onSelect={(item) => {
+          setLandingPageUrl(item.landing_page_url)
+          setLandingPageId(item.id)
+          setLandingPageName(item.name)
+        }}
+      />
+
+      <CopyPackPickerDialog
+        open={showCopyPicker}
+        onClose={() => setShowCopyPicker(false)}
+        onSelect={(item, mode) => {
+          // mode = 'all' 全部覆盖；'empty' 仅填充空白
+          const fillAll = mode === 'all'
+          if (item.primary_text && (fillAll || !adText.trim())) setAdText(item.primary_text)
+          if (item.headline && (fillAll || !adTitle.trim())) setAdTitle(item.headline)
+          setCopyPackId(item.id)
+          setCopyPackName(item.name)
+        }}
+      />
+
+      {/* 视频素材统一选择器（系统素材 / 本地批量上传 / 账户素材） */}
+      <TikTokVideoMaterialPicker
+        open={showVideoPicker}
+        advertiserId={advertiserId}
+        value={pickedVideos}
+        onChange={setPickedVideos}
+        onClose={() => setShowVideoPicker(false)}
+      />
     </>
   )
 }

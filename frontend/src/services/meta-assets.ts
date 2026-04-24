@@ -48,6 +48,48 @@ export function fetchMetaPixels(adAccountId: string): Promise<{ data: MetaPixelO
   return apiFetch(`/api/meta/assets/pixels?ad_account_id=${encodeURIComponent(adAccountId)}`)
 }
 
+/* ═══ 账户已上传素材（adimages / advideos） ═══ */
+
+export interface MetaAccountAsset {
+  type: 'image' | 'video'
+  source: 'account_asset'
+  name: string
+  meta_asset_id: string
+  /** image only */
+  image_hash?: string
+  /** video only */
+  video_id?: string
+  preview_url?: string
+  thumbnail_url?: string
+  duration_sec?: number
+  width?: number
+  height?: number
+  created_time?: string
+}
+
+export interface MetaAccountAssetsListResult {
+  items: MetaAccountAsset[]
+  video_cursor: string | null
+  image_cursor: string | null
+  has_more: boolean
+}
+
+export function fetchMetaAccountAssets(params: {
+  ad_account_id: string
+  type?: 'video' | 'image' | 'all'
+  cursor?: string
+  keyword?: string
+  limit?: number
+}): Promise<{ data: MetaAccountAssetsListResult; error?: string }> {
+  const qs = new URLSearchParams()
+  qs.set('ad_account_id', params.ad_account_id)
+  if (params.type) qs.set('type', params.type)
+  if (params.cursor) qs.set('cursor', params.cursor)
+  if (params.keyword) qs.set('keyword', params.keyword)
+  qs.set('limit', String(params.limit ?? 25))
+  return apiFetch(`/api/meta/assets/list?${qs.toString()}`)
+}
+
 async function _safeParseJson<T>(res: Response, label: string): Promise<T & { success: boolean; error?: string }> {
   const text = await res.text()
   if (!text.trim()) {

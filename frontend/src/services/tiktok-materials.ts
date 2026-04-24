@@ -154,6 +154,44 @@ export function deleteMaterial(id: number): Promise<{ success: boolean }> {
   return apiFetch(`/api/materials/tiktok/${id}`, { method: 'DELETE' })
 }
 
+/* ═══ TikTok 账户内素材库（含手动在广告平台上传的素材） ═══ */
+
+export interface AccountLibraryVideo {
+  video_id: string
+  file_name: string
+  video_cover_url: string
+  duration: number
+  width: number
+  height: number
+  format: string
+  size: number
+  create_time: string
+  material_id: string
+}
+
+export interface AccountLibraryListResult {
+  items: AccountLibraryVideo[]
+  page: number
+  page_size: number
+  total: number
+  total_page: number
+  has_more: boolean
+}
+
+export function fetchAccountLibraryVideos(params: {
+  advertiser_id: string
+  page?: number
+  page_size?: number
+  keyword?: string
+}): Promise<{ data: AccountLibraryListResult; error?: string }> {
+  const qs = new URLSearchParams()
+  qs.set('advertiser_id', params.advertiser_id)
+  qs.set('page', String(params.page ?? 1))
+  qs.set('page_size', String(params.page_size ?? 20))
+  if (params.keyword) qs.set('keyword', params.keyword)
+  return apiFetch(`/api/materials/tiktok/account-library?${qs.toString()}`)
+}
+
 export const DURATION_THRESHOLD = 600 // 10 分钟
 
 export function isDurationOverLimit(sec: number | null): boolean {

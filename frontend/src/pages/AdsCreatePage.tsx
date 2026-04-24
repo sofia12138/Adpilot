@@ -31,8 +31,10 @@ import {
   uploadMetaImage, uploadMetaVideo,
   validateImageFile, validateVideoFile,
   type MetaPageOption, type MetaPixelOption,
+  type MetaAccountAsset,
 } from '@/services/meta-assets'
 import { getVideoDuration } from '@/services/tiktok-materials'
+import { MetaAccountAssetPicker } from '@/components/common/MetaAccountAssetPicker'
 import TikTokMinisCreateForm, {
   isTikTokMinisBasicTpl,
   useMinisTemplates,
@@ -76,7 +78,8 @@ function emptyW2a(): W2aFields {
 // ─── 素材上传状态 ──
 interface UploadingMaterial {
   id: string
-  file: File
+  /** 账户素材没有本地 File；用 ?: 兼容 */
+  file?: File
   type: 'image' | 'video'
   original_name: string
   ad_name: string
@@ -90,6 +93,10 @@ interface UploadingMaterial {
   thumbnail_uploading?: boolean
   thumbnail_error?: string
   duration_sec?: number
+  /** 素材来源：本地批量上传 / 账户素材；未标记则视为本地（向后兼容） */
+  source?: 'local_upload' | 'account_asset'
+  /** 账户素材的 Meta 资产 ID（image_hash 或 video_id） */
+  meta_asset_id?: string
 }
 
 const LONG_VIDEO_THRESHOLD = 600 // 10 min
@@ -182,6 +189,14 @@ export default function AdsCreatePage() {
   const [pixelsLoading, setPixelsLoading] = useState(false)
   const [pixelsError, setPixelsError] = useState('')
   const [pixelManual, setPixelManual] = useState(false)
+
+  // ── Meta 账户素材选择器 ──
+  const [showAccountAssetPicker, setShowAccountAssetPicker] = useState(false)
+
+  // ── Meta 投放时间（仅 Conversion ABO 优化项；不影响 TikTok / Mini） ──
+  // datetime-local 控件值（无时区，格式 yyyy-MM-ddTHH:mm）；提交时与浏览器时区合成 ISO 8601 with offset
+  const [scheduleStartLocal, setScheduleStartLocal] = useState('')
+  const [scheduleEndLocal, setScheduleEndLocal] = useState('')
 
   // ── 资产库弹窗 & 引用追踪 ──
   const [showLPPicker, setShowLPPicker] = useState(false)
@@ -340,6 +355,7 @@ export default function AdsCreatePage() {
         ad_name: fileNameToAdName(f.name),
         status: 'uploading' as const,
         progress: 0,
+        source: 'local_upload',
       }
     })
 
@@ -464,6 +480,79 @@ export default function AdsCreatePage() {
     }
   }, [campaignName, adSets.length])
 
+  // ── 切换 ad_account_id 时清空账户素材选择（避免跨账户素材误用），本地素材保留 ──
+  const prevAdAccountRef = useRef(adAccountId)
+  useEffect(() => {
+    const prev = prevAdAccountRef.current
+    if (prev && prev !== adAccountId) {
+      const removedAccountIds = materials.filter(m => m.source === 'account_asset').map(m => m.id)
+      if (removedAccountIds.length > 0) {
+        setMaterials(prevList => prevList.filter(m => m.source !== 'account_asset'))
+        setAdSets(prevList => prevList.map(a => ({
+          ...a,
+          material_ids: a.material_ids.filter(id => !removedAccountIds.includes(id)),
+        })))
+      }
+    }
+    prevAdAccountRef.current = adAccountId
+  }, [adAccountId, materials])
+
+  // ── 把账户素材 picker 的选择并入素材池（标记 source='account_asset'） ──
+  const addAccountAssets = useCallback((assets: MetaAccountAsset[]) => {
+    if (assets.length === 0) return
+    const remaining = MAX_MATERIALS - materials.length
+    if (remaining <= 0) {
+      alert(`素材池已满（最多 ${MAX_MATERIALS} 个）`)
+      return
+    }
+    const slice = assets.slice(0, remaining)
+    if (slice.length < assets.length) {
+      alert(`只能再添加 ${remaining} 个素材，已自动截取前 ${remaining} 个`)
+    }
+    const newItems: UploadingMaterial[] = slice.map(a => ({
+      id: nextMatId(),
+      type: a.type,
+      original_name: a.name,
+      ad_name: fileNameToAdName(a.name),
+      status: 'success',
+      progress: 100,
+      image_hash: a.image_hash,
+      video_id: a.video_id,
+      picture_url: a.thumbnail_url || a.preview_url,
+      duration_sec: a.duration_sec ? a.duration_sec / 1000 : undefined,
+      source: 'account_asset',
+      meta_asset_id: a.meta_asset_id,
+    }))
+    setMaterials(prev => [...prev, ...newItems])
+  }, [materials.length])
+
+  /** 已选账户素材 key（用于 picker 内 disable） */
+  const accountAssetPickedKeys = useMemo(() => {
+    const s = new Set<string>()
+    for (const m of materials) {
+      if (m.source !== 'account_asset') continue
+      const id = m.meta_asset_id || m.video_id || m.image_hash || ''
+      if (id) s.add(`${m.type}:${id}`)
+    }
+    return s
+  }, [materials])
+
+  // ── 投放时间工具（仅 Meta W2A Conversion ABO 使用） ──
+  // datetime-local → ISO 8601 with timezone offset；浏览器本地时区
+  function localToIso(local: string): string {
+    if (!local) return ''
+    const d = new Date(local)
+    if (Number.isNaN(d.getTime())) return ''
+    const tz = -d.getTimezoneOffset()
+    const sign = tz >= 0 ? '+' : '-'
+    const abs = Math.abs(tz)
+    const hh = String(Math.floor(abs / 60)).padStart(2, '0')
+    const mm = String(abs % 60).padStart(2, '0')
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${sign}${hh}${mm}`
+  }
+  const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+
   // ── 校验 ──
   function validate(): string | null {
     if (!selectedTpl) return '请先选择模板'
@@ -492,6 +581,25 @@ export default function AdsCreatePage() {
         if (!a.custom_event_type.trim()) return `AdSet #${i + 1} Custom Event Type 必填`
       }
     }
+    // 投放时间校验（仅 Meta W2A Conversion ABO；start_time 必填）
+    if (isW2aConversion) {
+      if (!scheduleStartLocal) return '请填写开始时间（投放时间 → 开始时间）'
+      const sd = new Date(scheduleStartLocal)
+      if (Number.isNaN(sd.getTime())) return '开始时间格式无效'
+      if (sd.getTime() < Date.now() + 10 * 60 * 1000) {
+        return '开始时间必须晚于当前时间至少 10 分钟（Meta API 要求）'
+      }
+      if (scheduleEndLocal) {
+        const ed = new Date(scheduleEndLocal)
+        if (Number.isNaN(ed.getTime())) return '结束时间格式无效'
+        if (ed.getTime() <= sd.getTime()) return '结束时间必须晚于开始时间'
+        // 使用 daily_budget 时，end-start 建议 > 24h
+        const usingDailyBudget = adSets.some(a => Number(a.daily_budget) > 0)
+        if (usingDailyBudget && (ed.getTime() - sd.getTime()) < 24 * 3600 * 1000) {
+          return '使用日预算时，结束时间与开始时间间隔需大于 24 小时（Meta 限制）'
+        }
+      }
+    }
     return null
   }
 
@@ -517,6 +625,8 @@ export default function AdsCreatePage() {
       picture_url: m.picture_url,
       original_name: m.original_name,
       ad_name: m.ad_name,
+      source: m.source,
+      meta_asset_id: m.meta_asset_id,
     }))
 
     const adsetConfigs: AdSetConfig[] = adSets.map(a => {
@@ -558,6 +668,12 @@ export default function AdsCreatePage() {
         headline_snapshot: copyRef?.headlineSnapshot,
         description_snapshot: copyRef?.descriptionSnapshot,
       },
+      // Meta Web to App Conversion ABO 投放时间
+      metaSchedule: isW2aConversion && scheduleStartLocal ? {
+        start_time: localToIso(scheduleStartLocal),
+        end_time: scheduleEndLocal ? localToIso(scheduleEndLocal) : undefined,
+        timezone: browserTz,
+      } : undefined,
     })
     setSubmitting(false); setResult(res)
   }
@@ -739,7 +855,7 @@ export default function AdsCreatePage() {
                     </div>
                   </div>
                 )}
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                   <input ref={fileInputRef} type="file" multiple
                     accept=".jpg,.jpeg,.png,.gif,.bmp,.webp,.mp4,.mov,.avi,.mkv,.webm,.m4v"
                     className="hidden"
@@ -748,8 +864,20 @@ export default function AdsCreatePage() {
                   <button type="button" onClick={() => fileInputRef.current?.click()}
                     disabled={!adAccountId || materials.length >= MAX_MATERIALS}
                     className="flex items-center gap-2 px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-white hover:border-gray-300 transition disabled:opacity-50">
-                    <Plus className="w-4 h-4" /> 上传素材（图片/视频）
+                    <Plus className="w-4 h-4" /> 本地批量上传
                   </button>
+                  {isMeta && (
+                    <button type="button"
+                      onClick={() => {
+                        if (!adAccountId) { alert('请先选择 Meta 广告账户'); return }
+                        setShowAccountAssetPicker(true)
+                      }}
+                      disabled={!adAccountId || materials.length >= MAX_MATERIALS}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-white hover:border-gray-300 transition disabled:opacity-50"
+                      title={adAccountId ? '从当前广告账户已上传素材中选择（含 Meta 平台手动上传）' : '请先选择 Meta 广告账户'}>
+                      <Package className="w-4 h-4" /> 账户已有素材
+                    </button>
+                  )}
                   <span className="text-xs text-gray-400">支持批量选择，图片和视频可混合，最多 {MAX_MATERIALS} 个</span>
                 </div>
 
@@ -778,6 +906,12 @@ export default function AdsCreatePage() {
                                 {m.type === 'video' ? <Film className="w-3 h-3" /> : <Image className="w-3 h-3" />}
                                 {m.type}
                               </span>
+                              {m.source === 'account_asset' && (
+                                <span className="ml-1 inline-block px-1.5 py-0.5 rounded text-[9px] bg-emerald-50 text-emerald-600 border border-emerald-100" title="来自当前广告账户已上传素材">账户</span>
+                              )}
+                              {m.source === 'local_upload' && (
+                                <span className="ml-1 inline-block px-1.5 py-0.5 rounded text-[9px] bg-gray-50 text-gray-500 border border-gray-100" title="本地批量上传">本地</span>
+                              )}
                             </td>
                             <td className="px-3 py-2">
                               {m.status === 'uploading' && (
@@ -871,6 +1005,38 @@ export default function AdsCreatePage() {
                 )}
               </div>
             </SectionCard>
+
+            {/* ══ Meta W2A Conversion ABO：投放时间（AdSet 级字段） ══ */}
+            {isW2aConversion && (
+              <SectionCard title="投放时间" className="mb-6">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                        开始时间 <span className="text-red-400">*</span>
+                      </label>
+                      <input type="datetime-local" value={scheduleStartLocal}
+                        onChange={e => { setScheduleStartLocal(e.target.value); setResult(null) }}
+                        className={inputCls} />
+                      <p className="text-[11px] text-gray-400 mt-1">必须晚于当前时间至少 10 分钟（Meta API 要求）</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                        结束时间 <span className="text-gray-300">(可选)</span>
+                      </label>
+                      <input type="datetime-local" value={scheduleEndLocal}
+                        onChange={e => { setScheduleEndLocal(e.target.value); setResult(null) }}
+                        className={inputCls} />
+                      <p className="text-[11px] text-gray-400 mt-1">不填表示长期投放；使用日预算时与开始时间间隔需 &gt; 24 小时</p>
+                    </div>
+                  </div>
+                  <div className="text-xs text-gray-400 bg-gray-50 border border-gray-100 rounded-lg px-3 py-2 flex items-center gap-2">
+                    <Shield className="w-3.5 h-3.5 text-gray-300" />
+                    时区：使用浏览器本地时区 <span className="font-mono text-gray-500">{browserTz}</span>，提交时自动转为 ISO 8601 带时区偏移格式发往 Meta。
+                  </div>
+                </div>
+              </SectionCard>
+            )}
 
             {/* ══ AdSet 配置区 ══ */}
             <SectionCard title={`AdSet 配置 (${adSets.length})`} className="mb-6">
@@ -1126,6 +1292,15 @@ export default function AdsCreatePage() {
             setRegionRefs(prev => ({ ...prev, [showRegionPicker]: { id: item.id, name: item.name, snapshot: [...item.country_codes] } }))
           }
         }}
+      />
+
+      {/* Meta 账户已上传素材选择器 */}
+      <MetaAccountAssetPicker
+        open={showAccountAssetPicker}
+        adAccountId={adAccountId}
+        pickedKeys={accountAssetPickedKeys}
+        onConfirm={addAccountAssets}
+        onClose={() => setShowAccountAssetPicker(false)}
       />
     </div>
   )

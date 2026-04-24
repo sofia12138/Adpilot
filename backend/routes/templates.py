@@ -592,6 +592,12 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
     overrides = payload.get("overrides", {})
     materials: list[dict] = payload.get("materials", [])
     adsets_input: list[dict] = payload.get("adsets", [])
+    # 投放时间（Meta W2A Conversion ABO 优化项）
+    # 顶层 meta_schedule 优先；其次 overrides.adset.start_time/end_time
+    meta_schedule = payload.get("meta_schedule") or {}
+    schedule_start_time = (meta_schedule.get("start_time") or overrides.get("adset", {}).get("start_time") or "").strip() if isinstance(meta_schedule, dict) else ""
+    schedule_end_time = (meta_schedule.get("end_time") or overrides.get("adset", {}).get("end_time") or "").strip() if isinstance(meta_schedule, dict) else ""
+    schedule_timezone = (meta_schedule.get("timezone") or "").strip() if isinstance(meta_schedule, dict) else ""
 
     tpl_campaign = _deep_merge(tpl.get("campaign", {}), overrides.get("campaign", {}))
     tpl_adset = _deep_merge(tpl.get("adset", {}), overrides.get("adset", {}))
@@ -673,14 +679,26 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
         "ad_account_id": ad_account_id,
         "campaign": None,
         "adsets": [],
+        "schedule": {
+            "enabled": bool(schedule_start_time),
+            "start_time": schedule_start_time or None,
+            "end_time": schedule_end_time or None,
+            "timezone": schedule_timezone or None,
+        },
     }
 
     # 获取账户专属 token
     _acct_row = biz_account_repository.get_by_platform_account("meta", ad_account_id)
     _acct_token = (_acct_row or {}).get("access_token", "")
     _client = MetaClient(access_token=_acct_token) if _acct_token else MetaClient()
+    # 账户时区：当 meta_schedule.timezone 未指定时，作为时间字符串展示参考；
+    # Meta API 接受 ISO 8601（如 2026-04-25T10:00:00-0700），前端必须把时间转成带偏移的 ISO 后下发，
+    # 后端这里只做透传 + 日志，不做时区算术，避免歧义。
+    _account_tz = (_acct_row or {}).get("timezone") or "UTC"
     logger.info(f"[launch-meta] token={'专属' if _acct_token else '全局默认'}  account={ad_account_id}  "
-                f"materials={len(materials)}  adsets={len(adsets_input)}")
+                f"materials={len(materials)}  adsets={len(adsets_input)}  "
+                f"schedule_start={schedule_start_time or '-'}  schedule_end={schedule_end_time or '-'}  "
+                f"tz_input={schedule_timezone or '-'}  tz_account={_account_tz}")
 
     svc_campaign = MetaCampaignService(ad_account_id, client=_client)
     svc_adset = MetaAdSetService(ad_account_id, client=_client)
@@ -731,6 +749,15 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
         po_valid = {k: v for k, v in adset_po.items() if v}
         if po_valid:
             adset_payload["promoted_object"] = json.dumps(po_valid)
+
+        # 投放时间：start_time 必填则进 payload；end_time 选填，未填则视为长期投放
+        # adset 级 schedule 优先级：adset_cfg > 顶层 meta_schedule
+        as_start = (adset_cfg.get("start_time") or schedule_start_time or "").strip()
+        as_end = (adset_cfg.get("end_time") or schedule_end_time or "").strip()
+        if as_start:
+            adset_payload["start_time"] = as_start
+        if as_end:
+            adset_payload["end_time"] = as_end
 
         safe_as = {k: v for k, v in adset_payload.items() if k != "access_token"}
         logger.info(f"[launch-meta] step=adset#{idx+1}  name={adset_name}  budget={daily_budget}  payload={safe_as}")
@@ -1199,7 +1226,7 @@ async def _launch_tiktok_minis(tpl: dict, payload: dict) -> dict:
 TIKTOK_W2A_EDITABLE_FIELDS: set[str] = {
     "campaign_name", "adgroup_name", "ad_name",
     "budget", "bid", "bid_price",
-    "country", "countries", "location_ids", "region_group", "region_group_id",
+    "country", "countries", "location_ids",
     "age_groups", "gender", "audience", "languages",
     "landing_page_url", "tracking_params", "tracking_url", "deeplink",
     "video_id", "creative_id", "image_ids",
@@ -1207,6 +1234,10 @@ TIKTOK_W2A_EDITABLE_FIELDS: set[str] = {
     "schedule", "schedule_type", "schedule_start_time", "schedule_end_time",
     "identity_id", "identity_type",
     "pixel_id", "optimization_event",
+    # 资产库引用 + 快照（不参与 TikTok 主调用，仅用于日志/operation_log/模板回填）
+    "region_mode", "region_group", "region_group_id", "region_group_name_snapshot",
+    "landing_page_id", "landing_page_name_snapshot", "landing_page_url_snapshot",
+    "copy_pack_id", "copy_pack_name_snapshot",
 }
 
 
@@ -1232,11 +1263,24 @@ async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
         return {"error": f"未找到 advertiser_id={advertiser_id} 对应的 TikTok access_token，请在「账号管理」先配置"}
     access_token = acc_row["access_token"]
 
-    campaign_name = overrides.get("campaign_name") or payload.get("campaign_name") or ""
-    adgroup_name = overrides.get("adgroup_name") or campaign_name or "AdGroup_01"
-    ad_name = overrides.get("ad_name") or f"{campaign_name}_Ad_01"
+    campaign_name = (overrides.get("campaign_name") or payload.get("campaign_name") or "").strip()
     if not campaign_name:
         return {"error": "campaign_name 不能为空"}
+
+    # 需求 1：AdGroup Name 留空时自动继承 Campaign Name
+    adgroup_name = (overrides.get("adgroup_name") or "").strip() or campaign_name
+    if not adgroup_name:
+        adgroup_name = "AdGroup_01"
+
+    # 需求 2：Ad Name 兜底优先级 = 用户输入 > 素材文件名(去后缀) > 默认 "{campaign_name}_Ad_01"
+    # material_name 由前端在 payload 中透传（不进 EDITABLE_FIELDS，仅作 ad_name 兜底）
+    raw_material_name = (payload.get("material_name") or "").strip()
+    # 如果是带后缀的文件名，去掉扩展名
+    if raw_material_name and "." in raw_material_name:
+        dot = raw_material_name.rfind(".")
+        if 0 < dot < len(raw_material_name) - 1:
+            raw_material_name = raw_material_name[:dot]
+    ad_name = (overrides.get("ad_name") or "").strip() or raw_material_name or f"{campaign_name}_Ad_01"
 
     budget = float(overrides.get("budget", tpl_adgroup.get("default_budget", 50)))
     bid_price = overrides.get("bid") or overrides.get("bid_price")
@@ -1270,8 +1314,9 @@ async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
 
     # creative
     video_id = overrides.get("video_id")
-    if not video_id:
-        return {"error": "缺少 video_id（请先上传 TikTok 视频素材）"}
+    has_batch_materials = isinstance(payload.get("materials"), list) and bool(payload.get("materials"))
+    if not video_id and not has_batch_materials:
+        return {"error": "缺少 video_id（请先上传 TikTok 视频素材，或通过 materials 批量字段传入）"}
 
     # landing & tracking
     landing_url = overrides.get("landing_page_url") or ""
@@ -1293,6 +1338,19 @@ async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
         "call_to_action", "LEARN_MORE"
     )
 
+    # ── 资产库引用日志（不影响 TikTok 主调用，仅用于排查与可观测） ──
+    asset_refs = {
+        "region_mode": overrides.get("region_mode"),
+        "region_group_id": overrides.get("region_group_id"),
+        "region_group_name": overrides.get("region_group_name_snapshot"),
+        "landing_page_id": overrides.get("landing_page_id"),
+        "landing_page_name": overrides.get("landing_page_name_snapshot"),
+        "copy_pack_id": overrides.get("copy_pack_id"),
+        "copy_pack_name": overrides.get("copy_pack_name_snapshot"),
+    }
+    if any(v for v in asset_refs.values() if v not in (None, "")):
+        logger.info(f"[launch-w2a] 使用资产库引用: { {k: v for k, v in asset_refs.items() if v not in (None, '')} }")
+
     client = TikTokClient(access_token=access_token)
     results: dict = {
         "platform": "tiktok",
@@ -1301,6 +1359,8 @@ async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
         "adgroup": None,
         "ad": None,
         "summary": {"total": 1, "success": 0, "fail": 0},
+        # 把资产库引用回带给前端，便于结果面板展示
+        "asset_refs": {k: v for k, v in asset_refs.items() if v not in (None, "")},
     }
 
     # ── Step 1: Campaign ──
@@ -1372,47 +1432,182 @@ async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
         results["summary"]["fail"] = 1
         return {"data": results}
 
-    # ── Step 3: Ad ──
-    # TikTok v1.3 ad/create/ 在 WEB_CONVERSIONS + SINGLE_VIDEO 等新组合下，
+    # ── Step 3: Ad（支持批量素材：1 campaign + 1 adgroup + N ad）──
+    # TikTok v1.3 ad/create/ 在 WEB_CONVERSIONS + SINGLE_VIDEO 组合下，
     # 强制要求把素材维度字段放进 creatives 数组里，顶层只保留 advertiser_id / adgroup_id。
-    creative_item: dict = {
-        "ad_name": ad_name,
-        "ad_text": ad_text,
-        "ad_format": tpl_ad.get("ad_format", "SINGLE_VIDEO"),
-        "video_id": video_id,
-        "identity_id": identity_id,
-        "identity_type": identity_type,
-        "call_to_action": call_to_action,
-        "landing_page_url": landing_url,
-    }
-    if tracking_url:
-        creative_item["tracking_url"] = tracking_url
-    if overrides.get("deeplink"):
-        creative_item["deeplink"] = overrides["deeplink"]
-    # ad_title 历史上被错误地映射成 display_name(那是 identity 的字段)。
-    # v1.3 creatives 没有 display_name；把它当成展示名留作后续接入，本次先不下发。
+    # 本模板永远走 SINGLE_VIDEO，不允许被改成 IMAGE / CAROUSEL。
+    ad_format = "SINGLE_VIDEO"
+    deeplink = overrides.get("deeplink")
 
-    ad_payload: dict = {
-        "advertiser_id": advertiser_id,
-        "adgroup_id": adgroup_id,
-        "creatives": [creative_item],
-    }
+    # ── 构造素材列表 ──
+    #   优先使用 payload.materials（批量模式：每条对应一个 ad）；
+    #   未提供时回落到顶层 video_id（兼容旧前端单素材模式）。
+    raw_materials = payload.get("materials")
+    materials_list: list[dict] = []
+    if isinstance(raw_materials, list) and raw_materials:
+        for item in raw_materials:
+            if not isinstance(item, dict):
+                continue
+            vid = str(item.get("video_id") or "").strip()
+            if not vid:
+                continue
+            materials_list.append({
+                "video_id": vid,
+                "ad_name": str(item.get("ad_name") or "").strip(),
+                "image_ids_raw": item.get("image_ids"),
+                "file_name": str(item.get("file_name") or item.get("material_name") or "").strip(),
+            })
+    if not materials_list:
+        # 旧路径兼容：单素材
+        materials_list.append({
+            "video_id": video_id,
+            "ad_name": ad_name,
+            "image_ids_raw": overrides.get("image_ids"),
+            "file_name": "",
+        })
 
-    try:
-        ad_data = await client.post("ad/create/", ad_payload)
-        # creatives 数组写法下 TikTok 通常返回 ad_ids: [...]
-        ad_id = (
-            ad_data.get("ad_id")
-            or (ad_data.get("ad_ids") or [""])[0]
-            or ((ad_data.get("creatives") or [{}])[0].get("ad_id"))
-        )
-        results["ad"] = {"success": True, "ad_id": ad_id, "ad_name": ad_name}
-        results["summary"]["success"] = 1
-        logger.info(f"[launch-w2a] Ad 创建成功: {ad_id}")
-    except Exception as e:
-        logger.error(f"[launch-w2a] Ad 创建失败: {e}  payload={ad_payload}")
-        results["ad"] = {"success": False, "error": str(e), "payload_sent": ad_payload}
-        results["summary"]["fail"] = 1
+    # ── ad_name 兜底 + 重名加序号 ──
+    seen_names: dict[str, int] = {}
+    for m in materials_list:
+        base = m["ad_name"] or m["file_name"] or f"{campaign_name}_Ad"
+        if "." in base:
+            dot = base.rfind(".")
+            if 0 < dot < len(base) - 1:
+                base = base[:dot]
+        n = seen_names.get(base, 0) + 1
+        seen_names[base] = n
+        # 第一次保留原名；第 2+ 次追加序号
+        m["ad_name"] = base if n == 1 else f"{base}_{n:02d}"
+
+    # ── 总数与结果壳更新 ──
+    total_ads = len(materials_list)
+    results["summary"]["total"] = total_ads
+    results["ads"] = []  # 批量模式主结果
+    # 兼容旧前端：单条时同步给 results.ad
+    results["ad"] = None
+
+    creative_svc = None  # 懒加载
+
+    async def _resolve_image_ids_for(vid: str, raw: object) -> tuple[list[str], str]:
+        """返回 (image_ids, note)；note 用于错误展示"""
+        # 1) 优先用 payload 透传值
+        if isinstance(raw, str):
+            ids = [s.strip() for s in raw.split(",") if s.strip()]
+        elif isinstance(raw, list):
+            ids = [str(x).strip() for x in raw if str(x).strip()]
+        else:
+            ids = []
+        if ids:
+            return ids, ""
+        # 2) 自动从视频封面生成
+        nonlocal creative_svc
+        if creative_svc is None:
+            from tiktok_ads.api.creative import CreativeService
+            creative_svc = CreativeService(client=client, advertiser_id=advertiser_id)
+        try:
+            video_infos = await creative_svc.get_video_info_detail([vid])
+            cover_url = ""
+            if video_infos:
+                v0 = video_infos[0] or {}
+                cover_url = (
+                    v0.get("video_cover_url")
+                    or v0.get("poster_url")
+                    or v0.get("preview_url")
+                    or ""
+                )
+            if not cover_url:
+                return [], "TikTok 未在 video info 中返回封面 URL"
+            cover_resp = await creative_svc.upload_image_by_url(
+                image_url=cover_url,
+                file_name=f"cover_{str(vid)[:16]}.jpg",
+            )
+            cov_id = (
+                cover_resp.get("image_id")
+                or (cover_resp.get("data") or {}).get("image_id")
+            )
+            if cov_id:
+                logger.info(f"[launch-w2a] 自动生成封面 image_id={cov_id} (video={vid})")
+                return [cov_id], f"已自动生成封面 image_id={cov_id}"
+            return [], f"上传封面接口未返回 image_id，响应: {cover_resp}"
+        except Exception as e:
+            logger.warning(f"[launch-w2a] 自动生成视频封面失败 (video={vid}): {e}")
+            return [], f"自动生成封面失败: {e}"
+
+    # ── 循环创建每条 Ad ──
+    for idx, m in enumerate(materials_list, start=1):
+        vid = m["video_id"]
+        an = m["ad_name"]
+        image_ids, cover_note = await _resolve_image_ids_for(vid, m["image_ids_raw"])
+
+        if not image_ids:
+            err = (
+                "缺少视频封面图 image_ids。该模板强制为 SINGLE_VIDEO，TikTok 要求必须传 cover image_id。"
+                f" {cover_note}。请在前端「素材」页为该视频准备封面后重试，或在请求中显式传 image_ids。"
+            )
+            logger.error(f"[launch-w2a] Ad #{idx} 拦截: {err}")
+            results["ads"].append({
+                "success": False,
+                "error": err,
+                "video_id": vid,
+                "ad_name": an,
+                "skipped_call": True,
+            })
+            results["summary"]["fail"] += 1
+            continue
+
+        creative_item: dict = {
+            "ad_name": an,
+            "ad_text": ad_text,
+            "ad_format": ad_format,
+            "video_id": vid,
+            "image_ids": image_ids,
+            "identity_id": identity_id,
+            "identity_type": identity_type,
+            "call_to_action": call_to_action,
+            "landing_page_url": landing_url,
+        }
+        if tracking_url:
+            creative_item["tracking_url"] = tracking_url
+        if deeplink:
+            creative_item["deeplink"] = deeplink
+        # ad_title 历史上被错误地映射成 display_name(那是 identity 的字段)。
+        # v1.3 creatives 没有 display_name；本次先不下发。
+
+        ad_payload: dict = {
+            "advertiser_id": advertiser_id,
+            "adgroup_id": adgroup_id,
+            "creatives": [creative_item],
+        }
+
+        try:
+            ad_data = await client.post("ad/create/", ad_payload)
+            ad_id = (
+                ad_data.get("ad_id")
+                or (ad_data.get("ad_ids") or [""])[0]
+                or ((ad_data.get("creatives") or [{}])[0].get("ad_id"))
+            )
+            results["ads"].append({
+                "success": True,
+                "ad_id": ad_id,
+                "ad_name": an,
+                "video_id": vid,
+            })
+            results["summary"]["success"] += 1
+            logger.info(f"[launch-w2a] Ad #{idx}/{total_ads} 创建成功: {ad_id} (name={an})")
+        except Exception as e:
+            logger.error(f"[launch-w2a] Ad #{idx}/{total_ads} 创建失败: {e}  payload={ad_payload}")
+            results["ads"].append({
+                "success": False,
+                "error": str(e),
+                "video_id": vid,
+                "ad_name": an,
+                "payload_sent": ad_payload,
+            })
+            results["summary"]["fail"] += 1
+
+    # 单条兼容 alias
+    if results["ads"]:
+        results["ad"] = results["ads"][0]
 
     return {"data": results}
 
@@ -1692,6 +1887,41 @@ def _log_launch(user, tpl_id: str, platform: str, payload: dict, resp: dict):
     }
     if ad_account_id:
         after_summary["ad_account_id"] = ad_account_id
+
+    # Meta W2A Conversion ABO 优化：记录素材来源分布 + 投放时间
+    if platform == "meta" and isinstance(materials, list) and materials:
+        local_cnt = sum(1 for m in materials if (m.get("source") == "local_upload"))
+        account_cnt = sum(1 for m in materials if (m.get("source") == "account_asset"))
+        after_summary["material_source"] = {
+            "local_upload": local_cnt,
+            "account_asset": account_cnt,
+            "other": max(0, len(materials) - local_cnt - account_cnt),
+        }
+    sched = data.get("schedule") if isinstance(data, dict) else None
+    if isinstance(sched, dict) and sched.get("enabled"):
+        after_summary["adset_schedule"] = {
+            "enabled": True,
+            "start_time": sched.get("start_time"),
+            "end_time": sched.get("end_time"),
+            "timezone": sched.get("timezone"),
+        }
+    # 失败素材 error 摘要（最多 5 个）
+    if isinstance(data, dict) and isinstance(data.get("adsets"), list):
+        failed_ads = []
+        for a in data["adsets"]:
+            for ad in a.get("ads", []):
+                if not ad.get("success"):
+                    failed_ads.append({
+                        "ad_name": ad.get("ad_name"),
+                        "material_name": ad.get("material_name"),
+                        "error": ad.get("error", ""),
+                    })
+                if len(failed_ads) >= 5:
+                    break
+            if len(failed_ads) >= 5:
+                break
+        if failed_ads:
+            after_summary["failed_ads"] = failed_ads
 
     log_operation(
         username=user.username,

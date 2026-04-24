@@ -80,6 +80,130 @@ async def list_pixels(
         return {"data": [], "error": str(e)}
 
 
+# ── 账户已上传素材列表（adimages / advideos） ────────────────
+#
+# Meta 不像 TikTok 一次返回视频+图片；分两类资源：
+#   GET act_xxx/advideos  → list[{id, title, thumbnails, length, ...}]
+#   GET act_xxx/adimages  → list[{hash, name, url, width, height, ...}]
+# 前端用 type=video|image|all 控制要哪些。
+# cursor: Graph API 的 paging.cursors.after；返回 next_cursor 让前端续翻。
+# keyword: 客户端层面的本页过滤（Graph 不支持 name 模糊搜索）。
+
+@router.get("/list")
+async def list_account_assets(
+    ad_account_id: str = Query(..., description="Meta 广告账户 ID，如 act_123456"),
+    type: str = Query("all", description="video / image / all"),
+    cursor: str | None = Query(None, description="分页游标（Graph paging.cursors.after），仅作用于单一类型"),
+    keyword: str | None = Query(None, description="按 name/title 模糊匹配（仅当前页）"),
+    limit: int = Query(25, ge=1, le=100),
+    _user: User = Depends(get_current_user),
+):
+    """拉取广告账户内已上传素材（视频 / 图片），含手动在 Meta 平台上传的素材。
+    返回结构: { data: { items: [...], video_cursor?, image_cursor?, has_more } }
+    items 字段统一: type/name/source/preview_url/thumbnail_url/video_id?/image_hash?/meta_asset_id/created_time
+    """
+    type = (type or "all").lower()
+    if type not in ("video", "image", "all"):
+        return JSONResponse(status_code=400, content={"error": "type 必须是 video / image / all"})
+
+    token = _get_token_for_account(ad_account_id)
+    client = MetaClient(access_token=token)
+
+    items: list[dict] = []
+    video_cursor: str | None = None
+    image_cursor: str | None = None
+    errors: list[str] = []
+
+    # ── 视频 ──
+    if type in ("video", "all"):
+        try:
+            params: dict = {
+                "fields": "id,title,thumbnails{uri},length,created_time,format",
+                "limit": limit,
+            }
+            # 当 type=all 时，cursor 不再适用单一类型；前端要分页时建议指定 type=video
+            if cursor and type == "video":
+                params["after"] = cursor
+            data = await client.get(f"{ad_account_id}/advideos", params)
+            for v in (data.get("data") or []):
+                vid = str(v.get("id") or "")
+                if not vid:
+                    continue
+                title = v.get("title") or vid
+                thumbs = ((v.get("thumbnails") or {}).get("data") or [])
+                thumb_url = thumbs[0].get("uri") if thumbs else ""
+                items.append({
+                    "type": "video",
+                    "source": "account_asset",
+                    "name": title,
+                    "video_id": vid,
+                    "meta_asset_id": vid,
+                    "preview_url": thumb_url,
+                    "thumbnail_url": thumb_url,
+                    "duration_sec": v.get("length") or 0,
+                    "created_time": v.get("created_time") or "",
+                })
+            video_cursor = ((data.get("paging") or {}).get("cursors") or {}).get("after") or None
+            # 当 paging.next 不存在时，认为没有下一页
+            if not (data.get("paging") or {}).get("next"):
+                video_cursor = None
+        except Exception as e:
+            logger.warning(f"[meta-assets] 拉取账户视频素材失败 ad_account={ad_account_id}: {e}")
+            errors.append(f"video: {e}")
+
+    # ── 图片 ──
+    if type in ("image", "all"):
+        try:
+            params = {
+                "fields": "hash,name,url,permalink_url,width,height,created_time",
+                "limit": limit,
+            }
+            if cursor and type == "image":
+                params["after"] = cursor
+            data = await client.get(f"{ad_account_id}/adimages", params)
+            for im in (data.get("data") or []):
+                h = str(im.get("hash") or "")
+                if not h:
+                    continue
+                url = im.get("url") or im.get("permalink_url") or ""
+                items.append({
+                    "type": "image",
+                    "source": "account_asset",
+                    "name": im.get("name") or h,
+                    "image_hash": h,
+                    "meta_asset_id": h,
+                    "preview_url": url,
+                    "thumbnail_url": url,
+                    "width": im.get("width") or 0,
+                    "height": im.get("height") or 0,
+                    "created_time": im.get("created_time") or "",
+                })
+            image_cursor = ((data.get("paging") or {}).get("cursors") or {}).get("after") or None
+            if not (data.get("paging") or {}).get("next"):
+                image_cursor = None
+        except Exception as e:
+            logger.warning(f"[meta-assets] 拉取账户图片素材失败 ad_account={ad_account_id}: {e}")
+            errors.append(f"image: {e}")
+
+    # 关键词过滤（Graph 不支持 name 模糊搜索，只在当前页生效）
+    if keyword:
+        kw = keyword.strip().lower()
+        items = [it for it in items if kw in (it.get("name") or "").lower() or kw in (it.get("meta_asset_id") or "").lower()]
+
+    has_more = bool(video_cursor or image_cursor)
+    resp: dict = {
+        "data": {
+            "items": items,
+            "video_cursor": video_cursor,
+            "image_cursor": image_cursor,
+            "has_more": has_more,
+        }
+    }
+    if errors and not items:
+        resp["error"] = "; ".join(errors)
+    return resp
+
+
 # ── 图片上传 ──────────────────────────────────────────────
 
 @router.post("/upload-image")
