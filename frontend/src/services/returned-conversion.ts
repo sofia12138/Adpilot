@@ -35,8 +35,12 @@ export interface ReturnedSummary {
   registrations_returned: number
   /** 回传充值价值（广告平台归因） */
   purchase_value_returned: number
+  /** 回传内购数 / 购买次数（广告平台归因） */
+  purchase_count_returned: number
   /** 回传订阅价值（平台不支持时为 0） */
   subscribe_value_returned: number
+  /** 回传订阅数 / 订阅次数（平台不支持时为 0） */
+  subscribe_count_returned: number
   /** 回传总价值 = purchase + subscribe */
   total_value_returned: number
   /** 累计回传ROI = total_value_returned / spend（所选时段内总回传价值 / 总花费） */
@@ -81,7 +85,9 @@ export interface ReturnedFieldAvailability {
 export interface ReturnedAvailability {
   registrations_returned:      ReturnedFieldAvailability
   purchase_value_returned:     ReturnedFieldAvailability
+  purchase_count_returned:     ReturnedFieldAvailability
   subscribe_value_returned:    ReturnedFieldAvailability
+  subscribe_count_returned:    ReturnedFieldAvailability
   d1_value_returned:           ReturnedFieldAvailability
   d0_registrations_returned:   ReturnedFieldAvailability
   d0_purchase_value_returned:  ReturnedFieldAvailability
@@ -134,7 +140,9 @@ export interface HierarchyLeaf {
   installs: number
   registrations_returned: number
   purchase_value_returned: number
+  purchase_count_returned: number
   subscribe_value_returned: number
+  subscribe_count_returned: number
   total_value_returned: number
   d1_value_returned: number
   d0_registrations_returned: number

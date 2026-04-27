@@ -52,7 +52,9 @@ interface MetricRow {
   installs: number
   registrations_returned: number
   purchase_value_returned: number
+  purchase_count_returned: number
   subscribe_value_returned: number
+  subscribe_count_returned: number
   total_value_returned: number
   cumulative_roi_returned: number
   d0_roi_returned: number
@@ -71,8 +73,9 @@ interface CampaignNode extends MetricRow { id: string; name: string; adsets: Ads
 
 const ZERO = (): MetricRow => ({
   spend: 0, impressions: 0, clicks: 0, installs: 0,
-  registrations_returned: 0, purchase_value_returned: 0,
-  subscribe_value_returned: 0, total_value_returned: 0,
+  registrations_returned: 0, purchase_value_returned: 0, purchase_count_returned: 0,
+  subscribe_value_returned: 0, subscribe_count_returned: 0,
+  total_value_returned: 0,
   cumulative_roi_returned: 0, d0_roi_returned: 0,
   d1_value_returned: 0, d1_roi_returned: 0,
   d0_registrations_returned: 0, d0_purchase_value_returned: 0,
@@ -87,7 +90,9 @@ function accum(target: MetricRow, leaf: HierarchyLeaf) {
   target.installs                 += leaf.installs
   target.registrations_returned   += leaf.registrations_returned
   target.purchase_value_returned  += leaf.purchase_value_returned
+  target.purchase_count_returned  += leaf.purchase_count_returned
   target.subscribe_value_returned += leaf.subscribe_value_returned
+  target.subscribe_count_returned += leaf.subscribe_count_returned
   target.total_value_returned     += leaf.total_value_returned
   target.d1_value_returned        += leaf.d1_value_returned
   target.d0_registrations_returned   += leaf.d0_registrations_returned
@@ -166,7 +171,9 @@ function buildTree(leaves: HierarchyLeaf[]): CampaignNode[] {
       installs:                    leaf.installs,
       registrations_returned:      leaf.registrations_returned,
       purchase_value_returned:     leaf.purchase_value_returned,
+      purchase_count_returned:     leaf.purchase_count_returned,
       subscribe_value_returned:    leaf.subscribe_value_returned,
+      subscribe_count_returned:    leaf.subscribe_count_returned,
       total_value_returned:        leaf.total_value_returned,
       cumulative_roi_returned:     leaf.spend > 0 ? +(leaf.total_value_returned / leaf.spend).toFixed(4) : 0,
       d0_roi_returned:             leaf.spend > 0 ? +(leaf.total_value_returned / leaf.spend).toFixed(4) : 0,
@@ -282,8 +289,14 @@ function MetricCells({ row, avail }: { row: MetricRow; avail: ReturnedAvailabili
       <td className="text-right px-3 py-2.5 text-sm text-emerald-700 tabular-nums whitespace-nowrap">
         <AvailCell field={avail.purchase_value_returned} value={row.purchase_value_returned} fmt={fmtUsd} />
       </td>
+      <td className="text-right px-3 py-2.5 text-sm text-emerald-700 tabular-nums whitespace-nowrap">
+        <AvailCell field={avail.purchase_count_returned} value={row.purchase_count_returned} fmt={fmtInt} />
+      </td>
       <td className="text-right px-3 py-2.5 text-sm text-teal-700 tabular-nums whitespace-nowrap">
         <AvailCell field={avail.subscribe_value_returned} value={row.subscribe_value_returned} fmt={fmtUsd} />
+      </td>
+      <td className="text-right px-3 py-2.5 text-sm text-teal-700 tabular-nums whitespace-nowrap">
+        <AvailCell field={avail.subscribe_count_returned} value={row.subscribe_count_returned} fmt={fmtInt} />
       </td>
       <td className="text-right px-3 py-2.5 text-sm font-semibold text-emerald-800 tabular-nums whitespace-nowrap">
         {fmtUsd(row.total_value_returned)}
@@ -318,16 +331,21 @@ const PLATFORM_OPTIONS = [
 
 const TABLE_HEADERS = [
   'Campaign', '花费', '展示', '点击', '安装',
-  '回传注册数', '回传充值价值', '回传订阅价值', '回传总价值', '累计回传ROI', 'D0 ROI（回传）',
+  '回传注册数',
+  '回传充值价值', '回传内购数',
+  '回传订阅价值', '回传订阅数',
+  '回传总价值', '累计回传ROI', 'D0 ROI（回传）',
 ]
 
-const COL_COUNT = 11
+const COL_COUNT = 13
 
 const _unsupported: ReturnedFieldAvailability = { supported: false, has_nonzero_data: false }
 const DEFAULT_AVAIL: ReturnedAvailability = {
   registrations_returned:      _unsupported,
   purchase_value_returned:     _unsupported,
+  purchase_count_returned:     _unsupported,
   subscribe_value_returned:    _unsupported,
+  subscribe_count_returned:    _unsupported,
   d1_value_returned:           _unsupported,
   d0_registrations_returned:   _unsupported,
   d0_purchase_value_returned:  _unsupported,
@@ -490,7 +508,7 @@ export default function ReturnedConversionPage() {
             </div>
             <div>
               <div className="text-xs text-gray-400 mb-2 font-medium tracking-wide uppercase">回传指标</div>
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-4 gap-3">
                 <StatCard
                   label="回传注册数"
                   value={!summary ? '-' : avail.registrations_returned.supported ? fmtInt(summary.registrations_returned) : '暂未提供'}
@@ -504,10 +522,22 @@ export default function ReturnedConversionPage() {
                   sub={avail.purchase_value_returned.supported ? '广告平台归因' : '当前平台不支持'}
                 />
                 <StatCard
+                  label="回传内购数"
+                  value={!summary ? '-' : avail.purchase_count_returned.supported ? fmtInt(summary.purchase_count_returned) : '暂未提供'}
+                  icon={ShoppingCart}
+                  sub={avail.purchase_count_returned.supported ? '购买/充值次数' : '当前平台不支持'}
+                />
+                <StatCard
                   label="回传订阅价值"
                   value={!summary ? '-' : avail.subscribe_value_returned.supported ? fmtUsd(summary.subscribe_value_returned) : '暂未提供'}
                   icon={TrendingUp}
                   sub={avail.subscribe_value_returned.supported ? '广告平台归因' : '当前平台不支持'}
+                />
+                <StatCard
+                  label="回传订阅数"
+                  value={!summary ? '-' : avail.subscribe_count_returned.supported ? fmtInt(summary.subscribe_count_returned) : '暂未提供'}
+                  icon={TrendingUp}
+                  sub={avail.subscribe_count_returned.supported ? '订阅次数' : '当前平台不支持'}
                 />
                 <StatCard label="回传总价值"  value={summary ? fmtUsd(summary.total_value_returned) : '-'} icon={TrendingUp} sub="充值 + 订阅" />
                 <StatCard

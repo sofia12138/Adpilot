@@ -876,7 +876,9 @@ _BIZ_TABLES_SQL = [
         -- 以下字段均为广告平台归因回传口径，非后端订单真值 --
         registrations_returned   BIGINT         NOT NULL DEFAULT 0 COMMENT '回传注册数（平台归因）',
         purchase_value_returned  DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT '回传充值价值（平台归因）',
+        purchase_count_returned  BIGINT         NOT NULL DEFAULT 0 COMMENT '回传内购数/购买次数（平台归因）',
         subscribe_value_returned DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT '回传订阅价值（平台归因，不支持时为0）',
+        subscribe_count_returned BIGINT         NOT NULL DEFAULT 0 COMMENT '回传订阅数/订阅次数（平台归因，不支持时为0）',
         total_value_returned     DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT '回传总价值 = purchase + subscribe',
         d0_roi_returned          DECIMAL(18,6)  NOT NULL DEFAULT 0 COMMENT 'D0 ROI 回传口径 = total_value / spend',
         d1_value_returned        DECIMAL(18,4)  NOT NULL DEFAULT 0 COMMENT 'D1 回传价值（仅平台支持时有值）',
@@ -1172,7 +1174,7 @@ def _migrate_optimizer_mapping_columns(cur):
 
 
 def _migrate_returned_conversion_d0_columns(cur):
-    """为 ad_returned_conversion_daily 补齐 D0 Cohort 三列（幂等）"""
+    """为 ad_returned_conversion_daily 补齐 D0 Cohort + 计数列（幂等）"""
     cur.execute("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
                 "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ad_returned_conversion_daily'")
     existing = {r["COLUMN_NAME"] for r in cur.fetchall()}
@@ -1180,6 +1182,8 @@ def _migrate_returned_conversion_d0_columns(cur):
         ("d0_registrations_returned",   "ADD COLUMN d0_registrations_returned   BIGINT        NOT NULL DEFAULT 0 COMMENT '首日注册数（D0 cohort）' AFTER d1_roi_returned"),
         ("d0_purchase_value_returned",  "ADD COLUMN d0_purchase_value_returned  DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '首日充值金额（D0 cohort）' AFTER d0_registrations_returned"),
         ("d0_subscribe_value_returned", "ADD COLUMN d0_subscribe_value_returned DECIMAL(18,4) NOT NULL DEFAULT 0 COMMENT '首日订阅金额（D0 cohort）' AFTER d0_purchase_value_returned"),
+        ("purchase_count_returned",     "ADD COLUMN purchase_count_returned     BIGINT        NOT NULL DEFAULT 0 COMMENT '回传内购数/购买次数（平台归因）' AFTER purchase_value_returned"),
+        ("subscribe_count_returned",    "ADD COLUMN subscribe_count_returned    BIGINT        NOT NULL DEFAULT 0 COMMENT '回传订阅数/订阅次数（平台归因，不支持时为0）' AFTER subscribe_value_returned"),
     ]
     for col, ddl in migrations:
         if col not in existing:

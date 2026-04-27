@@ -40,6 +40,49 @@ def _date_chunks(start: str, end: str, max_days: int = 30):
 
 
 # ═══════════════════════════════════════════════════════════
+#  错误格式化 & 网络调用重试
+# ═══════════════════════════════════════════════════════════
+#
+# Meta / TikTok 偶发网络抖动或限流（返回 5xx / 空体）会让 svc.list 抛出
+# str(e) 为空的异常，落到日志只看到 "失败: " 没有上下文。这里统一兜底：
+#   - _fmt_err: 优先 str(e)，为空则用 repr(e)，确保日志/落库可读
+#   - _with_retry: 对单个协程做指数退避重试，最多 attempts 次
+
+def _fmt_err(e: BaseException) -> str:
+    """返回可读错误描述：str(e) 为空时降级为 repr(e)。"""
+    msg = str(e).strip() if e else ""
+    return msg if msg else repr(e)
+
+
+async def _with_retry(coro_factory, *, attempts: int = 3, base: float = 1.0,
+                      max_wait: float = 8.0, label: str = "") -> any:
+    """对协程工厂执行指数退避重试。
+
+    coro_factory: 无参 callable，每次调用返回新 coroutine（不能重用同一个
+                  coroutine 对象——await 过的 coroutine 不能再 await）。
+    attempts:     总尝试次数（含首次）。默认 3 = 1 次原始 + 2 次重试。
+    base:         首次失败后的等待秒数。第 i 次重试等待 min(base*2^(i-1), max_wait)。
+    label:        日志标识，仅用于打印。
+    """
+    last_exc: BaseException | None = None
+    for i in range(1, attempts + 1):
+        try:
+            return await coro_factory()
+        except Exception as e:
+            last_exc = e
+            if i >= attempts:
+                break
+            wait = min(base * (2 ** (i - 1)), max_wait)
+            logger.warning(
+                f"[retry] {label or '<call>'} 第 {i}/{attempts} 次失败: "
+                f"{_fmt_err(e)}，{wait:.1f}s 后重试"
+            )
+            await asyncio.sleep(wait)
+    assert last_exc is not None
+    raise last_exc
+
+
+# ═══════════════════════════════════════════════════════════
 #  TikTok 通用日报拉取器
 # ═══════════════════════════════════════════════════════════
 
@@ -102,6 +145,8 @@ async def _sync_tiktok_report_level(
                     "conversions": int(m.get("conversion", 0) or 0),
                     "revenue": float(m.get("complete_payment", 0) or 0),
                     "registrations": int(m.get("registration", 0) or 0),  # App 内注册数
+                    # complete_payment 在 TikTok 中是「购买次数」（int），可作为内购数
+                    "purchase_count": int(float(m.get("complete_payment", 0) or 0)),
                     "raw_json": item,
                 }
 
@@ -178,8 +223,10 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"同步 {len(rows)} 个 campaign")
         logger.info(f"[TikTok] campaign 列表同步完成: {len(rows)} 个")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[TikTok] campaign 列表同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[TikTok] campaign 列表同步失败: {err}")
+        sync_state.set_error("structure", f"[TikTok] {advertiser_id} campaigns: {err}")
         raise
 
     campaign_map = {str(c.get("campaign_id")): c.get("campaign_name", "") for c in all_campaigns}
@@ -188,9 +235,12 @@ async def sync_tiktok_campaigns(advertiser_id: str,
     from repositories import returned_conversion_repository
     log_id = biz_sync_log_repository.create(task_name="sync_tiktok_campaign_daily", platform="tiktok", account_id=advertiser_id, sync_date=start_date)
     try:
-        report_rows = await _sync_tiktok_report_level(
-            client, advertiser_id, "AUCTION_CAMPAIGN", "campaign_id",
-            start_date, end_date, campaign_map)
+        report_rows = await _with_retry(
+            lambda: _sync_tiktok_report_level(
+                client, advertiser_id, "AUCTION_CAMPAIGN", "campaign_id",
+                start_date, end_date, campaign_map),
+            label=f"[TikTok] {advertiser_id} campaign 日报",
+        )
         affected = biz_daily_report_repository.upsert_batch(report_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"campaign 日报 {len(report_rows)} 条")
         logger.info(f"[TikTok] campaign 日报同步完成: {len(report_rows)} 条")
@@ -200,10 +250,12 @@ async def sync_tiktok_campaigns(advertiser_id: str,
             try:
                 returned_conversion_repository.upsert(**ret)
             except Exception as e_ret:
-                logger.warning(f"[TikTok] returned_conversion upsert(campaign) 失败: {e_ret}")
+                logger.warning(f"[TikTok] returned_conversion upsert(campaign) 失败: {_fmt_err(e_ret)}")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[TikTok] campaign 日报同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[TikTok] campaign 日报同步失败: {err}")
+        sync_state.set_error("reports", f"[TikTok] {advertiser_id} campaign 日报: {err}")
 
     # 3) Adgroup 列表 → 入库 + 名称映射
     from tiktok_ads.api.adgroup import AdGroupService
@@ -237,8 +289,10 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"同步 {len(ag_rows)} 个 adgroup")
         logger.info(f"[TikTok] adgroup 列表同步完成: {len(ag_rows)} 个")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[TikTok] adgroup 列表同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[TikTok] adgroup 列表同步失败: {err}")
+        sync_state.set_error("structure", f"[TikTok] {advertiser_id} adgroups: {err}")
 
     adgroup_name_map = {str(ag.get("adgroup_id")): ag.get("adgroup_name", "") for ag in all_adgroups}
     adgroup_parent_map = {str(ag.get("adgroup_id")): {"campaign_id": str(ag.get("campaign_id", ""))} for ag in all_adgroups}
@@ -246,17 +300,22 @@ async def sync_tiktok_campaigns(advertiser_id: str,
     # 4) Adgroup 日报
     log_id = biz_sync_log_repository.create(task_name="sync_tiktok_adgroup_daily", platform="tiktok", account_id=advertiser_id, sync_date=start_date)
     try:
-        adgroup_rows = await _sync_tiktok_report_level(
-            client, advertiser_id, "AUCTION_ADGROUP", "adgroup_id",
-            start_date, end_date, adgroup_name_map,
-            parent_lookup=adgroup_parent_map,
-            campaign_name_lookup=campaign_map)
+        adgroup_rows = await _with_retry(
+            lambda: _sync_tiktok_report_level(
+                client, advertiser_id, "AUCTION_ADGROUP", "adgroup_id",
+                start_date, end_date, adgroup_name_map,
+                parent_lookup=adgroup_parent_map,
+                campaign_name_lookup=campaign_map),
+            label=f"[TikTok] {advertiser_id} adgroup 日报",
+        )
         affected = biz_adgroup_daily_repository.upsert_batch(adgroup_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"adgroup 日报 {len(adgroup_rows)} 条")
         logger.info(f"[TikTok] adgroup 日报同步完成: {len(adgroup_rows)} 条")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[TikTok] adgroup 日报同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[TikTok] adgroup 日报同步失败: {err}")
+        sync_state.set_error("reports", f"[TikTok] {advertiser_id} adgroup 日报: {err}")
 
     # 5) Ad 列表 → 入库 + 名称映射
     from tiktok_ads.api.ad import AdService
@@ -291,8 +350,10 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"同步 {len(ad_db_rows)} 个 ad")
         logger.info(f"[TikTok] ad 列表同步完成: {len(ad_db_rows)} 个")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[TikTok] ad 列表同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[TikTok] ad 列表同步失败: {err}")
+        sync_state.set_error("structure", f"[TikTok] {advertiser_id} ads: {err}")
 
     ad_name_map = {str(a.get("ad_id")): a.get("ad_name", "") for a in all_ads}
     ad_parent_map = {str(a.get("ad_id")): {
@@ -303,12 +364,15 @@ async def sync_tiktok_campaigns(advertiser_id: str,
     # 6) Ad 日报
     log_id = biz_sync_log_repository.create(task_name="sync_tiktok_ad_daily", platform="tiktok", account_id=advertiser_id, sync_date=start_date)
     try:
-        ad_rows = await _sync_tiktok_report_level(
-            client, advertiser_id, "AUCTION_AD", "ad_id",
-            start_date, end_date, ad_name_map,
-            parent_lookup=ad_parent_map,
-            campaign_name_lookup=campaign_map,
-            adgroup_name_lookup=adgroup_name_map)
+        ad_rows = await _with_retry(
+            lambda: _sync_tiktok_report_level(
+                client, advertiser_id, "AUCTION_AD", "ad_id",
+                start_date, end_date, ad_name_map,
+                parent_lookup=ad_parent_map,
+                campaign_name_lookup=campaign_map,
+                adgroup_name_lookup=adgroup_name_map),
+            label=f"[TikTok] {advertiser_id} ad 日报",
+        )
         affected = biz_ad_daily_repository.upsert_batch(ad_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"ad 日报 {len(ad_rows)} 条")
         logger.info(f"[TikTok] ad 日报同步完成: {len(ad_rows)} 条")
@@ -316,9 +380,10 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         sync_state.set_done("reports")
         sync_state.set_done("structure")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[TikTok] ad 日报同步失败: {e}")
-        sync_state.set_error("reports", f"[TikTok] ad 日报: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[TikTok] ad 日报同步失败: {err}")
+        sync_state.set_error("reports", f"[TikTok] {advertiser_id} ad 日报: {err}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -402,6 +467,24 @@ def _extract_subscribe_value(item: dict) -> float:
     return cv.get("subscribe_total", 0.0) or cv.get("subscribe_website", 0.0)
 
 
+def _extract_subscribe_count(item: dict) -> int:
+    """从 Meta Insights 的 conversions 字段提取订阅次数。
+
+    与 _extract_subscribe_value 对应：conversions 数组结构与 actions 相同，
+    存储次数（int），优先取 subscribe_total，降级取 subscribe_website。
+    """
+    raw = item.get("conversions")
+    if not raw:
+        return 0
+    cnt: dict[str, int] = {}
+    for entry in raw:
+        if isinstance(entry, dict):
+            atype = entry.get("action_type", "")
+            if atype:
+                cnt[atype] = int(float(entry.get("value", 0) or 0))
+    return cnt.get("subscribe_total", 0) or cnt.get("subscribe_website", 0)
+
+
 def _meta_insight_to_row(item: dict, ad_account_id: str, level: str) -> dict:
     # actions / action_values 均为数组，必须通过 _parse_meta_* 函数提取
     actions = _parse_meta_actions(item.get("actions"))
@@ -438,8 +521,10 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
     - registrations_returned:   omni_complete_registration（优先）or complete_registration
                                   omni 是跨渠道汇总，已包含 app 注册，不与 complete 相加
     - purchase_value_returned:  omni_purchase（优先）or purchase，来自 action_values 数组（金额）
+    - purchase_count_returned:  omni_purchase（优先）or purchase，来自 actions 数组（次数）
     - subscribe_value_returned: 来自 conversion_values 中的 subscribe_total / subscribe_website
                                   （Ads Manager "订阅价值"列的实际数据源）
+    - subscribe_count_returned: 来自 conversions 中的 subscribe_total / subscribe_website（次数）
     - d1_value_returned:        0（Meta Insights 无 D1 cohort 拆分）
     - installs:                 actions 数组中 action_type=mobile_app_install 的 value
     """
@@ -447,6 +532,7 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
     action_values = _parse_meta_action_values(item.get("action_values"))
 
     subscribe_val = _extract_subscribe_value(item)
+    subscribe_cnt = _extract_subscribe_count(item)
 
     returned: dict = {
         "stat_date":                item.get("date_start", ""),
@@ -472,7 +558,12 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
             action_values.get("omni_purchase", 0.0)
             or action_values.get("purchase", 0.0)
         ),
+        "purchase_count_returned":  (
+            actions.get("omni_purchase", 0)
+            or actions.get("purchase", 0)
+        ),
         "subscribe_value_returned":    subscribe_val,
+        "subscribe_count_returned":    subscribe_cnt,
         # Meta 不支持：无 D1 cohort 拆分，固定为 0
         "d1_value_returned":           0.0,
         # D0 Cohort：Meta 标准 Insights API 无法拆分 D0 cohort，固定为 0
@@ -499,7 +590,9 @@ def _tiktok_row_to_returned_row(row: dict, advertiser_id: str) -> dict:
                                 TikTok conversion 是安装类事件，安装 ≠ 注册，
                                 complete_payment 是购买次数而非注册，均不可用作降级值。
     - purchase_value_returned:  固定为 0（TikTok complete_payment 为次数，无金额字段）
+    - purchase_count_returned:  TikTok complete_payment（购买次数），即内购数
     - subscribe_value_returned: 固定为 0
+    - subscribe_count_returned: 固定为 0（TikTok 无明确订阅事件回传）
     - d1_value_returned:        固定为 0
     """
     return {
@@ -523,7 +616,10 @@ def _tiktok_row_to_returned_row(row: dict, advertiser_id: str) -> dict:
         "registrations_returned":   int(row.get("registrations", 0) or 0),
         # TikTok 不支持：无购买金额字段，固定 0
         "purchase_value_returned":     0.0,
+        # TikTok complete_payment 为购买次数，可作为内购数
+        "purchase_count_returned":     int(row.get("purchase_count", 0) or 0),
         "subscribe_value_returned":    0.0,
+        "subscribe_count_returned":    0,
         "d1_value_returned":           0.0,
         # D0 Cohort：TikTok 当前不支持，固定 0
         "d0_registrations_returned":   0,
@@ -549,7 +645,10 @@ async def sync_meta_campaigns(ad_account_id: str,
     # 1) Campaign 列表
     log_id = biz_sync_log_repository.create(task_name="sync_meta_campaigns", platform="meta", account_id=ad_account_id)
     try:
-        resp = await svc.list(limit=200)
+        resp = await _with_retry(
+            lambda: svc.list(limit=200),
+            label=f"[Meta] {ad_account_id}/campaigns",
+        )
         items = resp.get("data", [])
         rows = [{
             "platform": "meta", "account_id": ad_account_id,
@@ -565,8 +664,10 @@ async def sync_meta_campaigns(ad_account_id: str,
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"同步 {len(rows)} 个 campaign")
         logger.info(f"[Meta] campaign 列表同步完成: {len(rows)} 个")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[Meta] campaign 列表同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[Meta] campaign 列表同步失败: {err}")
+        sync_state.set_error("structure", f"[Meta] {ad_account_id} campaigns: {err}")
         raise
 
     # 2) Adset 列表 → 入库
@@ -576,7 +677,10 @@ async def sync_meta_campaigns(ad_account_id: str,
     log_id = biz_sync_log_repository.create(task_name="sync_meta_adsets", platform="meta", account_id=ad_account_id)
     all_adsets: list[dict] = []
     try:
-        resp = await adset_svc.list(limit=200)
+        resp = await _with_retry(
+            lambda: adset_svc.list(limit=200),
+            label=f"[Meta] {ad_account_id}/adsets",
+        )
         all_adsets = resp.get("data", [])
         ag_rows = [{
             "platform": "meta", "account_id": ad_account_id,
@@ -591,8 +695,10 @@ async def sync_meta_campaigns(ad_account_id: str,
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"同步 {len(ag_rows)} 个 adset")
         logger.info(f"[Meta] adset 列表同步完成: {len(ag_rows)} 个")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[Meta] adset 列表同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[Meta] adset 列表同步失败: {err}")
+        sync_state.set_error("structure", f"[Meta] {ad_account_id} adsets: {err}")
 
     # 3) Ad 列表 → 入库
     from meta_ads.api.ads import MetaAdService
@@ -601,7 +707,10 @@ async def sync_meta_campaigns(ad_account_id: str,
     log_id = biz_sync_log_repository.create(task_name="sync_meta_ads", platform="meta", account_id=ad_account_id)
     all_meta_ads: list[dict] = []
     try:
-        resp = await ad_svc.list(limit=200)
+        resp = await _with_retry(
+            lambda: ad_svc.list(limit=200),
+            label=f"[Meta] {ad_account_id}/ads",
+        )
         all_meta_ads = resp.get("data", [])
         ad_db_rows = [{
             "platform": "meta", "account_id": ad_account_id,
@@ -617,8 +726,10 @@ async def sync_meta_campaigns(ad_account_id: str,
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"同步 {len(ad_db_rows)} 个 ad")
         logger.info(f"[Meta] ad 列表同步完成: {len(ad_db_rows)} 个")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[Meta] ad 列表同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[Meta] ad 列表同步失败: {err}")
+        sync_state.set_error("structure", f"[Meta] {ad_account_id} ads: {err}")
 
     # action_values: purchase 金额; conversion_values: subscribe 金额(Ads Manager "订阅价值"列)
     campaign_fields = "campaign_id,campaign_name,spend,impressions,clicks,actions,action_values,conversions,conversion_values"
@@ -630,33 +741,46 @@ async def sync_meta_campaigns(ad_account_id: str,
     # 4) Campaign 日报
     log_id = biz_sync_log_repository.create(task_name="sync_meta_campaign_daily", platform="meta", account_id=ad_account_id, sync_date=start_date)
     try:
-        data = await _fetch_meta_insights_paged(client, ad_account_id, start_date, end_date, "campaign", campaign_fields)
+        data = await _with_retry(
+            lambda: _fetch_meta_insights_paged(client, ad_account_id, start_date, end_date, "campaign", campaign_fields),
+            label=f"[Meta] {ad_account_id} campaign insights",
+        )
         report_rows = [_meta_insight_to_row(item, ad_account_id, "campaign") for item in data]
         affected = biz_daily_report_repository.upsert_batch(report_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"campaign 日报 {len(report_rows)} 条")
         logger.info(f"[Meta] campaign 日报同步完成: {len(report_rows)} 条")
         # 回传口径表只在 ad 级别（最细粒度）写入，避免 campaign/adset/ad 三级重复导致 SUM 膨胀
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[Meta] campaign 日报同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[Meta] campaign 日报同步失败: {err}")
+        sync_state.set_error("reports", f"[Meta] {ad_account_id} campaign 日报: {err}")
 
     # 5) Adset 日报
     log_id = biz_sync_log_repository.create(task_name="sync_meta_adset_daily", platform="meta", account_id=ad_account_id, sync_date=start_date)
     try:
-        data = await _fetch_meta_insights_paged(client, ad_account_id, start_date, end_date, "adset", adset_fields)
+        data = await _with_retry(
+            lambda: _fetch_meta_insights_paged(client, ad_account_id, start_date, end_date, "adset", adset_fields),
+            label=f"[Meta] {ad_account_id} adset insights",
+        )
         adset_rows = [_meta_insight_to_row(item, ad_account_id, "adset") for item in data]
         affected = biz_adgroup_daily_repository.upsert_batch(adset_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"adset 日报 {len(adset_rows)} 条")
         logger.info(f"[Meta] adset 日报同步完成: {len(adset_rows)} 条")
         # 回传口径表只在 ad 级别写入，此处不再重复写入 adset 级别
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[Meta] adset 日报同步失败: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[Meta] adset 日报同步失败: {err}")
+        sync_state.set_error("reports", f"[Meta] {ad_account_id} adset 日报: {err}")
 
     # 6) Ad 日报
     log_id = biz_sync_log_repository.create(task_name="sync_meta_ad_daily", platform="meta", account_id=ad_account_id, sync_date=start_date)
     try:
-        data = await _fetch_meta_insights_paged(client, ad_account_id, start_date, end_date, "ad", ad_fields)
+        data = await _with_retry(
+            lambda: _fetch_meta_insights_paged(client, ad_account_id, start_date, end_date, "ad", ad_fields),
+            label=f"[Meta] {ad_account_id} ad insights",
+        )
         ad_rows = [_meta_insight_to_row(item, ad_account_id, "ad") for item in data]
         affected = biz_ad_daily_repository.upsert_batch(ad_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"ad 日报 {len(ad_rows)} 条")
@@ -667,15 +791,17 @@ async def sync_meta_campaigns(ad_account_id: str,
             try:
                 returned_conversion_repository.upsert(**ret)
             except Exception as e_ret:
-                logger.warning(f"[Meta] returned_conversion upsert(ad) 失败: {e_ret}")
+                logger.warning(f"[Meta] returned_conversion upsert(ad) 失败: {_fmt_err(e_ret)}")
         # 日报 + 结构完成标记
         sync_state.set_done("reports")
         sync_state.set_done("structure")
         sync_state.set_done("returned")
     except Exception as e:
-        biz_sync_log_repository.finish(log_id, status="failed", message=str(e))
-        logger.error(f"[Meta] ad 日报同步失败: {e}")
-        sync_state.set_error("reports", f"[Meta] ad 日报: {e}")
+        err = _fmt_err(e)
+        biz_sync_log_repository.finish(log_id, status="failed", message=err)
+        logger.error(f"[Meta] ad 日报同步失败: {err}")
+        sync_state.set_error("reports", f"[Meta] {ad_account_id} ad 日报: {err}")
+        sync_state.set_error("returned", f"[Meta] {ad_account_id} ad 日报: {err}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -738,7 +864,12 @@ async def run(platform: str | None = None,
                 biz_account_repository.update_last_synced(acct["id"])
                 synced_any = True
             except Exception as e:
-                logger.error(f"同步账户 {p}/{aid} 失败: {e}")
+                err = _fmt_err(e)
+                logger.error(f"同步账户 {p}/{aid} 失败: {err}")
+                # 账户级别失败时显式标记三个模块（structure/reports/returned）出错
+                # 这样前端的同步状态指示能立即变红，而不是停在"运行中"
+                for mod in ("structure", "reports", "returned"):
+                    sync_state.set_error(mod, f"{p}/{aid}: {err}")
 
     if not synced_any:
         if platform in (None, "tiktok"):

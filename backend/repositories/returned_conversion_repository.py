@@ -32,8 +32,12 @@ PLATFORM_FIELD_SUPPORT: dict[str, dict[str, bool]] = {
         "registrations_returned":       True,
         # Meta action_values 数组中有 purchase 类型可提取金额
         "purchase_value_returned":      True,
+        # Meta actions 数组中有 omni_purchase / purchase 次数
+        "purchase_count_returned":      True,
         # subscribe_value_returned 字段已接入，DB 列存在，支持展示
         "subscribe_value_returned":     True,
+        # Meta conversions 数组中有 subscribe_total / subscribe_website 次数
+        "subscribe_count_returned":     True,
         # Meta Insights 无 D1 cohort 拆分，降级为 0
         "d1_value_returned":            False,
         # D0 Cohort 字段：DB 列已存在，展示入库值（当前平台 API 无 D0 cohort 拆分故值为 0）
@@ -46,8 +50,12 @@ PLATFORM_FIELD_SUPPORT: dict[str, dict[str, bool]] = {
         "registrations_returned":       True,
         # TikTok complete_payment 仅为次数，无金额字段，降级为 0
         "purchase_value_returned":      False,
+        # TikTok complete_payment 即购买次数，可作为内购数
+        "purchase_count_returned":      True,
         # subscribe_value_returned 字段已接入，DB 列存在，值当前为 0
         "subscribe_value_returned":     True,
+        # TikTok 无明确订阅事件回传，降级为 0
+        "subscribe_count_returned":     False,
         "d1_value_returned":            False,
         # D0 Cohort 字段：DB 列已存在，展示入库值（当前值为 0）
         "d0_registrations_returned":    True,
@@ -58,8 +66,10 @@ PLATFORM_FIELD_SUPPORT: dict[str, dict[str, bool]] = {
         # Google Ads 当前未接入，所有字段降级为 0
         "registrations_returned":       False,
         "purchase_value_returned":      False,
+        "purchase_count_returned":      False,
         # subscribe_value_returned 字段已接入，DB 列存在，值当前为 0
         "subscribe_value_returned":     True,
+        "subscribe_count_returned":     False,
         "d1_value_returned":            False,
         # D0 Cohort 字段：DB 列已存在，展示入库值（当前值为 0）
         "d0_registrations_returned":    True,
@@ -77,7 +87,9 @@ _ALL_PLATFORMS_OR: dict[str, bool] = {
 _AVAILABILITY_FIELDS = [
     "registrations_returned",
     "purchase_value_returned",
+    "purchase_count_returned",
     "subscribe_value_returned",
+    "subscribe_count_returned",
     "d1_value_returned",
     "d0_registrations_returned",
     "d0_purchase_value_returned",
@@ -126,12 +138,15 @@ _GROUP_BY_MAP: dict[str, dict] = {
 # 允许排序的安全列名白名单
 _ALLOWED_ORDER = {
     "stat_date", "spend", "impressions", "clicks", "installs",
-    "registrations_returned", "purchase_value_returned", "subscribe_value_returned",
+    "registrations_returned", "purchase_value_returned", "purchase_count_returned",
+    "subscribe_value_returned", "subscribe_count_returned",
     "total_value_returned", "d0_roi_returned", "d1_value_returned", "d1_roi_returned",
     "d0_registrations_returned", "d0_purchase_value_returned", "d0_subscribe_value_returned",
     "total_spend", "total_impressions", "total_clicks", "total_installs",
     "total_registrations_returned", "total_purchase_value_returned",
-    "total_subscribe_value_returned", "total_total_value_returned",
+    "total_purchase_count_returned",
+    "total_subscribe_value_returned", "total_subscribe_count_returned",
+    "total_total_value_returned",
     "total_d0_registrations_returned", "total_d0_purchase_value_returned",
     "total_d0_subscribe_value_returned",
 }
@@ -196,7 +211,9 @@ _METRICS_SELECT = """
     COALESCE(SUM(installs), 0)                     AS total_installs,
     COALESCE(SUM(registrations_returned), 0)       AS total_registrations_returned,
     COALESCE(SUM(purchase_value_returned), 0)      AS total_purchase_value_returned,
+    COALESCE(SUM(purchase_count_returned), 0)      AS total_purchase_count_returned,
     COALESCE(SUM(subscribe_value_returned), 0)     AS total_subscribe_value_returned,
+    COALESCE(SUM(subscribe_count_returned), 0)     AS total_subscribe_count_returned,
     COALESCE(SUM(total_value_returned), 0)         AS total_total_value_returned,
     COALESCE(SUM(d1_value_returned), 0)            AS total_d1_value_returned,
     COALESCE(SUM(d0_registrations_returned), 0)    AS total_d0_registrations_returned,
@@ -226,7 +243,9 @@ def _row_to_summary(row: dict) -> dict:
         "installs":                     int(row.get("total_installs") or 0),
         "registrations_returned":       int(row.get("total_registrations_returned") or 0),
         "purchase_value_returned":      round(float(row.get("total_purchase_value_returned") or 0), 4),
+        "purchase_count_returned":      int(row.get("total_purchase_count_returned") or 0),
         "subscribe_value_returned":     round(float(row.get("total_subscribe_value_returned") or 0), 4),
+        "subscribe_count_returned":     int(row.get("total_subscribe_count_returned") or 0),
         "total_value_returned":         round(total_value, 4),
         "cumulative_roi_returned":      _calc_roi(total_value, spend),
         "d0_roi_returned":              _calc_roi(d0_value, spend) if d0_value > 0 else _calc_roi(total_value, spend),
@@ -281,7 +300,9 @@ def query_data_availability(
         SELECT
             MAX(registrations_returned)      > 0 AS reg_avail,
             MAX(purchase_value_returned)     > 0 AS purchase_avail,
+            MAX(purchase_count_returned)     > 0 AS purchase_count_avail,
             MAX(subscribe_value_returned)    > 0 AS subscribe_avail,
+            MAX(subscribe_count_returned)    > 0 AS subscribe_count_avail,
             MAX(d1_value_returned)           > 0 AS d1_avail,
             MAX(d0_registrations_returned)   > 0 AS d0_reg_avail,
             MAX(d0_purchase_value_returned)  > 0 AS d0_purchase_avail,
@@ -296,7 +317,9 @@ def query_data_availability(
     return {
         "registrations_returned":      bool(row.get("reg_avail")),
         "purchase_value_returned":     bool(row.get("purchase_avail")),
+        "purchase_count_returned":     bool(row.get("purchase_count_avail")),
         "subscribe_value_returned":    bool(row.get("subscribe_avail")),
+        "subscribe_count_returned":    bool(row.get("subscribe_count_avail")),
         "d1_value_returned":           bool(row.get("d1_avail")),
         "d0_registrations_returned":   bool(row.get("d0_reg_avail")),
         "d0_purchase_value_returned":  bool(row.get("d0_purchase_avail")),
@@ -363,7 +386,9 @@ def query_rows(
             "installs":                    int(r.get("total_installs") or 0),
             "registrations_returned":      int(r.get("total_registrations_returned") or 0),
             "purchase_value_returned":     round(d0_purchase if d0_purchase else float(r.get("total_purchase_value_returned") or 0), 4),
+            "purchase_count_returned":     int(r.get("total_purchase_count_returned") or 0),
             "subscribe_value_returned":    round(d0_subscribe if d0_subscribe else float(r.get("total_subscribe_value_returned") or 0), 4),
+            "subscribe_count_returned":    int(r.get("total_subscribe_count_returned") or 0),
             "total_value_returned":        round(total_value, 4),
             "cumulative_roi_returned":     _calc_roi(total_value, spend),
             "d0_roi_returned":             _calc_roi(d0_value, spend) if d0_value > 0 else _calc_roi(total_value, spend),
@@ -427,7 +452,9 @@ def query_hierarchy_rows(
             "installs":                    int(r.get("total_installs") or 0),
             "registrations_returned":      int(r.get("total_registrations_returned") or 0),
             "purchase_value_returned":     round(float(r.get("total_purchase_value_returned") or 0), 4),
+            "purchase_count_returned":     int(r.get("total_purchase_count_returned") or 0),
             "subscribe_value_returned":    round(float(r.get("total_subscribe_value_returned") or 0), 4),
+            "subscribe_count_returned":    int(r.get("total_subscribe_count_returned") or 0),
             "total_value_returned":        round(total_value, 4),
             "d1_value_returned":           round(d1_value, 4),
             "d0_registrations_returned":   int(r.get("total_d0_registrations_returned") or 0),
@@ -458,7 +485,9 @@ def upsert(
     spend: float = 0.0,
     registrations_returned: int = 0,
     purchase_value_returned: float = 0.0,
+    purchase_count_returned: int = 0,
     subscribe_value_returned: float = 0.0,
+    subscribe_count_returned: int = 0,
     d1_value_returned: float = 0.0,
     d0_registrations_returned: int = 0,
     d0_purchase_value_returned: float = 0.0,
@@ -501,15 +530,16 @@ def upsert(
             (stat_date, media_source, account_id, campaign_id, campaign_name,
              adset_id, adset_name, ad_id, ad_name, country, platform,
              impressions, clicks, installs, spend,
-             registrations_returned, purchase_value_returned,
-             subscribe_value_returned, total_value_returned,
+             registrations_returned, purchase_value_returned, purchase_count_returned,
+             subscribe_value_returned, subscribe_count_returned, total_value_returned,
              d0_roi_returned, d1_value_returned, d1_roi_returned,
              d0_registrations_returned, d0_purchase_value_returned, d0_subscribe_value_returned,
              data_label, raw_payload)
         VALUES
             (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,
              %s,%s,%s,%s,
-             %s,%s,%s,%s, %s,%s,%s,
+             %s,%s,%s, %s,%s,%s,
+             %s,%s,%s,
              %s,%s,%s,
              'returned', %s)
         ON DUPLICATE KEY UPDATE
@@ -519,7 +549,9 @@ def upsert(
             spend                       = VALUES(spend),
             registrations_returned      = VALUES(registrations_returned),
             purchase_value_returned     = VALUES(purchase_value_returned),
+            purchase_count_returned     = VALUES(purchase_count_returned),
             subscribe_value_returned    = VALUES(subscribe_value_returned),
+            subscribe_count_returned    = VALUES(subscribe_count_returned),
             total_value_returned        = VALUES(total_value_returned),
             d0_roi_returned             = VALUES(d0_roi_returned),
             d1_value_returned           = VALUES(d1_value_returned),
@@ -538,8 +570,8 @@ def upsert(
             ad_id or "", ad_name or None,
             country or "", platform or "",
             impressions, clicks, installs, spend,
-            registrations_returned, purchase_value_returned,
-            subscribe_value_returned, total_value,
+            registrations_returned, purchase_value_returned, purchase_count_returned,
+            subscribe_value_returned, subscribe_count_returned, total_value,
             d0_roi, d1_value_returned, d1_roi,
             d0_registrations_returned, d0_purchase_value_returned, d0_subscribe_value_returned,
             json.dumps(raw_payload, ensure_ascii=False) if raw_payload else None,
