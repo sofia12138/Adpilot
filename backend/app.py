@@ -60,6 +60,16 @@ async def _sync_all_job():
     except Exception as e:
         logger.error(f"优化师映射同步失败: {e}")
 
+    # 附带同步剧级映射和事实表（fact_drama_daily）
+    # 复用近 7 天的窗口，覆盖回传归因可能的滞后写入
+    try:
+        from tasks.sync_drama import run as sync_drama_run
+        drama_start = end - timedelta(days=7)
+        sync_drama_run(str(drama_start), str(end))
+        logger.info("剧级映射/事实表同步完成")
+    except Exception as e:
+        logger.error(f"剧级映射/事实表同步失败: {e}")
+
 
 async def _sync_reports_job():
     """Job 2：仅同步日报 + 回传（错开 10 分钟，弥补高频数据实时性）"""
