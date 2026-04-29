@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     tiktok_app_secret: str = ""
     tiktok_access_token: str = ""
     tiktok_advertiser_id: str = ""
+    # Business Center ID（可选）：配置后 /api/advertisers/ 会额外拉 BC 下全部子账户并 union
+    tiktok_bc_id: str = ""
     tiktok_api_base_url: str = "https://business-api.tiktok.com/open_api/v1.3"
 
     # 旧配置（保留兼容，作为 PRD 默认值）

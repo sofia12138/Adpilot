@@ -82,6 +82,8 @@ export interface CreateAdsParams {
   assetRefs?: AssetRefs
   /** Meta 投放时间（写入 AdSet）；不传 → 不传给 Meta API */
   metaSchedule?: MetaScheduleFields
+  /** Meta CBO 模板的 Campaign 层日预算（USD，未乘 100）。仅 web_to_app_conversion_cbo 使用 */
+  campaignDailyBudget?: number
 }
 
 export interface AdResult {
@@ -99,15 +101,35 @@ export interface AdSetResult {
   adset_name: string
   error?: string
   payload_sent?: Record<string, unknown>
+  meta_error_code?: number | null
+  meta_error_subcode?: number | null
+  meta_error_message?: string
   ads: AdResult[]
+}
+
+export interface CampaignResult {
+  success: boolean
+  campaign_id?: string
+  error?: string
+  meta_error_code?: number | null
+  meta_error_subcode?: number | null
+  meta_error_message?: string
+  campaign_payload_debug?: Record<string, unknown>
 }
 
 export interface BatchLaunchResult {
   platform: string
   template_type?: string
   ad_account_id?: string
-  campaign: { success: boolean; campaign_id?: string; error?: string }
+  campaign: CampaignResult
   adsets: AdSetResult[]
+  /** Meta 预算模式（仅 Meta 链路返回）：CBO / ABO */
+  budget_mode?: 'CBO' | 'ABO'
+  requested_budget_mode?: 'CBO' | 'ABO'
+  actual_budget_mode?: 'CBO' | 'CBO_FAILED' | 'ABO'
+  failed_step?: 'campaign' | 'adset' | 'ad'
+  campaign_daily_budget?: number | null
+  adset_daily_budget?: number | null
 }
 
 export interface CreateResult {
@@ -144,8 +166,13 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
       }
       body.ad_account_id = p.adAccountId
 
-      if (tplType === 'web_to_app' && p.w2a) {
-        body.overrides = _buildW2aOverrides(p)
+      // W2A 系列模板（含 ABO 与 CBO）走相同 overrides 构建逻辑；
+      // 唯一差异：CBO 在 overrides.campaign 注入 daily_budget，AdSet 不带 daily_budget
+      const isW2aFamily = (tplType === 'web_to_app' || tplType === 'web_to_app_conversion_cbo')
+      const isCbo = tplType === 'web_to_app_conversion_cbo'
+
+      if (isW2aFamily && p.w2a) {
+        body.overrides = _buildW2aOverrides(p, isCbo)
       } else {
         const countryCodes = (p.countries && p.countries.length > 0) ? p.countries : [p.country]
         body.overrides = {
@@ -231,20 +258,31 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
   }
 }
 
-function _buildW2aOverrides(p: CreateAdsParams): Record<string, unknown> {
+function _buildW2aOverrides(p: CreateAdsParams, isCbo = false): Record<string, unknown> {
   const w = p.w2a!
   const countryCodes = (p.countries && p.countries.length > 0) ? p.countries : [p.country]
-  return {
-    adset: {
-      daily_budget: Math.round((p.budget || 50) * 100),
-      targeting: {
-        geo_locations: { countries: countryCodes },
-      },
-      promoted_object: {
-        pixel_id: w.pixelId || '',
-        custom_event_type: w.customEventType || '',
-      },
+  // ABO：daily_budget 在 AdSet；CBO：daily_budget 在 Campaign
+  const adsetBlock: Record<string, unknown> = {
+    targeting: {
+      geo_locations: { countries: countryCodes },
     },
+    promoted_object: {
+      pixel_id: w.pixelId || '',
+      custom_event_type: w.customEventType || '',
+    },
+  }
+  if (!isCbo) {
+    adsetBlock.daily_budget = Math.round((p.budget || 50) * 100)
+  }
+  const campaignBlock: Record<string, unknown> = {}
+  if (isCbo) {
+    // CBO（Meta ACB）：仅在 Campaign 层注入 daily_budget；
+    // 不要带 is_adset_budget_sharing_enabled —— Meta 会拒绝 (subcode=4834002)
+    const cboUsd = Number(p.campaignDailyBudget ?? p.budget ?? 50)
+    campaignBlock.daily_budget = Math.round(cboUsd * 100)
+  }
+  const overrides: Record<string, unknown> = {
+    adset: adsetBlock,
     creative: {
       page_id: w.pageId,
       primary_text: w.primaryText,
@@ -254,6 +292,8 @@ function _buildW2aOverrides(p: CreateAdsParams): Record<string, unknown> {
       link: w.landingPageUrl,
     },
   }
+  if (isCbo) overrides.campaign = campaignBlock
+  return overrides
 }
 
 // ─── 素材名 → Ad 名称工具 ────────────────────────────────

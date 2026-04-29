@@ -126,14 +126,19 @@ export default function AdsCreatePage() {
   const metaAccounts: MetaAccount[] = metaAccountsResp?.data ?? []
 
   const MASTER_TPL_ID = 'tpl_meta_web_to_app_conv_abo'
-  // Meta W2A Conversion 系列模板（既有逻辑）
+  const CBO_TPL_ID = 'tpl_meta_web_to_app_conv_cbo'
+  // Meta W2A Conversion 系列模板（既有 ABO + 新增 CBO；其余 Meta 模板维持现状）
   const metaTemplates = useMemo(() => {
     if (!allTemplates) return []
-    return allTemplates.filter(t =>
-      t.platform === 'meta'
-      && t.template_type === 'web_to_app'
-      && (t.template_subtype === 'conversion' || t.id === MASTER_TPL_ID),
-    )
+    return allTemplates.filter(t => {
+      if (t.platform !== 'meta') return false
+      // ABO（既有）：template_type === 'web_to_app' 且 subtype === 'conversion' 或为 MASTER_TPL_ID
+      if (t.template_type === 'web_to_app'
+        && (t.template_subtype === 'conversion' || t.id === MASTER_TPL_ID)) return true
+      // CBO（新增）：template_type === 'web_to_app_conversion_cbo'
+      if (t.template_type === 'web_to_app_conversion_cbo' || t.id === CBO_TPL_ID) return true
+      return false
+    })
   }, [allTemplates])
   // TikTok Minis 系列模板（系统母版 + 业务模板）
   const minisTemplates = useMinisTemplates(allTemplates)
@@ -193,10 +198,13 @@ export default function AdsCreatePage() {
   // ── Meta 账户素材选择器 ──
   const [showAccountAssetPicker, setShowAccountAssetPicker] = useState(false)
 
-  // ── Meta 投放时间（仅 Conversion ABO 优化项；不影响 TikTok / Mini） ──
+  // ── Meta 投放时间（仅 Conversion ABO/CBO 优化项；不影响 TikTok / Mini） ──
   // datetime-local 控件值（无时区，格式 yyyy-MM-ddTHH:mm）；提交时与浏览器时区合成 ISO 8601 with offset
   const [scheduleStartLocal, setScheduleStartLocal] = useState('')
   const [scheduleEndLocal, setScheduleEndLocal] = useState('')
+
+  // ── Meta CBO：Campaign 层日预算（USD，未乘 100）。仅 web_to_app_conversion_cbo 模板使用 ──
+  const [campaignDailyBudgetUsd, setCampaignDailyBudgetUsd] = useState<string>('')
 
   // ── 资产库弹窗 & 引用追踪 ──
   const [showLPPicker, setShowLPPicker] = useState(false)
@@ -212,9 +220,14 @@ export default function AdsCreatePage() {
   const currentTpl = (templates ?? []).find(t => t.id === selectedTpl)
   const tplPlatform = currentTpl?.platform
   const isMeta = tplPlatform === 'meta'
-  const isW2a = isMeta && currentTpl?.template_type === 'web_to_app'
+  // CBO 与 ABO 共享 W2A 表单（创意/落地页/Pixel/Event/投放时间），仅预算层级不同
+  const isW2aCbo = isMeta && (currentTpl?.template_type === 'web_to_app_conversion_cbo'
+    || currentTpl?.id === CBO_TPL_ID)
+  const isW2a = isMeta && (currentTpl?.template_type === 'web_to_app' || isW2aCbo)
   const isW2aConversion = isW2a && (currentTpl?.template_subtype === 'conversion'
-    || currentTpl?.id === 'tpl_meta_web_to_app_conv_abo')
+    || currentTpl?.template_subtype === 'conversion_cbo'
+    || currentTpl?.id === 'tpl_meta_web_to_app_conv_abo'
+    || isW2aCbo)
   const isMinis = isTikTokMinisBasicTpl(currentTpl)
   const isTikTokW2a = isTikTokWebToAppTpl(currentTpl)
   // 只要是"TikTok 单表单"模板（minis 或 W2A），就走独立子表单分支，跳过 Meta 批量创建 UI
@@ -231,6 +244,11 @@ export default function AdsCreatePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templates.length, searchParams])
+  // 切换到非 CBO 模板时清空 CBO 预算字段，避免下一次提交携带过期值
+  useEffect(() => {
+    if (!isW2aCbo && campaignDailyBudgetUsd) setCampaignDailyBudgetUsd('')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isW2aCbo])
   // 用户在页面内手动改模板时，把 URL 同步上去（便于刷新/分享）
   useEffect(() => {
     if (!selectedTpl) return
@@ -571,10 +589,19 @@ export default function AdsCreatePage() {
     }
     if (readyMaterials.length === 0) return '至少上传 1 个素材'
     if (adSets.length === 0) return '至少需要 1 个 AdSet'
+    // CBO 模式：Campaign 层日预算必填；AdSet 不再校验日预算
+    if (isW2aCbo) {
+      const cbo = Number(campaignDailyBudgetUsd)
+      if (!campaignDailyBudgetUsd || Number.isNaN(cbo) || cbo <= 0) {
+        return 'CBO 模板必须填写 Campaign Daily Budget（USD），且大于 0'
+      }
+    }
     for (let i = 0; i < adSets.length; i++) {
       const a = adSets[i]
       if (!a.name.trim()) return `AdSet #${i + 1} 名称不能为空`
-      if (!a.daily_budget || Number(a.daily_budget) <= 0) return `AdSet #${i + 1} 日预算必须大于 0`
+      if (!isW2aCbo) {
+        if (!a.daily_budget || Number(a.daily_budget) <= 0) return `AdSet #${i + 1} 日预算必须大于 0`
+      }
       if (a.countries.length === 0) return `AdSet #${i + 1} 至少选择一个国家`
       if (a.material_ids.length === 0) return `AdSet #${i + 1} 至少选择 1 个素材`
       if (isW2aConversion) {
@@ -652,7 +679,11 @@ export default function AdsCreatePage() {
       campaignName: campaignName.trim(),
       country: adSets[0]?.countries[0] || 'US',
       countries: adSets[0]?.countries ?? ['US'],
-      budget: Number(adSets[0]?.daily_budget) || 50,
+      // CBO：用 Campaign 层日预算作为兜底 budget；ABO：取首个 AdSet 日预算
+      budget: isW2aCbo
+        ? (Number(campaignDailyBudgetUsd) || 50)
+        : (Number(adSets[0]?.daily_budget) || 50),
+      campaignDailyBudget: isW2aCbo ? Number(campaignDailyBudgetUsd) : undefined,
       templateId: selectedTpl,
       template: currentTpl ?? null,
       adAccountId: isMeta ? adAccountId : undefined,
@@ -722,8 +753,11 @@ export default function AdsCreatePage() {
                 {isTikTokW2a && (
                   <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Web to App</span>
                 )}
-                {!isMinis && !isTikTokW2a && isMeta && (
+                {!isMinis && !isTikTokW2a && isMeta && !isW2aCbo && (
                   <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">W2A Conversion (ABO)</span>
+                )}
+                {isW2aCbo && (
+                  <span className="inline-block px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-600 font-medium">W2A Conversion (CBO)</span>
                 )}
                 {(currentTpl.is_system || currentTpl.id === MASTER_TPL_ID || currentTpl.is_builtin) && (
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 text-amber-600 font-medium">
@@ -760,6 +794,20 @@ export default function AdsCreatePage() {
                       <option value="">请选择 Meta 广告账户</option>
                       {metaAccounts.map(a => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
                     </select>
+                  </div>
+                )}
+                {/* CBO：Campaign 层日预算（仅 web_to_app_conversion_cbo 模板显示） */}
+                {isW2aCbo && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                      Campaign Daily Budget / 广告系列日预算 (USD) <span className="text-red-400">*</span>
+                    </label>
+                    <input type="number" value={campaignDailyBudgetUsd}
+                      onChange={e => { setCampaignDailyBudgetUsd(e.target.value); setResult(null) }}
+                      min="1" step="1" className={inputCls} placeholder="50" />
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      CBO 模式：预算在广告系列层统一分配，AdSet 不再单独设置日预算。
+                    </p>
                   </div>
                 )}
               </div>
@@ -1059,7 +1107,7 @@ export default function AdsCreatePage() {
                         {adSet.collapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
                         AdSet #{idx + 1}: {adSet.name || '未命名'}
                         <span className="text-xs font-normal text-gray-400">
-                          ({adSet.material_ids.length} 素材 / ${adSet.daily_budget}/天 / {adSet.countries.join(',')})
+                          ({adSet.material_ids.length} 素材 / {isW2aCbo ? 'CBO' : `$${adSet.daily_budget}/天`} / {adSet.countries.join(',')})
                         </span>
                       </button>
                       <div className="flex items-center gap-2">
@@ -1081,12 +1129,21 @@ export default function AdsCreatePage() {
                               onChange={e => updateAdSet(adSet.key, { name: e.target.value })}
                               className={inputCls} placeholder="AdSet 名称" />
                           </div>
-                          <div>
-                            <label className="block text-xs font-medium text-gray-600 mb-1">日预算 (USD) <span className="text-red-400">*</span></label>
-                            <input type="number" value={adSet.daily_budget}
-                              onChange={e => updateAdSet(adSet.key, { daily_budget: e.target.value })}
-                              min="1" step="1" className={inputCls} placeholder="50" />
-                          </div>
+                          {isW2aCbo ? (
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">AdSet 日预算 (CBO)</label>
+                              <div className="px-3 py-2 rounded-lg bg-gray-50 text-xs text-gray-500 border border-dashed border-gray-200">
+                                CBO：预算由广告系列统一分配
+                              </div>
+                            </div>
+                          ) : (
+                            <div>
+                              <label className="block text-xs font-medium text-gray-600 mb-1">日预算 (USD) <span className="text-red-400">*</span></label>
+                              <input type="number" value={adSet.daily_budget}
+                                onChange={e => updateAdSet(adSet.key, { daily_budget: e.target.value })}
+                                min="1" step="1" className={inputCls} placeholder="50" />
+                            </div>
+                          )}
                         </div>
 
                         <div>
@@ -1222,12 +1279,20 @@ export default function AdsCreatePage() {
             <p className="text-sm font-medium text-blue-700 mb-2">创建预览</p>
             <div className="text-xs text-blue-600 space-y-1">
               <p>Campaign: <strong>{campaignName}</strong></p>
+              {isW2aCbo && (
+                <>
+                  <p>预算模式: <strong>CBO / 广告系列预算</strong></p>
+                  <p>Campaign 日预算: <strong>${campaignDailyBudgetUsd || '0'}/天</strong></p>
+                </>
+              )}
               <p>AdSet 数量: <strong>{adSets.length}</strong></p>
               <p>素材总数: <strong>{readyMaterials.length}</strong></p>
               <p>预计 Ad 总数: <strong>{adSets.reduce((s, a) => s + a.material_ids.length, 0)}</strong></p>
               {adSets.map((a, i) => (
                 <p key={a.key} className="pl-4">
-                  AdSet #{i + 1} ({a.name}): {a.material_ids.length} 个 Ad · ${a.daily_budget}/天 · {a.countries.join(',')}
+                  AdSet #{i + 1} ({a.name}): {a.material_ids.length} 个 Ad
+                  {!isW2aCbo && <> · ${a.daily_budget}/天</>}
+                  {' · '}{a.countries.join(',')}
                 </p>
               ))}
             </div>
@@ -1332,12 +1397,49 @@ function BatchResultDisplay({ result }: { result: CreateResult }) {
 
           {details && (
             <div className="mt-3 space-y-2">
+              {/* 预算模式徽章（仅 Meta 链路返回 budget_mode 时展示） */}
+              {(details.requested_budget_mode || details.actual_budget_mode) && (
+                <div className="flex items-center gap-2 text-[11px]">
+                  <span className="text-gray-500">预算模式:</span>
+                  <span className={`px-2 py-0.5 rounded-full font-medium ${
+                    details.actual_budget_mode === 'CBO'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : details.actual_budget_mode === 'CBO_FAILED'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-gray-100 text-gray-600'
+                  }`}>
+                    {details.actual_budget_mode || details.requested_budget_mode}
+                  </span>
+                  {details.actual_budget_mode === 'CBO_FAILED' && (
+                    <span className="text-red-500">CBO 创建失败，未自动切换到 ABO</span>
+                  )}
+                </div>
+              )}
               {details.campaign && (
                 <div className="text-xs">
                   <span className="font-medium text-gray-600">Campaign: </span>
                   {details.campaign.success
                     ? <span className="text-green-600">成功 (ID: {details.campaign.campaign_id})</span>
-                    : <span className="text-red-600">失败 - {details.campaign.error}</span>}
+                    : (
+                      <span className="text-red-600">失败 - {
+                        details.campaign.error
+                        || details.campaign.meta_error_message
+                        || (details.campaign.meta_error_code ? `Meta API 错误 (code=${details.campaign.meta_error_code}${details.campaign.meta_error_subcode ? `, subcode=${details.campaign.meta_error_subcode}` : ''})` : '未知错误（请查看后端日志）')
+                      }</span>
+                    )}
+                  {/* Meta error 详情 */}
+                  {!details.campaign.success && (details.campaign.meta_error_code || details.campaign.meta_error_subcode) && (
+                    <div className="mt-1 ml-1 text-[11px] text-red-500 space-y-0.5">
+                      <div>code: <span className="font-mono">{details.campaign.meta_error_code ?? '-'}</span> / subcode: <span className="font-mono">{details.campaign.meta_error_subcode ?? '-'}</span></div>
+                      {details.campaign.meta_error_message && <div>message: {details.campaign.meta_error_message}</div>}
+                      {details.campaign.campaign_payload_debug && (
+                        <details>
+                          <summary className="cursor-pointer text-red-400 hover:text-red-600">查看 campaign payload</summary>
+                          <pre className="mt-1 bg-white/60 rounded p-2 overflow-x-auto max-h-40">{JSON.stringify(details.campaign.campaign_payload_debug, null, 2)}</pre>
+                        </details>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1349,8 +1451,20 @@ function BatchResultDisplay({ result }: { result: CreateResult }) {
                       : <AlertCircle className="w-3 h-3 text-red-500" />}
                     <span className="font-medium text-gray-700">AdSet #{i + 1}: {as.adset_name}</span>
                     {as.success && <span className="text-green-600 text-[11px]">ID: {as.adset_id}</span>}
-                    {!as.success && <span className="text-red-500 text-[11px]">{as.error}</span>}
+                    {!as.success && (
+                      <span className="text-red-500 text-[11px]">{
+                        as.error
+                        || as.meta_error_message
+                        || (as.meta_error_code ? `Meta API 错误 (code=${as.meta_error_code}${as.meta_error_subcode ? `, subcode=${as.meta_error_subcode}` : ''})` : '未知错误（请查看后端日志）')
+                      }</span>
+                    )}
                   </div>
+                  {!as.success && (as.meta_error_code || as.meta_error_subcode) && (
+                    <div className="ml-5 text-[11px] text-red-500 space-y-0.5">
+                      <div>code: <span className="font-mono">{as.meta_error_code ?? '-'}</span> / subcode: <span className="font-mono">{as.meta_error_subcode ?? '-'}</span></div>
+                      {as.meta_error_message && as.meta_error_message !== as.error && <div>message: {as.meta_error_message}</div>}
+                    </div>
+                  )}
                   {as.ads && as.ads.length > 0 && (
                     <div className="ml-5 space-y-0.5">
                       {as.ads.map((ad, j) => (

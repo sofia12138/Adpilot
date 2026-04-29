@@ -25,8 +25,13 @@ export interface MetaAccountInfo {
 
 // ─── API ─────────────────────────────────────────────────
 
-export function fetchTikTokAdvertisers(): Promise<{ data: Advertiser[] }> {
-  return apiFetch<{ data: Advertiser[] }>('/api/advertisers/')
+export interface TikTokAdvertisersResponse {
+  data: Advertiser[]
+  bc_sync_warning?: string
+}
+
+export function fetchTikTokAdvertisers(): Promise<TikTokAdvertisersResponse> {
+  return apiFetch<TikTokAdvertisersResponse>('/api/advertisers/')
 }
 
 export function fetchMetaAccounts(): Promise<{ data: MetaAccount[] }> {

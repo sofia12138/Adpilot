@@ -101,11 +101,12 @@ export default function TikTokMaterialsPage() {
   const [pageError, setPageError] = useState('')
   const [isDragging, setIsDragging] = useState(false)
 
-  const { data: advData } = useQuery({
+  const { data: advData, isFetching: advFetching, refetch: refetchAdvertisers } = useQuery({
     queryKey: ['tiktok-advertisers'],
     queryFn: fetchTikTokAdvertisers,
   })
   const advertisers: Advertiser[] = advData?.data ?? []
+  const bcSyncWarning: string | undefined = advData?.bc_sync_warning
 
   const { data: listData, isLoading } = useTikTokMaterials({
     advertiser_id: advertiserId || undefined,
@@ -268,6 +269,13 @@ export default function TikTokMaterialsPage() {
         description="支持批量上传视频到 TikTok Asset Library，长视频自动走 API 入库"
       />
 
+      {bcSyncWarning && (
+        <div className="flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 text-xs text-amber-800">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{bcSyncWarning}</span>
+        </div>
+      )}
+
       {/* ── toolbar ── */}
       <div className="flex items-center gap-3 flex-wrap">
         <select
@@ -275,13 +283,22 @@ export default function TikTokMaterialsPage() {
           value={advertiserId}
           onChange={e => { setAdvertiserId(e.target.value); setPage(1) }}
         >
-          <option value="">全部广告主</option>
+          <option value="">全部广告主 ({advertisers.length})</option>
           {advertisers.map(a => (
             <option key={a.advertiser_id} value={a.advertiser_id}>
               {a.advertiser_name || a.advertiser_id}
             </option>
           ))}
         </select>
+        <button
+          onClick={() => refetchAdvertisers()}
+          disabled={advFetching}
+          className="inline-flex items-center gap-1 h-9 px-3 rounded-lg border border-gray-200 text-xs text-gray-600 bg-white hover:bg-gray-50 disabled:opacity-50"
+          title="刷新账号列表（同步 BC 中新加入的广告主）"
+        >
+          <RotateCcw className={`w-3.5 h-3.5 ${advFetching ? 'animate-spin' : ''}`} />
+          刷新账号
+        </button>
 
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />

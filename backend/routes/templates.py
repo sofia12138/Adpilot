@@ -410,6 +410,66 @@ BUILTIN_TEMPLATES: list[dict] = [
         },
         "created_at": "2026-04-14T12:00:00",
     },
+    {
+        # ── Meta Web to App Conversion (CBO) ──
+        # 与 ABO 仅一处差异：预算放在 Campaign 层（is_adset_budget_sharing_enabled=true）
+        # AdSet 层不带 daily_budget / lifetime_budget。其他字段全部沿用 ABO。
+        "id": "tpl_meta_web_to_app_conv_cbo",
+        "template_key": "tpl_meta_web_to_app_conv_cbo",
+        "name": "Meta Web to App Conversion (CBO)",
+        "platform": "meta",
+        "template_type": "web_to_app_conversion_cbo",
+        "template_subtype": "conversion_cbo",
+        "is_system": True,
+        "is_editable": False,
+        "campaign": {
+            "objective": "OUTCOME_SALES",
+            "status": "PAUSED",
+            "special_ad_categories": [],
+            # CBO（新版 Meta ACB）：仅靠 Campaign 层 daily_budget 触发系列预算优化；
+            # 不要传 is_adset_budget_sharing_enabled，否则触发 [100] subcode=4834002。
+            "daily_budget": 5000,
+        },
+        "adset": {
+            "billing_event": "IMPRESSIONS",
+            "optimization_goal": "OFFSITE_CONVERSIONS",
+            # CBO 模板下，daily_budget / lifetime_budget 不会进入 AdSet payload（由 _launch_meta 强制清理）
+            # bid_strategy 也由 _launch_meta 强制为 LOWEST_COST_WITHOUT_CAP，避免 [100] subcode=1815857（缺少 bid_amount）
+            "status": "PAUSED",
+            "targeting": {
+                "geo_locations": {"countries": ["US"]},
+                "age_min": 18,
+                "age_max": 65,
+            },
+            "promoted_object": {
+                "pixel_id": "",
+                "custom_event_type": "PURCHASE",
+            },
+        },
+        "creative": {
+            "page_id": "",
+            "primary_text": "Watch now on our site, then continue in the app.",
+            "headline": "Start Watching Now",
+            "description": "",
+            "call_to_action": "LEARN_MORE",
+            "link": "",
+            "image_hash": "",
+            "video_id": "",
+        },
+        "tracking": {
+            "landing_page_url": "",
+            "deep_link_url": "",
+            "app_store_url": "",
+            "fallback_url": "",
+            "utm_source": "meta",
+            "utm_campaign": "",
+            "utm_content": "",
+        },
+        "ad": {
+            "status": "PAUSED",
+        },
+        "created_at": "2026-04-24T00:00:00",
+    },
 ]
 
 
@@ -580,6 +640,12 @@ async def launch_from_template(payload: dict = Body(...), _user: User = Depends(
 async def _launch_meta(tpl: dict, payload: dict) -> dict:
     tpl_id = tpl.get("id", "?")
     template_type = tpl.get("template_type", "")
+    # CBO 判定：只看 template_type / id；和 ABO 唯一差异 = 预算层级
+    is_cbo = (
+        template_type == "web_to_app_conversion_cbo"
+        or tpl_id == "tpl_meta_web_to_app_conv_cbo"
+    )
+    budget_mode = "CBO" if is_cbo else "ABO"
     ad_account_id = payload.get("ad_account_id", "").strip()
     if not ad_account_id:
         return {"error": "Meta 投放必须提供 ad_account_id（如 act_123456）"}
@@ -679,6 +745,10 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
         "ad_account_id": ad_account_id,
         "campaign": None,
         "adsets": [],
+        # 预算模式（供前端结果展示 + 操作日志用）
+        "budget_mode": budget_mode,
+        "campaign_daily_budget": None,
+        "adset_daily_budget": None,
         "schedule": {
             "enabled": bool(schedule_start_time),
             "start_time": schedule_start_time or None,
@@ -696,7 +766,7 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
     # 后端这里只做透传 + 日志，不做时区算术，避免歧义。
     _account_tz = (_acct_row or {}).get("timezone") or "UTC"
     logger.info(f"[launch-meta] token={'专属' if _acct_token else '全局默认'}  account={ad_account_id}  "
-                f"materials={len(materials)}  adsets={len(adsets_input)}  "
+                f"budget_mode={budget_mode}  materials={len(materials)}  adsets={len(adsets_input)}  "
                 f"schedule_start={schedule_start_time or '-'}  schedule_end={schedule_end_time or '-'}  "
                 f"tz_input={schedule_timezone or '-'}  tz_account={_account_tz}")
 
@@ -705,25 +775,109 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
     svc_ad = MetaAdService(ad_account_id, client=_client)
 
     # ══ Step 1: Campaign ══
-    campaign_payload = {
+    # 预算模式：
+    #   CBO → Campaign 层带 daily_budget；不传 is_adset_budget_sharing_enabled
+    #         （Meta 新版 ACB 不接受该字段；传了会触发 subcode=4834002）
+    #   ABO → 维持既有逻辑：is_adset_budget_sharing_enabled=false，Campaign 层不带 daily_budget
+    campaign_payload: dict = {
         "name": campaign_name,
         "objective": tpl_campaign.get("objective", "OUTCOME_TRAFFIC"),
         "status": tpl_campaign.get("status", "PAUSED"),
         "special_ad_categories": json.dumps(tpl_campaign.get("special_ad_categories", [])),
-        "is_adset_budget_sharing_enabled": str(
-            tpl_campaign.get("is_adset_budget_sharing_enabled", False)
-        ).lower(),
     }
+    # 透传可选 Campaign 字段（仅当模板有定义时）
+    for opt_key in ("buying_type", "bid_strategy"):
+        v = tpl_campaign.get(opt_key)
+        if v:
+            campaign_payload[opt_key] = v
+
+    if is_cbo:
+        # CBO：Campaign 层日预算（cents）；显式不带 is_adset_budget_sharing_enabled
+        try:
+            cbo_daily = int(tpl_campaign.get("daily_budget") or 0)
+        except (TypeError, ValueError):
+            cbo_daily = 0
+        if cbo_daily <= 0:
+            results["budget_mode"] = "CBO"
+            results["requested_budget_mode"] = "CBO"
+            results["actual_budget_mode"] = "CBO_FAILED"
+            results["failed_step"] = "campaign"
+            results["campaign"] = {
+                "success": False,
+                "error": "CBO 模板要求 Campaign Daily Budget > 0（单位：cents）",
+            }
+            return {"data": results}
+        campaign_payload["daily_budget"] = cbo_daily
+        # CBO 必须在 Campaign 层指定 bid_strategy；否则 Meta 会沿用旧默认（含 BID_CAP），
+        # 导致 AdSet 创建时报 [100] subcode=1815857（缺少 bid_amount）。
+        # 默认强制使用「最低成本，不设上限」；不传 bid_amount。
+        campaign_payload["bid_strategy"] = "LOWEST_COST_WITHOUT_CAP"
+        # 防御：若任何上游误把这些字段塞进 campaign_payload，统一删除
+        for k in ("is_adset_budget_sharing_enabled", "campaign_budget_optimization",
+                  "budget_sharing", "bid_amount", "bid_cap", "target_cost", "cost_cap"):
+            campaign_payload.pop(k, None)
+        results["campaign_daily_budget"] = cbo_daily
+        results["requested_budget_mode"] = "CBO"
+    else:
+        # ABO：保留既有 is_adset_budget_sharing_enabled=false 行为，不变
+        campaign_payload["is_adset_budget_sharing_enabled"] = str(
+            bool(tpl_campaign.get("is_adset_budget_sharing_enabled", False))
+        ).lower()
     safe_cp = {k: v for k, v in campaign_payload.items() if k != "access_token"}
+    if is_cbo:
+        # CBO 调试日志：键集合 + 关键字段 + 是否带 access_token（不打印 token 本身）
+        logger.info(
+            "[launch-meta][cbo] campaign-debug "
+            f"template_id={tpl_id} template_type={template_type} budget_mode=CBO "
+            f"keys={sorted(campaign_payload.keys())} "
+            f"daily_budget={campaign_payload.get('daily_budget')} "
+            f"objective={campaign_payload.get('objective')} "
+            f"bid_strategy={campaign_payload.get('bid_strategy')} "
+            f"buying_type={campaign_payload.get('buying_type')} "
+            f"status={campaign_payload.get('status')} "
+            f"special_ad_categories={campaign_payload.get('special_ad_categories')} "
+            f"has_is_adset_budget_sharing={'is_adset_budget_sharing_enabled' in campaign_payload} "
+            f"has_bid_amount={'bid_amount' in campaign_payload} "
+            f"has_access_token={bool(_acct_token or _client.access_token)}"
+        )
     logger.info(f"[launch-meta] step=campaign  payload={safe_cp}")
     try:
         campaign_data = await svc_campaign.create(campaign_payload)
         campaign_id = campaign_data.get("id", "")
         results["campaign"] = {"success": True, "campaign_id": campaign_id}
+        if is_cbo:
+            results["actual_budget_mode"] = "CBO"
         logger.info(f"[launch-meta] Campaign 创建成功: {campaign_id}")
     except Exception as e:
-        logger.error(f"[launch-meta] Campaign 创建失败: {e}  payload={safe_cp}")
-        results["campaign"] = {"success": False, "error": str(e), "payload_sent": safe_cp}
+        # 结构化错误信息：CBO 必须暴露 meta_error_code/subcode；不允许 fallback 到 ABO
+        meta_code = getattr(e, "code", None)
+        meta_subcode = getattr(e, "error_subcode", None)
+        meta_message = getattr(e, "message", None) or str(e)
+        # error 字段保证非空，否则前端只显示 "campaign创建失败:" 看不到原因
+        _err_str = str(e).strip()
+        if not _err_str:
+            _err_str = (
+                f"[{meta_code or '?'}] {meta_message or 'unknown Meta error'}"
+                + (f" (subcode={meta_subcode})" if meta_subcode else "")
+            )
+        logger.error(
+            f"[launch-meta] Campaign 创建失败: code={meta_code} subcode={meta_subcode} "
+            f"message={meta_message!r}  raw={str(e)!r}  payload={safe_cp}"
+        )
+        camp_err: dict = {
+            "success": False,
+            "error": _err_str,
+            "payload_sent": safe_cp,
+            "meta_error_code": meta_code,
+            "meta_error_subcode": meta_subcode,
+            "meta_error_message": meta_message,
+            "campaign_payload_debug": safe_cp,
+        }
+        results["campaign"] = camp_err
+        results["failed_step"] = "campaign"
+        if is_cbo:
+            # CBO 失败 → 标记 CBO_FAILED，明确不会 fallback；前端展示红色错误
+            results["actual_budget_mode"] = "CBO_FAILED"
         return {"data": results}
 
     # ══ Step 2+3: 遍历 adsets → 每个 adset 下创建 ads ══
@@ -736,16 +890,58 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
 
         adset_result: dict = {"adset_name": adset_name, "success": False, "ads": []}
 
+        # bid_strategy 默认值：CBO 强制 LOWEST_COST_WITHOUT_CAP（即便模板/上游传了别的也覆盖）；
+        # ABO 走原有兼容逻辑：模板有则用，没有则 LOWEST_COST_WITHOUT_CAP。
+        if is_cbo:
+            adset_bid_strategy = "LOWEST_COST_WITHOUT_CAP"
+        else:
+            adset_bid_strategy = tpl_adset.get("bid_strategy") or "LOWEST_COST_WITHOUT_CAP"
+
         adset_payload = {
             "campaign_id": campaign_id,
             "name": adset_name,
             "status": tpl_adset.get("status", "PAUSED"),
             "billing_event": tpl_adset.get("billing_event", "IMPRESSIONS"),
             "optimization_goal": opt_goal,
-            "daily_budget": daily_budget,
-            "bid_strategy": tpl_adset.get("bid_strategy", "LOWEST_COST_WITHOUT_CAP"),
+            "bid_strategy": adset_bid_strategy,
             "targeting": json.dumps(adset_targeting),
         }
+        # 透传可选 AdSet 字段（注意：bid_amount 仅在非 CBO 下才允许）
+        if not is_cbo:
+            for opt_key in ("destination_type", "bid_amount"):
+                v = tpl_adset.get(opt_key)
+                if v:
+                    adset_payload[opt_key] = v
+            # 校验：若 bid_strategy 需要 bid_amount，必须提供且 > 0
+            _need_bid_amount = adset_bid_strategy in ("LOWEST_COST_WITH_BID_CAP", "TARGET_COST", "COST_CAP")
+            if _need_bid_amount:
+                try:
+                    _bid_amt = int(adset_payload.get("bid_amount") or 0)
+                except (TypeError, ValueError):
+                    _bid_amt = 0
+                if _bid_amt <= 0:
+                    adset_result["error"] = (
+                        f"bid_strategy={adset_bid_strategy} 需要 bid_amount > 0（cents），当前未提供"
+                    )
+                    adset_result["meta_error_code"] = "VALIDATION"
+                    results["adsets"].append(adset_result)
+                    continue
+        else:
+            # CBO：仅透传 destination_type；显式不透传 bid_amount
+            v = tpl_adset.get("destination_type")
+            if v:
+                adset_payload["destination_type"] = v
+
+        if is_cbo:
+            # CBO：AdSet 层禁止任何预算 / 共享 / 出价数额相关字段（防御性删除：哪怕模板/上游误塞也清掉）
+            for k in ("daily_budget", "lifetime_budget", "budget", "is_adset_budget_sharing_enabled",
+                      "bid_amount", "bid_cap", "target_cost", "cost_cap"):
+                adset_payload.pop(k, None)
+        else:
+            # ABO：AdSet 层带 daily_budget
+            adset_payload["daily_budget"] = daily_budget
+            if results.get("adset_daily_budget") is None:
+                results["adset_daily_budget"] = daily_budget
         po_valid = {k: v for k, v in adset_po.items() if v}
         if po_valid:
             adset_payload["promoted_object"] = json.dumps(po_valid)
@@ -760,7 +956,35 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
             adset_payload["end_time"] = as_end
 
         safe_as = {k: v for k, v in adset_payload.items() if k != "access_token"}
-        logger.info(f"[launch-meta] step=adset#{idx+1}  name={adset_name}  budget={daily_budget}  payload={safe_as}")
+        budget_log = (f"campaign_daily={results.get('campaign_daily_budget')} (CBO)" if is_cbo
+                      else f"adset_daily={daily_budget} (ABO)")
+        logger.info(f"[launch-meta] step=adset#{idx+1}  name={adset_name}  {budget_log}  payload={safe_as}")
+        if is_cbo:
+            # CBO AdSet 调试日志：必须保证不存在任何预算字段
+            po_keys: list[str] = []
+            try:
+                po_raw = adset_payload.get("promoted_object")
+                if isinstance(po_raw, str):
+                    po_keys = list(json.loads(po_raw).keys())
+                elif isinstance(po_raw, dict):
+                    po_keys = list(po_raw.keys())
+            except Exception:
+                po_keys = []
+            logger.info(
+                f"[launch-meta][cbo] adset-debug#{idx+1} "
+                f"keys={sorted(adset_payload.keys())} "
+                f"bid_strategy={adset_payload.get('bid_strategy')} "
+                f"has_bid_amount={'bid_amount' in adset_payload} "
+                f"has_bid_cap={'bid_cap' in adset_payload} "
+                f"has_target_cost={'target_cost' in adset_payload} "
+                f"has_cost_cap={'cost_cap' in adset_payload} "
+                f"has_daily_budget={'daily_budget' in adset_payload} "
+                f"has_lifetime_budget={'lifetime_budget' in adset_payload} "
+                f"optimization_goal={adset_payload.get('optimization_goal')} "
+                f"billing_event={adset_payload.get('billing_event')} "
+                f"destination_type={adset_payload.get('destination_type')} "
+                f"promoted_object_keys={po_keys}"
+            )
 
         try:
             adset_data = await svc_adset.create(adset_payload)
@@ -769,9 +993,29 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
             adset_result["adset_id"] = adset_id
             logger.info(f"[launch-meta] AdSet#{idx+1} 创建成功: {adset_id}")
         except Exception as e:
-            logger.error(f"[launch-meta] AdSet#{idx+1} 创建失败: {e}  payload={safe_as}")
-            adset_result["error"] = str(e)
+            meta_code = getattr(e, "code", None)
+            meta_subcode = getattr(e, "error_subcode", None)
+            meta_message = getattr(e, "message", None) or str(e)
+            _err_str = str(e).strip()
+            if not _err_str:
+                _err_str = (
+                    f"[{meta_code or '?'}] {meta_message or 'unknown Meta error'}"
+                    + (f" (subcode={meta_subcode})" if meta_subcode else "")
+                )
+            logger.error(
+                f"[launch-meta] AdSet#{idx+1} 创建失败: code={meta_code} subcode={meta_subcode} "
+                f"message={meta_message!r}  raw={str(e)!r}  payload={safe_as}"
+            )
+            adset_result["error"] = _err_str
             adset_result["payload_sent"] = safe_as
+            adset_result["meta_error_code"] = meta_code
+            adset_result["meta_error_subcode"] = meta_subcode
+            adset_result["meta_error_message"] = meta_message
+            if is_cbo:
+                # CBO AdSet 失败 → 仅本 AdSet 失败，不切换到 ABO，不在 Campaign 层重试
+                results["actual_budget_mode"] = "CBO_FAILED"
+                if not results.get("failed_step"):
+                    results["failed_step"] = "adset"
             results["adsets"].append(adset_result)
             continue
 
@@ -1839,7 +2083,16 @@ def _log_launch(user, tpl_id: str, platform: str, payload: dict, resp: dict):
 
         if not camp_ok:
             status = "fail"
-            detail = f"template={tpl_id} | campaign创建失败: {camp.get('error', 'unknown')}"
+            _err = (camp.get("error") or "").strip()
+            _meta_msg = (camp.get("meta_error_message") or "").strip()
+            _meta_code = camp.get("meta_error_code")
+            _meta_sub = camp.get("meta_error_subcode")
+            if not _err:
+                _err = _meta_msg or "unknown"
+            _suffix = ""
+            if _meta_code or _meta_sub:
+                _suffix = f" [code={_meta_code or '?'} subcode={_meta_sub or '?'}]"
+            detail = f"template={tpl_id} | campaign创建失败: {_err}{_suffix}"
         elif ok_adsets == 0:
             status = "fail"
             detail = f"template={tpl_id} | 所有adset创建失败 ({len(adsets_results)} 个)"
@@ -1897,6 +2150,11 @@ def _log_launch(user, tpl_id: str, platform: str, payload: dict, resp: dict):
             "account_asset": account_cnt,
             "other": max(0, len(materials) - local_cnt - account_cnt),
         }
+    # Meta 预算模式（CBO / ABO）+ 实际下发预算（cents）
+    if platform == "meta" and isinstance(data, dict) and data.get("budget_mode"):
+        after_summary["budget_mode"] = data.get("budget_mode")
+        after_summary["campaign_daily_budget"] = data.get("campaign_daily_budget")
+        after_summary["adset_daily_budget"] = data.get("adset_daily_budget")
     sched = data.get("schedule") if isinstance(data, dict) else None
     if isinstance(sched, dict) and sched.get("enabled"):
         after_summary["adset_schedule"] = {
