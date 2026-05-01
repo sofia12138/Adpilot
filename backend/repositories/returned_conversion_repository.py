@@ -48,14 +48,14 @@ PLATFORM_FIELD_SUPPORT: dict[str, dict[str, bool]] = {
     "tiktok": {
         # TikTok registration + on_web_register 字段已接入，注册优化目标下有值
         "registrations_returned":       True,
-        # TikTok complete_payment 仅为次数，无金额字段，降级为 0
-        "purchase_value_returned":      False,
+        # TikTok：value_per_complete_payment×次数 或 total_purchase_value（见同步任务）
+        "purchase_value_returned":      True,
         # TikTok complete_payment 即购买次数，可作为内购数
         "purchase_count_returned":      True,
-        # subscribe_value_returned 字段已接入，DB 列存在，值当前为 0
+        # TikTok：total_subscribe_value / skan_total_subscribe_value
         "subscribe_value_returned":     True,
-        # TikTok 无明确订阅事件回传，降级为 0
-        "subscribe_count_returned":     False,
+        # TikTok：subscribe + on_web_subscribe，缺省用 total_subscribe
+        "subscribe_count_returned":     True,
         "d1_value_returned":            False,
         # D0 Cohort 字段：DB 列已存在，展示入库值（当前值为 0）
         "d0_registrations_returned":    True,
@@ -165,37 +165,42 @@ def _build_filter(
     adset_id: Optional[str] = None,
     ad_id: Optional[str] = None,
     search_keyword: Optional[str] = None,
+    table_alias: Optional[str] = None,
 ) -> tuple[str, list]:
-    """统一 WHERE 条件构建器，所有查询必须经由此函数，不得手写 WHERE 子句。"""
-    clauses: list[str] = ["stat_date BETWEEN %s AND %s"]
+    """统一 WHERE 条件构建器，所有查询必须经由此函数，不得手写 WHERE 子句。
+
+    table_alias: 非空时为列名加前缀（如 r.），用于子查询中带别名的主表。
+    """
+    p = f"{table_alias}." if table_alias else ""
+    clauses: list[str] = [f"{p}stat_date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
 
     if media_source:
-        clauses.append("media_source = %s")
+        clauses.append(f"{p}media_source = %s")
         params.append(media_source)
     if account_id:
-        clauses.append("account_id = %s")
+        clauses.append(f"{p}account_id = %s")
         params.append(account_id)
     if country:
-        clauses.append("country = %s")
+        clauses.append(f"{p}country = %s")
         params.append(country)
     if platform:
-        clauses.append("platform = %s")
+        clauses.append(f"{p}platform = %s")
         params.append(platform)
     if campaign_id:
-        clauses.append("campaign_id = %s")
+        clauses.append(f"{p}campaign_id = %s")
         params.append(campaign_id)
     if adset_id:
-        clauses.append("adset_id = %s")
+        clauses.append(f"{p}adset_id = %s")
         params.append(adset_id)
     if ad_id:
-        clauses.append("ad_id = %s")
+        clauses.append(f"{p}ad_id = %s")
         params.append(ad_id)
     if search_keyword:
         # 对 campaign/adset/ad 名称做模糊搜索
         kw = f"%{search_keyword}%"
         clauses.append(
-            "(campaign_name LIKE %s OR adset_name LIKE %s OR ad_name LIKE %s)"
+            f"({p}campaign_name LIKE %s OR {p}adset_name LIKE %s OR {p}ad_name LIKE %s)"
         )
         params.extend([kw, kw, kw])
 
@@ -220,6 +225,9 @@ _METRICS_SELECT = """
     COALESCE(SUM(d0_purchase_value_returned), 0)   AS total_d0_purchase_value_returned,
     COALESCE(SUM(d0_subscribe_value_returned), 0)  AS total_d0_subscribe_value_returned
 """
+
+# hierarchy 外层聚合：指标来自子查询别名 x
+_METRICS_SELECT_X = _METRICS_SELECT.replace("SUM(", "SUM(x.")
 
 
 def _calc_roi(total_value: float, spend: float) -> float:
@@ -413,20 +421,64 @@ def query_hierarchy_rows(
 
     每行包含 campaign/adset/ad 各层的 id 与 name，供前端自下而上聚合构建树。
     与三次独立聚合不同，此方案保证同一批数据来源，消除父子数据守恒问题。
+
+    TikTok 等场景若回传表 adset_id 为空但 ad_id 有值，则 LEFT JOIN biz_ads /
+    biz_adgroups，用结构同步表中的 adgroup 补全层级（无需改历史行即可展示树）。
     """
-    where, params = _build_filter(start_date, end_date, **filter_kwargs)
+    _hf_kw = dict(filter_kwargs)
+    _hf_kw["table_alias"] = "r"
+    where, params = _build_filter(start_date, end_date, **_hf_kw)
     sql = f"""
         SELECT
-            COALESCE(campaign_id, '')              AS campaign_id,
-            COALESCE(ANY_VALUE(campaign_name), '') AS campaign_name,
-            COALESCE(adset_id, '')                 AS adset_id,
-            COALESCE(ANY_VALUE(adset_name), '')    AS adset_name,
-            COALESCE(ad_id, '')                    AS ad_id,
-            COALESCE(ANY_VALUE(ad_name), '')       AS ad_name,
-            {_METRICS_SELECT}
-        FROM ad_returned_conversion_daily
-        WHERE {where}
-        GROUP BY campaign_id, adset_id, ad_id
+            COALESCE(x.campaign_id, '')              AS campaign_id,
+            COALESCE(ANY_VALUE(x.campaign_name), '') AS campaign_name,
+            COALESCE(x.adset_id, '')                 AS adset_id,
+            COALESCE(ANY_VALUE(x.adset_name), '')    AS adset_name,
+            COALESCE(x.ad_id, '')                    AS ad_id,
+            COALESCE(ANY_VALUE(x.ad_name), '')       AS ad_name,
+            {_METRICS_SELECT_X}
+        FROM (
+            SELECT
+                r.campaign_id,
+                r.campaign_name,
+                COALESCE(
+                    NULLIF(TRIM(COALESCE(r.adset_id, '')), ''),
+                    NULLIF(TRIM(COALESCE(ba.adgroup_id, '')), ''),
+                    ''
+                ) AS adset_id,
+                COALESCE(
+                    NULLIF(TRIM(COALESCE(r.adset_name, '')), ''),
+                    NULLIF(TRIM(COALESCE(bg.adgroup_name, '')), ''),
+                    ''
+                ) AS adset_name,
+                r.ad_id,
+                r.ad_name,
+                r.spend,
+                r.impressions,
+                r.clicks,
+                r.installs,
+                r.registrations_returned,
+                r.purchase_value_returned,
+                r.purchase_count_returned,
+                r.subscribe_value_returned,
+                r.subscribe_count_returned,
+                r.total_value_returned,
+                r.d1_value_returned,
+                r.d0_registrations_returned,
+                r.d0_purchase_value_returned,
+                r.d0_subscribe_value_returned
+            FROM ad_returned_conversion_daily r
+            LEFT JOIN biz_ads ba
+                ON ba.platform = r.media_source
+                AND ba.ad_id = r.ad_id
+                AND COALESCE(r.ad_id, '') <> ''
+            LEFT JOIN biz_adgroups bg
+                ON bg.platform = ba.platform
+                AND bg.adgroup_id = ba.adgroup_id
+                AND COALESCE(ba.adgroup_id, '') <> ''
+            WHERE {where}
+        ) x
+        GROUP BY x.campaign_id, x.adset_id, x.ad_id
         ORDER BY total_spend DESC
     """
     with get_biz_conn() as conn:
@@ -462,6 +514,30 @@ def query_hierarchy_rows(
             "d0_subscribe_value_returned": round(float(r.get("total_d0_subscribe_value_returned") or 0), 4),
         })
     return result
+
+
+def delete_tiktok_campaign_granularity_returned_rows(
+    account_id: str, start_date: str, end_date: str,
+) -> int:
+    """
+    删除 TikTok 历史上仅在 campaign 粒度写入的回传行（ad_id 为空）。
+
+    与 Meta 对齐后 TikTok 仅在 ad 粒度写入 ad_returned_conversion_daily；
+    若库中仍保留旧 campaign 粒度行，会与 ad 行并存，导致层级聚合时 Campaign 花费被重复计入。
+    在成功拉取并写入 ad 日报后调用本函数清理同期占位行。
+    """
+    sql = """
+        DELETE FROM ad_returned_conversion_daily
+        WHERE media_source = 'tiktok'
+          AND account_id = %s
+          AND stat_date BETWEEN %s AND %s
+          AND (ad_id IS NULL OR ad_id = '')
+    """
+    with get_biz_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, (account_id or "", start_date, end_date))
+        conn.commit()
+        return int(cur.rowcount or 0)
 
 
 # ── 写入接口 ───────────────────────────────────────────────
@@ -509,10 +585,11 @@ def upsert(
       - d1_value_returned:        降级为 0（Meta Insights 无 D1 cohort 拆分）
 
     TikTok:
-      - registrations_returned:   固定为 0（安装 ≠ 注册，无 complete_registration 回传事件）
-                                  注意：complete_payment 是购买次数，绝不可用作注册数的降级值
-      - purchase_value_returned:  固定为 0（TikTok complete_payment 为次数，无金额字段）
-      - subscribe_value_returned: 固定为 0
+      - registrations_returned:   来自报表 registration 指标
+      - purchase_value_returned:  value_per_complete_payment×complete_payment 或 total_purchase_value
+      - purchase_count_returned:  complete_payment 次数
+      - subscribe_value_returned: total_subscribe_value
+      - subscribe_count_returned: subscribe + on_web_subscribe（缺省 total_subscribe）
       - d1_value_returned:        固定为 0
 
     Google:

@@ -11,8 +11,8 @@ def _get_shared_client() -> httpx.AsyncClient:
     """进程内复用的 AsyncClient，供直连完整 URL 的请求（如广告主列表）使用。"""
     global _shared_http
     if _shared_http is None:
-        _shared_http = httpx.AsyncClient(timeout=30.0, proxy=None)
-        logger.info(f"[tiktok-client] shared AsyncClient 初始化完成 (httpx={httpx.__version__}, proxy=None)")
+        _shared_http = httpx.AsyncClient(timeout=30.0)
+        logger.info(f"[tiktok-client] shared AsyncClient 初始化完成 (httpx={httpx.__version__})")
     return _shared_http
 
 
@@ -29,8 +29,8 @@ class TikTokClient:
         settings = get_settings()
         self.base_url = settings.tiktok_api_base_url
         self.access_token = access_token or settings.tiktok_access_token
-        self._client = httpx.AsyncClient(timeout=30.0, proxy=None)
-        logger.info(f"[tiktok-client] TikTokClient 初始化: base_url={self.base_url}, proxy=None")
+        self._client = httpx.AsyncClient(timeout=30.0)
+        logger.info(f"[tiktok-client] TikTokClient 初始化: base_url={self.base_url}")
 
     @property
     def _headers(self) -> dict:

@@ -381,7 +381,9 @@ export default function ReturnedConversionPage() {
   })
 
   const summary  = data?.summary
-  const avail    = data?.availability ?? DEFAULT_AVAIL
+  // 防御性合并：确保前端访问的所有 9 个 availability 字段都存在，
+  // 后端任何字段缺失（如旧版本 / 部分平台 / partial response）都不会让 UI 崩。
+  const avail: ReturnedAvailability = { ...DEFAULT_AVAIL, ...(data?.availability ?? {}) }
   // 从同一批数据构建树，保证父子守恒
   const campaigns = useMemo(
     () => buildTree(data?.rows ?? []),

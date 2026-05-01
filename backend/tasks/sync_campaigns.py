@@ -28,6 +28,7 @@ from repositories import (
 from repositories import biz_adgroup_daily_repository, biz_ad_daily_repository
 from repositories import biz_adgroup_repository, biz_ad_repository
 from services import sync_state
+from tiktok_ads.api.client import TikTokApiError
 
 
 def _date_chunks(start: str, end: str, max_days: int = 30):
@@ -86,6 +87,35 @@ async def _with_retry(coro_factory, *, attempts: int = 3, base: float = 1.0,
 #  TikTok 通用日报拉取器
 # ═══════════════════════════════════════════════════════════
 
+def _tiktok_ad_list_item_ids(a: dict) -> tuple[str, str, str]:
+    """从 ad/get 单条解析 (ad_id, campaign_id, adgroup_id)。
+
+    不同账户 / API 版本字段可能落在顶层或 creatives[0]；部分响应缺少 adgroup_id，
+    会导致回传表 adset 为空、前端无法展开广告组层级。
+    """
+    ad_id = str(
+        a.get("ad_id")
+        or a.get("advertiser_ad_id")
+        or ""
+    ).strip()
+    cid = str(a.get("campaign_id") or "").strip()
+    agid = str(
+        a.get("adgroup_id")
+        or a.get("ad_group_id")
+        or ""
+    ).strip()
+    cr = a.get("creatives")
+    if isinstance(cr, list) and cr:
+        c0 = cr[0] if isinstance(cr[0], dict) else {}
+        if not ad_id:
+            ad_id = str(c0.get("ad_id") or "").strip()
+        if not agid:
+            agid = str(c0.get("adgroup_id") or c0.get("ad_group_id") or "").strip()
+        if not cid:
+            cid = str(c0.get("campaign_id") or "").strip()
+    return ad_id, cid, agid
+
+
 async def _sync_tiktok_report_level(
     client, advertiser_id: str,
     data_level: str, id_dim: str,
@@ -101,29 +131,69 @@ async def _sync_tiktok_report_level(
     campaign_name_lookup: {campaign_id: campaign_name}
     adgroup_name_lookup: {adgroup_id: adgroup_name}
     """
-    metrics = ["spend", "impressions", "clicks", "conversion",
-               "complete_payment", "total_complete_payment_rate",
-               "registration"]       # App 内注册数（注册优化目标 / 次级转化事件）
+    metrics_core = [
+        "spend", "impressions", "clicks", "conversion",
+        "complete_payment", "total_complete_payment_rate",
+        "registration",
+    ]
+    metrics_extended = metrics_core + [
+        "value_per_complete_payment", "total_purchase_value",
+        "subscribe", "on_web_subscribe", "total_subscribe", "total_subscribe_value",
+    ]
+    current_metrics = list(metrics_extended)
+    metrics_dropped_extended = False
     all_rows: list[dict] = []
     parent_lookup = parent_lookup or {}
     campaign_name_lookup = campaign_name_lookup or {}
     adgroup_name_lookup = adgroup_name_lookup or {}
 
+    # AUCTION_AD：在 dimensions 中同时带上 campaign_id / adgroup_id / ad_id，
+    # 避免仅依赖 ad/get 的 parent_lookup（部分响应缺 adgroup_id 时报表行 adset 全空）。
+    use_ad_multi_dim = data_level == "AUCTION_AD" and id_dim == "ad_id"
+    dim_multi = (
+        ["campaign_id", "adgroup_id", "ad_id", "stat_time_day"] if use_ad_multi_dim else None
+    )
+    dim_simple = [id_dim, "stat_time_day"]
+
     for chunk_start, chunk_end in _date_chunks(start_date, end_date, max_days=30):
+        dim_list = list(dim_multi) if dim_multi else list(dim_simple)
+        dim_fallback_used = False
         page = 1
         while True:
             params = {
                 "advertiser_id": advertiser_id,
                 "report_type": "BASIC",
                 "data_level": data_level,
-                "dimensions": json.dumps([id_dim, "stat_time_day"]),
-                "metrics": json.dumps(metrics),
+                "dimensions": json.dumps(dim_list),
+                "metrics": json.dumps(current_metrics),
                 "start_date": chunk_start,
                 "end_date": chunk_end,
                 "page": page,
                 "page_size": 200,
             }
-            resp = await client.get("report/integrated/get/", params)
+            try:
+                resp = await client.get("report/integrated/get/", params)
+            except TikTokApiError as e:
+                if use_ad_multi_dim and not dim_fallback_used:
+                    logger.warning(
+                        f"[TikTok] report/integrated/get 多维度广告报表失败 "
+                        f"advertiser={advertiser_id} dims={dim_list}: {e}；回退为 {dim_simple}"
+                    )
+                    dim_list = list(dim_simple)
+                    dim_fallback_used = True
+                    continue
+                if (
+                    not metrics_dropped_extended
+                    and current_metrics != metrics_core
+                ):
+                    logger.warning(
+                        f"[TikTok] report/integrated/get 扩展指标被拒绝 "
+                        f"advertiser={advertiser_id}: {e}；回退为核心指标 {metrics_core}"
+                    )
+                    current_metrics = list(metrics_core)
+                    metrics_dropped_extended = True
+                    continue
+                raise
             items = resp.get("list", [])
             if not items:
                 break
@@ -163,9 +233,19 @@ async def _sync_tiktok_report_level(
                 elif data_level == "AUCTION_AD":
                     row["ad_id"] = entity_id
                     row["ad_name"] = name_lookup.get(entity_id, "")
-                    parent = parent_lookup.get(entity_id, {})
-                    cid = parent.get("campaign_id", "")
-                    agid = parent.get("adgroup_id", "")
+                    cid = str(
+                        dims.get("campaign_id") or dims.get("campaignId") or ""
+                    ).strip()
+                    agid = str(
+                        dims.get("adgroup_id")
+                        or dims.get("ad_group_id")
+                        or dims.get("adGroupId")
+                        or ""
+                    ).strip()
+                    if not cid or not agid:
+                        parent = parent_lookup.get(entity_id, {})
+                        cid = cid or str(parent.get("campaign_id", "") or "").strip()
+                        agid = agid or str(parent.get("adgroup_id", "") or "").strip()
                     row["campaign_id"] = cid
                     row["campaign_name"] = campaign_name_lookup.get(cid, "")
                     row["adgroup_id"] = agid
@@ -231,8 +311,7 @@ async def sync_tiktok_campaigns(advertiser_id: str,
 
     campaign_map = {str(c.get("campaign_id")): c.get("campaign_name", "") for c in all_campaigns}
 
-    # 2) Campaign 日报
-    from repositories import returned_conversion_repository
+    # 2) Campaign 日报（仅写入 biz 日报表；回传口径表与 Meta 一致，只在 **Ad 粒度** 写入，避免层级 SUM 膨胀且保证前端树形层级可展开）
     log_id = biz_sync_log_repository.create(task_name="sync_tiktok_campaign_daily", platform="tiktok", account_id=advertiser_id, sync_date=start_date)
     try:
         report_rows = await _with_retry(
@@ -244,13 +323,6 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         affected = biz_daily_report_repository.upsert_batch(report_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"campaign 日报 {len(report_rows)} 条")
         logger.info(f"[TikTok] campaign 日报同步完成: {len(report_rows)} 条")
-        # 同步写入回传口径表（registrations_returned 固定为 0，TikTok 无 registration 字段）
-        for r in report_rows:
-            ret = _tiktok_row_to_returned_row(r, advertiser_id)
-            try:
-                returned_conversion_repository.upsert(**ret)
-            except Exception as e_ret:
-                logger.warning(f"[TikTok] returned_conversion upsert(campaign) 失败: {_fmt_err(e_ret)}")
     except Exception as e:
         err = _fmt_err(e)
         biz_sync_log_repository.finish(log_id, status="failed", message=err)
@@ -336,16 +408,22 @@ async def sync_tiktok_campaigns(advertiser_id: str,
                 break
             page += 1
 
-        ad_db_rows = [{
-            "platform": "tiktok", "account_id": advertiser_id,
-            "campaign_id": str(a.get("campaign_id", "")),
-            "adgroup_id": str(a.get("adgroup_id", "")),
-            "ad_id": str(a.get("ad_id", "")),
-            "ad_name": a.get("ad_name", ""),
-            "status": a.get("operation_status", a.get("status", "")),
-            "is_active": a.get("operation_status") == "ENABLE",
-            "raw_json": a,
-        } for a in all_ads]
+        ad_db_rows = []
+        for a in all_ads:
+            aid, cid, agid = _tiktok_ad_list_item_ids(a)
+            if not aid:
+                continue
+            nm = a.get("ad_name") or a.get("advertiser_ad_name") or ""
+            ad_db_rows.append({
+                "platform": "tiktok", "account_id": advertiser_id,
+                "campaign_id": cid,
+                "adgroup_id": agid,
+                "ad_id": aid,
+                "ad_name": nm,
+                "status": a.get("operation_status", a.get("status", "")),
+                "is_active": a.get("operation_status") == "ENABLE",
+                "raw_json": a,
+            })
         affected = biz_ad_repository.upsert_batch(ad_db_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"同步 {len(ad_db_rows)} 个 ad")
         logger.info(f"[TikTok] ad 列表同步完成: {len(ad_db_rows)} 个")
@@ -355,11 +433,14 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         logger.error(f"[TikTok] ad 列表同步失败: {err}")
         sync_state.set_error("structure", f"[TikTok] {advertiser_id} ads: {err}")
 
-    ad_name_map = {str(a.get("ad_id")): a.get("ad_name", "") for a in all_ads}
-    ad_parent_map = {str(a.get("ad_id")): {
-        "campaign_id": str(a.get("campaign_id", "")),
-        "adgroup_id": str(a.get("adgroup_id", "")),
-    } for a in all_ads}
+    ad_name_map: dict[str, str] = {}
+    ad_parent_map: dict[str, dict] = {}
+    for a in all_ads:
+        aid, cid, agid = _tiktok_ad_list_item_ids(a)
+        if not aid:
+            continue
+        ad_name_map[aid] = str(a.get("ad_name") or a.get("advertiser_ad_name") or "")
+        ad_parent_map[aid] = {"campaign_id": cid, "adgroup_id": agid}
 
     # 6) Ad 日报
     log_id = biz_sync_log_repository.create(task_name="sync_tiktok_ad_daily", platform="tiktok", account_id=advertiser_id, sync_date=start_date)
@@ -376,14 +457,32 @@ async def sync_tiktok_campaigns(advertiser_id: str,
         affected = biz_ad_daily_repository.upsert_batch(ad_rows)
         biz_sync_log_repository.finish(log_id, status="success", rows_affected=affected, message=f"ad 日报 {len(ad_rows)} 条")
         logger.info(f"[TikTok] ad 日报同步完成: {len(ad_rows)} 条")
+        from repositories import returned_conversion_repository
+        for r in ad_rows:
+            ret = _tiktok_row_to_returned_row(r, advertiser_id)
+            try:
+                returned_conversion_repository.upsert(**ret)
+            except Exception as e_ret:
+                logger.warning(f"[TikTok] returned_conversion upsert(ad) 失败: {_fmt_err(e_ret)}")
+        if ad_rows:
+            try:
+                n = returned_conversion_repository.delete_tiktok_campaign_granularity_returned_rows(
+                    advertiser_id, start_date, end_date,
+                )
+                if n:
+                    logger.info(f"[TikTok] 清理历史 campaign 粒度回传行 {n} 条（同期已有 ad 粒度数据）")
+            except Exception as e_del:
+                logger.warning(f"[TikTok] 清理 campaign 粒度回传行失败: {_fmt_err(e_del)}")
         # 日报模块完成标记（TikTok Ad 日报为最后一步）
         sync_state.set_done("reports")
         sync_state.set_done("structure")
+        sync_state.set_done("returned")
     except Exception as e:
         err = _fmt_err(e)
         biz_sync_log_repository.finish(log_id, status="failed", message=err)
         logger.error(f"[TikTok] ad 日报同步失败: {err}")
         sync_state.set_error("reports", f"[TikTok] {advertiser_id} ad 日报: {err}")
+        sync_state.set_error("returned", f"[TikTok] {advertiser_id} ad 日报: {err}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -581,20 +680,42 @@ def _meta_insight_to_returned_row(item: dict, ad_account_id: str, level: str) ->
     return returned
 
 
+def _tiktok_report_metrics(row: dict) -> dict:
+    """从日报行的 raw_json 中取 TikTok report/integrated/get 的 metrics 字典。"""
+    payload = row.get("raw_json")
+    if isinstance(payload, dict):
+        m = payload.get("metrics")
+        if isinstance(m, dict):
+            return m
+    return {}
+
+
 def _tiktok_row_to_returned_row(row: dict, advertiser_id: str) -> dict:
     """
     将 TikTok 日报行映射到 ad_returned_conversion_daily 回传口径行。
 
     字段映射说明（对应 PLATFORM_FIELD_SUPPORT["tiktok"]）：
-    - registrations_returned:   固定为 0
-                                TikTok conversion 是安装类事件，安装 ≠ 注册，
-                                complete_payment 是购买次数而非注册，均不可用作降级值。
-    - purchase_value_returned:  固定为 0（TikTok complete_payment 为次数，无金额字段）
-    - purchase_count_returned:  TikTok complete_payment（购买次数），即内购数
-    - subscribe_value_returned: 固定为 0
-    - subscribe_count_returned: 固定为 0（TikTok 无明确订阅事件回传）
+    - registrations_returned:   registration 指标（App 内注册等）
+    - purchase_count_returned:  complete_payment（完成支付次数）
+    - purchase_value_returned:  优先 value_per_complete_payment × complete_payment；
+                                否则用 total_purchase_value（按计费时间口径，可能非零）
+    - subscribe_count_returned: subscribe + on_web_subscribe；若均为 0 则用 total_subscribe
+    - subscribe_value_returned: total_subscribe_value（无则 0）
     - d1_value_returned:        固定为 0
     """
+    m = _tiktok_report_metrics(row)
+    cp_cnt = int(float(m.get("complete_payment", 0) or 0))
+    vpc = float(m.get("value_per_complete_payment", 0) or 0)
+    if cp_cnt > 0 and vpc > 0:
+        purchase_value = round(cp_cnt * vpc, 4)
+    else:
+        purchase_value = round(float(m.get("total_purchase_value", 0) or 0), 4)
+
+    sub_cnt = int(m.get("subscribe", 0) or 0) + int(m.get("on_web_subscribe", 0) or 0)
+    if sub_cnt <= 0:
+        sub_cnt = int(m.get("total_subscribe", 0) or 0)
+    sub_val = round(float(m.get("total_subscribe_value", 0) or 0), 4)
+
     return {
         "stat_date":                row.get("stat_date", ""),
         "media_source":             "tiktok",
@@ -611,17 +732,12 @@ def _tiktok_row_to_returned_row(row: dict, advertiser_id: str) -> dict:
         "clicks":                   int(row.get("clicks", 0) or 0),
         "installs":                 int(row.get("installs", 0) or 0),
         "spend":                    float(row.get("spend", 0) or 0),
-        # TikTok 支持：registration（App 内注册）+ on_web_register（落地页注册）之和
-        # 在注册优化目标 / 次级转化配置下有值，安装优化目标下通常为 0
         "registrations_returned":   int(row.get("registrations", 0) or 0),
-        # TikTok 不支持：无购买金额字段，固定 0
-        "purchase_value_returned":     0.0,
-        # TikTok complete_payment 为购买次数，可作为内购数
+        "purchase_value_returned":     float(purchase_value),
         "purchase_count_returned":     int(row.get("purchase_count", 0) or 0),
-        "subscribe_value_returned":    0.0,
-        "subscribe_count_returned":    0,
+        "subscribe_value_returned":    float(sub_val),
+        "subscribe_count_returned":    int(sub_cnt),
         "d1_value_returned":           0.0,
-        # D0 Cohort：TikTok 当前不支持，固定 0
         "d0_registrations_returned":   0,
         "d0_purchase_value_returned":  0.0,
         "d0_subscribe_value_returned": 0.0,

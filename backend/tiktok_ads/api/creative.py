@@ -136,9 +136,9 @@ class CreativeService:
             f"md5={video_sig}, upload_type=UPLOAD_BY_FILE, url={url}"
         )
 
-        async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT, proxy=None) as http:
+        async with httpx.AsyncClient(timeout=_UPLOAD_TIMEOUT) as http:
             logger.info(
-                f"[tiktok-upload] AsyncClient 已创建 (httpx={httpx.__version__}, proxy=None, "
+                f"[tiktok-upload] AsyncClient 已创建 (httpx={httpx.__version__}, "
                 f"timeout=read:{_UPLOAD_TIMEOUT.read}s), 即将发送 multipart/form-data"
             )
             with open(file_path, "rb") as f:
