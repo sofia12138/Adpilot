@@ -18,6 +18,7 @@ venv/
 # 本地用户/日志（可能含敏感信息）
 backend/users.json
 backend/oplog.json
+backend/_diag_spend_out.txt
 
 # 前端
 frontend/node_modules/
