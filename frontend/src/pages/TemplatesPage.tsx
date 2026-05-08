@@ -42,6 +42,7 @@ const BUILTIN_IDS = new Set([
   'tpl_meta_us_aeo',
   'tpl_meta_web_to_app_basic_abo',
   'tpl_meta_web_to_app_conv_abo',
+  'tpl_meta_web_to_app_conv_cbo',
 ])
 
 function isBuiltin(t: Template): boolean {
@@ -49,9 +50,12 @@ function isBuiltin(t: Template): boolean {
 }
 
 function isMetaW2aConv(t: Template): boolean {
-  return t.platform === 'meta'
-    && t.template_type === 'web_to_app'
-    && t.template_subtype === 'conversion'
+  if (t.platform !== 'meta') return false
+  // ABO（含基础 W2A）
+  if (t.template_type === 'web_to_app' && t.template_subtype === 'conversion') return true
+  // CBO（W2A Conversion CBO）
+  if (t.template_type === 'web_to_app_conversion_cbo') return true
+  return false
 }
 
 function isSystemMaster(t: Template): boolean {
@@ -214,16 +218,20 @@ function templateToEditState(t: Template): W2aEditState {
   }
 }
 
-function editStateToBody(s: W2aEditState): Record<string, unknown> {
+function editStateToBody(s: W2aEditState, source?: Template | null): Record<string, unknown> {
   const dl = normalizeTemplateDeliveryLanguages({
     delivery_languages: s.deliveryLanguages,
     default_delivery_language: s.defaultDeliveryLanguage,
   })
+  // 保留源模板的 template_type / subtype，避免 CBO 副本被静默降级为 ABO
+  const tplType = (source?.template_type as string) || 'web_to_app'
+  const tplSubtype = (source?.template_subtype as string)
+    || (tplType === 'web_to_app_conversion_cbo' ? 'conversion_cbo' : 'conversion')
   return {
     name: s.name,
     platform: 'meta',
-    template_type: 'web_to_app',
-    template_subtype: 'conversion',
+    template_type: tplType,
+    template_subtype: tplSubtype,
     default_ad_account_id: s.adAccountId || undefined,
     notes: s.notes || undefined,
     delivery_languages: dl.delivery_languages,
@@ -385,7 +393,7 @@ export default function TemplatesPage() {
 
   function handleSave() {
     if (!w2aEdit || !currentTpl || !w2aEdit.name.trim()) return
-    const body = editStateToBody(w2aEdit)
+    const body = editStateToBody(w2aEdit, currentTpl)
     updateMutation.mutate({ tplId: currentTpl.id, body }, { onSuccess: goBack })
   }
 
