@@ -11,6 +11,10 @@ export interface Template {
   is_editable?: boolean
   template_key?: string | null
   parent_template_id?: string | null
+  /** 模板允许的投放语种白名单（强制开启平台语言定向），后端兜底为 ['en'] */
+  delivery_languages?: string[]
+  /** 默认投放语种，必须在 delivery_languages 中 */
+  default_delivery_language?: string
   created_at: string
   updated_at: string
   [key: string]: unknown

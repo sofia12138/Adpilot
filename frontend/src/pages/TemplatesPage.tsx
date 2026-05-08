@@ -24,6 +24,13 @@ import {
   fetchMetaPages, fetchMetaPixels,
   type MetaPageOption, type MetaPixelOption,
 } from '@/services/meta-assets'
+import {
+  DELIVERY_LANGUAGE_OPTIONS,
+  DEFAULT_DELIVERY_LANGUAGES,
+  DEFAULT_DELIVERY_LANGUAGE,
+  deliveryLanguageLabel,
+  normalizeTemplateDeliveryLanguages,
+} from '@/constants/deliveryLanguages'
 
 /* ═══════════════════════════════════════════════════
    内置模板 ID 集合 — 前端判断是否为母版
@@ -154,6 +161,9 @@ interface W2aEditState {
   region_group_id?: number
   region_group_name?: string
   country_codes_snapshot?: string[]
+  // 投放语种（强制开启平台语言定向）
+  deliveryLanguages: string[]
+  defaultDeliveryLanguage: string
 }
 
 function templateToEditState(t: Template): W2aEditState {
@@ -163,6 +173,10 @@ function templateToEditState(t: Template): W2aEditState {
   const targeting = (adset.targeting ?? {}) as Record<string, unknown>
   const geoLocations = (targeting.geo_locations ?? {}) as Record<string, unknown>
   const po = (adset.promoted_object ?? {}) as Record<string, unknown>
+  const dl = normalizeTemplateDeliveryLanguages({
+    delivery_languages: t.delivery_languages,
+    default_delivery_language: t.default_delivery_language,
+  })
 
   return {
     name: t.name || '',
@@ -195,10 +209,16 @@ function templateToEditState(t: Template): W2aEditState {
     region_group_id: t.region_group_id as number | undefined,
     region_group_name: t.region_group_name as string | undefined,
     country_codes_snapshot: t.country_codes_snapshot as string[] | undefined,
+    deliveryLanguages: dl.delivery_languages,
+    defaultDeliveryLanguage: dl.default_delivery_language,
   }
 }
 
 function editStateToBody(s: W2aEditState): Record<string, unknown> {
+  const dl = normalizeTemplateDeliveryLanguages({
+    delivery_languages: s.deliveryLanguages,
+    default_delivery_language: s.defaultDeliveryLanguage,
+  })
   return {
     name: s.name,
     platform: 'meta',
@@ -206,6 +226,8 @@ function editStateToBody(s: W2aEditState): Record<string, unknown> {
     template_subtype: 'conversion',
     default_ad_account_id: s.adAccountId || undefined,
     notes: s.notes || undefined,
+    delivery_languages: dl.delivery_languages,
+    default_delivery_language: dl.default_delivery_language,
     landing_page_asset_id: s.landing_page_asset_id || undefined,
     landing_page_asset_name: s.landing_page_asset_name || undefined,
     landing_page_url_snapshot: s.landing_page_url_snapshot || undefined,
@@ -531,6 +553,15 @@ export default function TemplatesPage() {
                 </p>
               )}
             </div>
+
+            <DeliveryLanguageEditor
+              readonly={readonly}
+              languages={w2aEdit.deliveryLanguages}
+              defaultLanguage={w2aEdit.defaultDeliveryLanguage}
+              onChange={(langs, defLang) => setW2aEdit(prev => prev ? {
+                ...prev, deliveryLanguages: langs, defaultDeliveryLanguage: defLang,
+              } : prev)}
+            />
 
             <div className="grid grid-cols-3 gap-4">
               <div>
@@ -893,6 +924,10 @@ function SystemTemplatePreviewDialog({ tpl, onClose, onClone, onLaunch }: System
   for (const [k, v] of Object.entries(tpl)) {
     if (!reserved.has(k)) content[k] = v
   }
+  const previewDl = normalizeTemplateDeliveryLanguages({
+    delivery_languages: tpl.delivery_languages,
+    default_delivery_language: tpl.default_delivery_language,
+  })
   // 友好预览：投放地区与默认 identity（仅 TikTok Minis 模板有意义）
   const defaults = (tpl.defaults as Record<string, unknown> | undefined) ?? {}
   const selection = defaults.location_selection as { country_codes?: string[]; group_key?: string | null } | undefined
@@ -956,6 +991,25 @@ function SystemTemplatePreviewDialog({ tpl, onClose, onClone, onLaunch }: System
               )}
             </div>
           )}
+          <div className="p-3 border border-gray-200 rounded-xl bg-white">
+            <div className="text-[11px] text-gray-400 mb-1.5">投放语种（强制启用平台语言定向）</div>
+            <div className="flex flex-wrap gap-1.5">
+              {previewDl.delivery_languages.map(code => (
+                <span
+                  key={code}
+                  className={`inline-block px-2 py-0.5 rounded-md text-xs font-medium ${
+                    code === previewDl.default_delivery_language
+                      ? 'bg-blue-100 text-blue-700 border border-blue-200'
+                      : 'bg-blue-50 text-blue-600'
+                  }`}
+                  title={code === previewDl.default_delivery_language ? '默认语种' : undefined}
+                >
+                  {deliveryLanguageLabel(code)}
+                  {code === previewDl.default_delivery_language ? ' · 默认' : ''}
+                </span>
+              ))}
+            </div>
+          </div>
           <pre className="text-xs bg-gray-50 border border-gray-200 rounded-xl p-4 overflow-auto whitespace-pre-wrap break-all text-gray-700">
             {JSON.stringify(content, null, 2)}
           </pre>
@@ -1021,6 +1075,92 @@ function CloneDialog({ name, setName, notes, setNotes, onSubmit, onClose, isPend
             </div>
           </>
         )}
+      </div>
+    </div>
+  )
+}
+
+/* ═══════════════════════════════════════════════════
+   投放语种编辑器（在模板编辑/查看视图复用）
+   ═══════════════════════════════════════════════════ */
+interface DeliveryLanguageEditorProps {
+  readonly: boolean
+  languages: string[]
+  defaultLanguage: string
+  onChange: (languages: string[], defaultLanguage: string) => void
+}
+
+function DeliveryLanguageEditor({ readonly, languages, defaultLanguage, onChange }: DeliveryLanguageEditorProps) {
+  const safeLangs = languages.length > 0 ? languages : [...DEFAULT_DELIVERY_LANGUAGES]
+  const safeDefault = safeLangs.includes(defaultLanguage) ? defaultLanguage : (safeLangs[0] || DEFAULT_DELIVERY_LANGUAGE)
+
+  function toggle(code: string) {
+    const has = safeLangs.includes(code)
+    let next: string[]
+    if (has) {
+      // 至少保留 1 项
+      if (safeLangs.length <= 1) return
+      next = safeLangs.filter(c => c !== code)
+    } else {
+      next = [...safeLangs, code]
+    }
+    const nextDefault = next.includes(safeDefault) ? safeDefault : next[0]
+    onChange(next, nextDefault)
+  }
+  function changeDefault(code: string) {
+    if (!safeLangs.includes(code)) return
+    onChange(safeLangs, code)
+  }
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between mb-1">
+        <label className="block text-xs font-medium text-gray-600">
+          投放语种 <span className="text-red-400">*</span>
+        </label>
+        <span className="text-[11px] text-gray-400">至少 1 项 · 默认语种必须在勾选范围内</span>
+      </div>
+      <p className="text-[11px] text-gray-400 mb-2">
+        创建广告时可在允许范围内选择本次投放语种，平台将强制按所选语种定向人群。
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 p-2 border border-gray-200 rounded-xl bg-gray-50/40">
+        {DELIVERY_LANGUAGE_OPTIONS.map(opt => {
+          const checked = safeLangs.includes(opt.code)
+          const isDefault = checked && opt.code === safeDefault
+          return (
+            <label
+              key={opt.code}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-xs cursor-pointer select-none transition ${
+                checked ? 'bg-white border border-blue-200' : 'bg-transparent border border-transparent hover:border-gray-200'
+              } ${readonly ? 'cursor-default' : ''}`}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={readonly}
+                onChange={() => toggle(opt.code)}
+                className="accent-blue-500"
+              />
+              <span className={`${checked ? 'text-gray-700' : 'text-gray-500'} truncate`}>{opt.label}</span>
+              {isDefault && (
+                <span className="ml-auto inline-block px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 text-[10px]">默认</span>
+              )}
+            </label>
+          )
+        })}
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <label className="text-xs text-gray-600 shrink-0">默认语种</label>
+        <select
+          value={safeDefault}
+          disabled={readonly}
+          onChange={e => changeDefault(e.target.value)}
+          className={`${inputCls} bg-white max-w-xs ${readonly ? '!bg-gray-50 text-gray-500' : ''}`}
+        >
+          {safeLangs.map(code => (
+            <option key={code} value={code}>{deliveryLanguageLabel(code)}</option>
+          ))}
+        </select>
       </div>
     </div>
   )
