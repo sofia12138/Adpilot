@@ -1384,6 +1384,48 @@ def _migrate_app_templates_columns(cur):
                 pass
 
 
+def _migrate_cbo_template_type_recovery(cur):
+    """修复历史 bug：CBO 副本 template_type 被前端硬编码降级为 'web_to_app'（幂等）。
+
+    判定降级证据 + 修复条件（必须同时满足，避免误伤正常 ABO 副本）：
+      1. parent_template_id = 'tpl_meta_web_to_app_conv_cbo'（来源是 CBO 母版）
+      2. content.template_type 当前 = 'web_to_app'（被改坏的特征）
+
+    修复动作：
+      - content.template_type    → 'web_to_app_conversion_cbo'
+      - content.template_subtype → 'conversion_cbo'
+
+    本迁移只动「来源 = CBO 母版」的副本，不会影响 ABO 母版的副本。
+    """
+    cur.execute(
+        "SELECT id, content FROM app_templates "
+        "WHERE parent_template_id = 'tpl_meta_web_to_app_conv_cbo'"
+    )
+    rows = cur.fetchall() or []
+    if not rows:
+        return
+    patched = 0
+    for r in rows:
+        raw = r.get("content")
+        try:
+            c = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            continue
+        if not isinstance(c, dict):
+            continue
+        if c.get("template_type") != "web_to_app":
+            continue  # 已正确 / 不在修复范围
+        c["template_type"] = "web_to_app_conversion_cbo"
+        c["template_subtype"] = "conversion_cbo"
+        cur.execute(
+            "UPDATE app_templates SET content = %s WHERE id = %s",
+            (json.dumps(c, ensure_ascii=False), r["id"]),
+        )
+        patched += 1
+    if patched:
+        logger.info(f"CBO 模板 template_type 降级修复: 已恢复 {patched} 条副本为 CBO 类型")
+
+
 def _migrate_app_templates_delivery_language(cur):
     """为所有 app_templates 行的 content 补齐 delivery_languages / default_delivery_language（幂等）。
 
@@ -1510,6 +1552,8 @@ def _migrate_templates(cur, conn):
 
     # 在内置母版同步之后再补齐用户自建/历史模板的 delivery_languages 字段
     _migrate_app_templates_delivery_language(cur)
+    # 修复历史 bug：把被前端硬编码降级为 'web_to_app' 的 CBO 副本拉回 CBO
+    _migrate_cbo_template_type_recovery(cur)
     conn.commit()
 
 

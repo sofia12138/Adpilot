@@ -68,6 +68,18 @@ def update_template(tpl_id: str, data: dict) -> Optional[dict]:
     for k in ("is_system", "is_editable", "template_key",
               "parent_template_id", "is_builtin"):
         data.pop(k, None)
+    # ── CBO 防降级守卫 ────────────────────────────────────
+    # 历史 bug：前端 TemplatesPage 的 editStateToBody 曾把 template_type 硬编码为
+    # 'web_to_app'，导致 CBO 副本一旦被编辑保存就被静默降级为 ABO，投放时走错分支。
+    # 后端在此层兜底：若原模板是 CBO，禁止把 template_type 改为非 CBO。
+    old_type = (existing.get("template_type") or "").strip()
+    new_type_raw = data.get("template_type")
+    if isinstance(new_type_raw, str) and new_type_raw.strip():
+        new_type = new_type_raw.strip()
+        if old_type == "web_to_app_conversion_cbo" and new_type != "web_to_app_conversion_cbo":
+            raise ValueError(
+                "CBO 模板的 template_type 不可改为非 CBO（原值 web_to_app_conversion_cbo）"
+            )
     content = {k: v for k, v in data.items() if k not in _RESERVED_KEYS}
     if not content:
         existing_content = {k: v for k, v in existing.items() if k not in _RESERVED_KEYS}
