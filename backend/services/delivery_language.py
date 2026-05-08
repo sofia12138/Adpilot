@@ -43,26 +43,30 @@ SUPPORTED_LANGUAGE_LABELS: dict[str, str] = {
 }
 
 
-# ── Meta：locales 为整数 ID 列表（来自 Facebook /search?type=adlocale） ──
-# 一种语种可由多组 locale 共同覆盖；下列 ID 为 Meta 公开文档与广告主长期沿用的常见值，
-# 上线后如发现 Graph 报 "Invalid locale id"，请在 ops 侧用最新 /search?type=adlocale 替换。
+# ── Meta：locales 为整数 ID 列表 ──
+# ID 由 Facebook Graph /search?type=adlocale 实时返回，下列值已用 META_ACCESS_TOKEN
+# 在生产环境拉取并核对（v22.0，2026-05-08）。一旦 Graph 报 "Invalid locale id"，
+# 请重新调用 /search?type=adlocale 校准。
+#
+# ⚠️ 切勿凭印象修改这些 ID：错位会导致广告投放到完全不同的语种（例如 nl=13 实际是
+# 「挪威语 nb_NO」而非「荷兰语 nl_NL」）。增减语种时也务必先用 Graph API 验证。
 META_LOCALES: dict[str, list[int]] = {
-    "en":      [6, 24],         # 6=en_US, 24=en_GB
-    "es":      [7, 23],         # 7=es_ES, 23=es_LA
-    "pt":      [19, 20],        # 19=pt_BR, 20=pt_PT
-    "fr":      [8, 9],          # 8=fr_FR, 9=fr_CA
-    "de":      [5],             # 5=de_DE
-    "it":      [11],            # 11=it_IT
-    "nl":      [13],            # 13=nl_NL
-    "ru":      [25],            # 25=ru_RU
-    "ar":      [3],             # 3=ar_AR
-    "ja":      [27],            # 27=ja_JP
-    "ko":      [29],            # 29=ko_KR
-    "id":      [12],            # 12=id_ID
-    "th":      [4],             # 4=th_TH
-    "vi":      [22],            # 22=vi_VN
-    "zh-Hant": [32, 33],        # 32=zh_TW, 33=zh_HK
-    "zh-Hans": [31],            # 31=zh_CN
+    "en":      [6, 24],         # 6=英语(美国), 24=英语(英国)
+    "es":      [7, 23],         # 7=西班牙语(西班牙), 23=西班牙语(默认/拉美)
+    "pt":      [16, 31],        # 16=葡萄牙语(巴西), 31=葡萄牙语(葡萄牙)
+    "fr":      [9, 44],         # 9=法语(法国), 44=法语(加拿大)
+    "de":      [5],             # 5=德语
+    "it":      [10],            # 10=意大利语
+    "nl":      [14],            # 14=荷兰语
+    "ru":      [17],            # 17=俄语
+    "ar":      [28],            # 28=阿拉伯语
+    "ja":      [11],            # 11=日语
+    "ko":      [12],            # 12=韩语
+    "id":      [25],            # 25=印度尼西亚语
+    "th":      [35],            # 35=泰语
+    "vi":      [27],            # 27=越南语
+    "zh-Hant": [22, 21],        # 22=繁体中文(台湾), 21=繁体中文(香港)
+    "zh-Hans": [20],            # 20=简体中文(中国)
 }
 
 
