@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Optional
 
 from repositories import template_repository
+from services.delivery_language import normalize_template_languages
 
 # 行级保留字段（不应进入 content JSON）
 _RESERVED_KEYS = {
@@ -39,6 +40,7 @@ def create_template(data: dict, created_by: str = "") -> dict:
     data.pop("is_builtin", None)
     created_at = datetime.now().isoformat()
     content = {k: v for k, v in data.items() if k not in _RESERVED_KEYS}
+    normalize_template_languages(content)
     return template_repository.create(
         tpl_id=tpl_id,
         name=name,
@@ -70,6 +72,7 @@ def update_template(tpl_id: str, data: dict) -> Optional[dict]:
     if not content:
         existing_content = {k: v for k, v in existing.items() if k not in _RESERVED_KEYS}
         content = existing_content
+    normalize_template_languages(content)
     return template_repository.update(tpl_id, name=name, platform=platform, content=content)
 
 

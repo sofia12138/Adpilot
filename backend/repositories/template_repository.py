@@ -5,6 +5,10 @@ import json
 from typing import Optional
 
 from db import get_app_conn
+from services.delivery_language import (
+    DEFAULT_DELIVERY_LANGUAGE,
+    DEFAULT_DELIVERY_LANGUAGES,
+)
 
 
 def _row_to_dict(row: dict) -> dict:
@@ -31,6 +35,15 @@ def _row_to_dict(row: dict) -> dict:
     for k, v in content.items():
         if k not in reserved:
             result[k] = v
+    # 兜底：旧记录没有 delivery_languages / default_delivery_language 时给默认值
+    langs = result.get("delivery_languages")
+    if not isinstance(langs, list) or not langs:
+        result["delivery_languages"] = list(DEFAULT_DELIVERY_LANGUAGES)
+    default_lang = result.get("default_delivery_language")
+    if not isinstance(default_lang, str) or default_lang not in result["delivery_languages"]:
+        result["default_delivery_language"] = (
+            result["delivery_languages"][0] if result["delivery_languages"] else DEFAULT_DELIVERY_LANGUAGE
+        )
     return result
 
 

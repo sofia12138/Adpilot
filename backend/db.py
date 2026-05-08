@@ -1384,6 +1384,45 @@ def _migrate_app_templates_columns(cur):
                 pass
 
 
+def _migrate_app_templates_delivery_language(cur):
+    """为所有 app_templates 行的 content 补齐 delivery_languages / default_delivery_language（幂等）。
+
+    旧记录默认 ["en"] / "en"；不影响已有字段。
+    """
+    cur.execute("SELECT id, content FROM app_templates")
+    rows = cur.fetchall() or []
+    patched = 0
+    for r in rows:
+        raw = r.get("content")
+        try:
+            c = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            c = {}
+        if not isinstance(c, dict):
+            continue
+        langs = c.get("delivery_languages")
+        default_lang = c.get("default_delivery_language")
+        valid_langs = (
+            isinstance(langs, list) and bool(langs)
+            and all(isinstance(x, str) and x.strip() for x in langs)
+        )
+        if not valid_langs:
+            c["delivery_languages"] = ["en"]
+            valid_langs = True
+        if not isinstance(default_lang, str) or default_lang not in c["delivery_languages"]:
+            c["default_delivery_language"] = c["delivery_languages"][0]
+        if (langs == c.get("delivery_languages")
+                and default_lang == c.get("default_delivery_language")):
+            continue
+        cur.execute(
+            "UPDATE app_templates SET content = %s WHERE id = %s",
+            (json.dumps(c, ensure_ascii=False), r["id"]),
+        )
+        patched += 1
+    if patched:
+        logger.info(f"投放语种字段迁移: 已补齐 {patched} 条模板 content")
+
+
 def _migrate_templates(cur, conn):
     from routes.templates import BUILTIN_TEMPLATES
 
@@ -1468,6 +1507,10 @@ def _migrate_templates(cur, conn):
     if inserted or updated:
         conn.commit()
         logger.info(f"模板同步完成: 新增 {inserted}, 更新 {updated} 个内置模板到 APP.app_templates")
+
+    # 在内置母版同步之后再补齐用户自建/历史模板的 delivery_languages 字段
+    _migrate_app_templates_delivery_language(cur)
+    conn.commit()
 
 
 def _migrate_oplog(cur, conn):

@@ -11,6 +11,14 @@ from meta_ads.api.campaigns import MetaCampaignService
 from meta_ads.api.adsets import MetaAdSetService
 from meta_ads.api.ads import MetaAdService
 from services import template_service
+from services.delivery_language import (
+    DEFAULT_DELIVERY_LANGUAGE,
+    DEFAULT_DELIVERY_LANGUAGES,
+    DeliveryLanguageError,
+    resolve_meta_locales,
+    resolve_tiktok_languages,
+    validate_selected as _validate_delivery_language,
+)
 from services.oplog_service import log_operation
 from auth import get_current_user, User
 from repositories import biz_account_repository
@@ -34,6 +42,8 @@ BUILTIN_TEMPLATES: list[dict] = [
         "placement_type": "PLACEMENT_TYPE_AUTOMATIC",
         "budget_mode": "BUDGET_MODE_DYNAMIC_DAILY_BUDGET",
         "schedule_type": "SCHEDULE_FROM_NOW",
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-03-12T00:00:00",
     },
     {
@@ -51,6 +61,8 @@ BUILTIN_TEMPLATES: list[dict] = [
         "budget_mode": "BUDGET_MODE_DYNAMIC_DAILY_BUDGET",
         "schedule_type": "SCHEDULE_FROM_NOW",
         "pixel_id": "7591744906821959696",
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-03-13T12:00:00",
     },
     {
@@ -74,6 +86,8 @@ BUILTIN_TEMPLATES: list[dict] = [
         "vbo_window": "ZERO_DAY",
         "minis_id": "mnu8f8spjpxjy7oa",
         "app_id": "7613116626166104080",
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-03-13T20:30:00",
     },
     # ── TikTok Minis 系统母版（不可直接编辑/删除，可另存为）──
@@ -145,6 +159,8 @@ BUILTIN_TEMPLATES: list[dict] = [
                 "country_codes": ["US", "GB", "CA", "AU"],
             },
         },
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-04-22T00:00:00",
     },
     # ──────────────────────────────────────────────────────────
@@ -266,6 +282,8 @@ BUILTIN_TEMPLATES: list[dict] = [
             "multi_adgroup_supported": False,
             "multi_creative_supported": False,
         },
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-04-22T00:00:00",
     },
     {
@@ -303,6 +321,8 @@ BUILTIN_TEMPLATES: list[dict] = [
         "ad": {
             "status": "PAUSED",
         },
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-04-09T00:00:00",
     },
     {
@@ -353,6 +373,8 @@ BUILTIN_TEMPLATES: list[dict] = [
         "ad": {
             "status": "PAUSED",
         },
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-04-14T00:00:00",
     },
     {
@@ -408,6 +430,8 @@ BUILTIN_TEMPLATES: list[dict] = [
         "ad": {
             "status": "PAUSED",
         },
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-04-14T12:00:00",
     },
     {
@@ -468,6 +492,8 @@ BUILTIN_TEMPLATES: list[dict] = [
         "ad": {
             "status": "PAUSED",
         },
+        "delivery_languages": ["en"],
+        "default_delivery_language": "en",
         "created_at": "2026-04-24T00:00:00",
     },
 ]
@@ -620,6 +646,22 @@ async def launch_from_template(payload: dict = Body(...), _user: User = Depends(
     template_type = (tpl.get("template_type") or "").lower()
     logger.info(f"[launch] template_id={tpl_id}  platform={platform}  type={template_type}")
 
+    # ── 投放语种：模板默认 + 本次选择校验（强制开启，不允许跳过） ──
+    allowed_langs = tpl.get("delivery_languages") or list(DEFAULT_DELIVERY_LANGUAGES)
+    default_lang = tpl.get("default_delivery_language") or (
+        allowed_langs[0] if allowed_langs else DEFAULT_DELIVERY_LANGUAGE
+    )
+    raw_selected = payload.get("selected_delivery_language") or default_lang
+    try:
+        selected_lang = _validate_delivery_language(raw_selected, allowed_langs)
+    except DeliveryLanguageError as e:
+        # 不进入下游 launch，直接以统一错误响应返回（同时仍写一次操作日志）
+        resp = {"error": str(e)}
+        _log_launch(_user, tpl_id, platform, payload, resp)
+        return resp
+    payload["selected_delivery_language"] = selected_lang
+    payload["_delivery_language_allowed"] = list(allowed_langs)
+
     if platform == "meta":
         resp = await _launch_meta(tpl, payload)
     elif template_type == "tiktok_minis_basic":
@@ -739,6 +781,13 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
         if missing:
             return {"error": f"Web-to-App 模板缺少必填字段: {', '.join(missing)}"}
 
+    # ── 投放语种 → Meta locales（必须成功，否则直接退出） ──
+    selected_lang = payload.get("selected_delivery_language") or DEFAULT_DELIVERY_LANGUAGE
+    try:
+        applied_locales = resolve_meta_locales(selected_lang)
+    except DeliveryLanguageError as e:
+        return {"error": str(e)}
+
     results: dict = {
         "platform": "meta",
         "template_type": template_type,
@@ -754,6 +803,12 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
             "start_time": schedule_start_time or None,
             "end_time": schedule_end_time or None,
             "timezone": schedule_timezone or None,
+        },
+        # 投放语种（必填 + 平台已映射结果）
+        "delivery_language": {
+            "selected": selected_lang,
+            "allowed": list(payload.get("_delivery_language_allowed") or []),
+            "applied_meta_locales": list(applied_locales),
         },
     }
 
@@ -884,6 +939,9 @@ async def _launch_meta(tpl: dict, payload: dict) -> dict:
     for idx, adset_cfg in enumerate(adsets_input):
         adset_name = adset_cfg.get("name") or f"{campaign_name}_{idx+1:02d}"
         adset_targeting = adset_cfg.get("targeting") or tpl_adset.get("targeting", {"geo_locations": {"countries": ["US"]}})
+        # 强制注入语言定向：以 selected_delivery_language 映射结果为准，覆盖任何上游 locales。
+        if isinstance(adset_targeting, dict):
+            adset_targeting = {**adset_targeting, "locales": list(applied_locales)}
         adset_po = adset_cfg.get("promoted_object") or tpl_adset.get("promoted_object", {})
         opt_goal = tpl_adset.get("optimization_goal", "LANDING_PAGE_VIEWS")
         daily_budget = int(adset_cfg.get("daily_budget") or tpl_adset.get("daily_budget", 5000))
@@ -1135,7 +1193,12 @@ async def _launch_tiktok(tpl: dict, payload: dict) -> dict:
     budget_mode_choice = payload.get("budget_mode", "ADGROUP")
     budget = float(payload.get("budget", 50))
     location_ids = payload.get("location_ids", [])
-    languages = payload.get("languages", [])
+    # 投放语种（强制开启 → 用映射结果覆盖任何 payload.languages）
+    selected_lang = payload.get("selected_delivery_language") or DEFAULT_DELIVERY_LANGUAGE
+    try:
+        languages = resolve_tiktok_languages(selected_lang)
+    except DeliveryLanguageError as e:
+        return {"error": str(e)}
     placement_type = payload.get("placement_type", tpl.get("placement_type", "PLACEMENT_TYPE_AUTOMATIC"))
     placements = payload.get("placements")
     schedule_type = payload.get("schedule_type", tpl.get("schedule_type", "SCHEDULE_FROM_NOW"))
@@ -1149,7 +1212,18 @@ async def _launch_tiktok(tpl: dict, payload: dict) -> dict:
     creatives = payload.get("creatives", [])
 
     client = TikTokClient()
-    results = {"platform": "tiktok", "campaign": None, "adgroup": None, "ads": [], "summary": {"total": 0, "success": 0, "fail": 0}}
+    results = {
+        "platform": "tiktok",
+        "campaign": None,
+        "adgroup": None,
+        "ads": [],
+        "summary": {"total": 0, "success": 0, "fail": 0},
+        "delivery_language": {
+            "selected": selected_lang,
+            "allowed": list(payload.get("_delivery_language_allowed") or []),
+            "applied_tiktok_languages": list(languages),
+        },
+    }
 
     # ── 1. 创建 Campaign ──
     try:
@@ -1200,8 +1274,8 @@ async def _launch_tiktok(tpl: dict, payload: dict) -> dict:
         if tpl.get("age_min"):
             adgroup_payload["age_groups"] = _age_groups_from_min(tpl["age_min"])
 
-        if languages:
-            adgroup_payload["languages"] = languages
+        # 强制语言定向：始终把 selected_delivery_language 映射结果写入 adgroup
+        adgroup_payload["languages"] = list(languages)
 
         if placement_type == "PLACEMENT_TYPE_NORMAL" and placements:
             adgroup_payload["placements"] = placements
@@ -1291,7 +1365,12 @@ async def _launch_tiktok_minis(tpl: dict, payload: dict) -> dict:
     roas_bid = float(payload.get("roas_bid") or tpl_adgroup.get("default_roas_bid") or 0.8)
 
     location_ids = payload.get("location_ids") or tpl_defaults.get("location_ids") or []
-    languages = payload.get("languages") or tpl_adgroup.get("languages") or ["en"]
+    # 投放语种（强制开启）：忽略模板/payload 里的 languages，统一使用 selected_delivery_language 的映射
+    selected_lang = payload.get("selected_delivery_language") or DEFAULT_DELIVERY_LANGUAGE
+    try:
+        languages = resolve_tiktok_languages(selected_lang)
+    except DeliveryLanguageError as e:
+        return {"error": str(e)}
     age_groups = payload.get("age_groups") or tpl_adgroup.get("age_groups") or []
     gender = payload.get("gender") or tpl_adgroup.get("gender") or "GENDER_UNLIMITED"
 
@@ -1326,6 +1405,11 @@ async def _launch_tiktok_minis(tpl: dict, payload: dict) -> dict:
         "adgroup": None,
         "ad": None,
         "summary": {"total": 1, "success": 0, "fail": 0},
+        "delivery_language": {
+            "selected": selected_lang,
+            "allowed": list(payload.get("_delivery_language_allowed") or []),
+            "applied_tiktok_languages": list(languages),
+        },
     }
 
     # ── Step 1: Campaign ──
@@ -1537,7 +1621,12 @@ async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
     )
     if not location_ids:
         return {"error": "至少选择 1 个投放地区（location_ids 或 country / region_group）"}
-    languages = overrides.get("languages") or tpl_targeting.get("languages") or ["en"]
+    # 投放语种（强制开启）：忽略 overrides/template 里的 languages，统一使用 selected_delivery_language 的映射
+    selected_lang = payload.get("selected_delivery_language") or DEFAULT_DELIVERY_LANGUAGE
+    try:
+        languages = resolve_tiktok_languages(selected_lang)
+    except DeliveryLanguageError as e:
+        return {"error": str(e)}
     age_groups = overrides.get("age_groups") or tpl_targeting.get("age_groups") or []
     gender = overrides.get("gender") or tpl_targeting.get("gender") or "GENDER_UNLIMITED"
 
@@ -1605,6 +1694,11 @@ async def _launch_tiktok_web_to_app(tpl: dict, payload: dict) -> dict:
         "summary": {"total": 1, "success": 0, "fail": 0},
         # 把资产库引用回带给前端，便于结果面板展示
         "asset_refs": {k: v for k, v in asset_refs.items() if v not in (None, "")},
+        "delivery_language": {
+            "selected": selected_lang,
+            "allowed": list(payload.get("_delivery_language_allowed") or []),
+            "applied_tiktok_languages": list(languages),
+        },
     }
 
     # ── Step 1: Campaign ──
@@ -2140,6 +2234,29 @@ def _log_launch(user, tpl_id: str, platform: str, payload: dict, resp: dict):
     }
     if ad_account_id:
         after_summary["ad_account_id"] = ad_account_id
+
+    # ── 投放语种：优先取 launch 已注入的 results.delivery_language，
+    #    退化到 payload，缺失也写最少一份 selected/allowed 便于审计。
+    dl_from_data = data.get("delivery_language") if isinstance(data, dict) else None
+    selected_lang = (
+        (dl_from_data or {}).get("selected")
+        if isinstance(dl_from_data, dict) else None
+    ) or payload.get("selected_delivery_language")
+    allowed_langs = (
+        (dl_from_data or {}).get("allowed")
+        if isinstance(dl_from_data, dict) else None
+    ) or payload.get("_delivery_language_allowed") or []
+    if selected_lang or allowed_langs or isinstance(dl_from_data, dict):
+        dl_record: dict = {
+            "selected": selected_lang,
+            "allowed": list(allowed_langs) if isinstance(allowed_langs, list) else [],
+        }
+        if isinstance(dl_from_data, dict):
+            if dl_from_data.get("applied_meta_locales") is not None:
+                dl_record["applied_meta_locales"] = dl_from_data["applied_meta_locales"]
+            if dl_from_data.get("applied_tiktok_languages") is not None:
+                dl_record["applied_tiktok_languages"] = dl_from_data["applied_tiktok_languages"]
+        after_summary["delivery_language"] = dl_record
 
     # Meta W2A Conversion ABO 优化：记录素材来源分布 + 投放时间
     if platform == "meta" and isinstance(materials, list) and materials:
