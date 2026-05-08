@@ -43,6 +43,8 @@ import TikTokWebToAppCreateForm, {
   isTikTokWebToAppTpl,
   useW2aTemplates,
 } from '@/components/ads-create/TikTokWebToAppCreateForm'
+import DeliveryLanguageSelect from '@/components/ads-create/DeliveryLanguageSelect'
+import { DEFAULT_DELIVERY_LANGUAGE } from '@/constants/deliveryLanguages'
 
 const MAX_MATERIALS = 20
 const MAX_ADSETS = 20
@@ -205,6 +207,9 @@ export default function AdsCreatePage() {
 
   // ── Meta CBO：Campaign 层日预算（USD，未乘 100）。仅 web_to_app_conversion_cbo 模板使用 ──
   const [campaignDailyBudgetUsd, setCampaignDailyBudgetUsd] = useState<string>('')
+
+  // ── 投放语种（受 currentTpl.delivery_languages 限制；切换模板由 DeliveryLanguageSelect 内部回落） ──
+  const [selectedDeliveryLanguage, setSelectedDeliveryLanguage] = useState<string>(DEFAULT_DELIVERY_LANGUAGE)
 
   // ── 资产库弹窗 & 引用追踪 ──
   const [showLPPicker, setShowLPPicker] = useState(false)
@@ -706,6 +711,7 @@ export default function AdsCreatePage() {
         end_time: scheduleEndLocal ? localToIso(scheduleEndLocal) : undefined,
         timezone: browserTz,
       } : undefined,
+      selectedDeliveryLanguage,
     })
     setSubmitting(false); setResult(res)
   }
@@ -787,6 +793,14 @@ export default function AdsCreatePage() {
                   <input type="text" value={campaignName} onChange={e => { setCampaignName(e.target.value); setResult(null) }}
                     placeholder="例如：US_iOS_Summer_Campaign" className={inputCls} />
                 </div>
+                <DeliveryLanguageSelect
+                  value={selectedDeliveryLanguage}
+                  onChange={(c) => { setSelectedDeliveryLanguage(c); setResult(null) }}
+                  deliveryLanguages={currentTpl?.delivery_languages}
+                  defaultDeliveryLanguage={currentTpl?.default_delivery_language}
+                  templateId={currentTpl?.id ?? null}
+                  inputClassName={inputCls}
+                />
                 {isMeta && (
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1.5">Meta 广告账户 <span className="text-red-400">*</span></label>

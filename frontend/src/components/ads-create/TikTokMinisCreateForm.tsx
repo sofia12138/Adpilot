@@ -15,6 +15,8 @@ import { apiFetch } from '@/services/api'
 import { TikTokLocationPicker, resolveCountryCodesFromTemplate } from '@/components/common/TikTokLocationPicker'
 import { TikTokIdentityPicker } from '@/components/common/TikTokIdentityPicker'
 import { codesToLocationIds, type LocationSelection } from '@/constants/tiktok-locations'
+import { DEFAULT_DELIVERY_LANGUAGE } from '@/constants/deliveryLanguages'
+import DeliveryLanguageSelect from '@/components/ads-create/DeliveryLanguageSelect'
 
 const inputCls = 'w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-pink-500/20 focus:border-pink-400 transition'
 
@@ -78,6 +80,7 @@ export default function TikTokMinisCreateForm({ tpl }: Props) {
   const [adText, setAdText] = useState('')
   const [landingUrl, setLandingUrl] = useState('')
   const [videoMaterialId, setVideoMaterialId] = useState<number | null>(null)
+  const [selectedDeliveryLanguage, setSelectedDeliveryLanguage] = useState<string>(DEFAULT_DELIVERY_LANGUAGE)
 
   // 切换模板时回填默认值（强制覆盖，避免上一个模板残留）
   useEffect(() => {
@@ -151,6 +154,7 @@ export default function TikTokMinisCreateForm({ tpl }: Props) {
       ad_text: adText,
       landing_url: landingUrl.trim(),
       location_ids: codesToLocationIds(countryCodes),
+      selected_delivery_language: selectedDeliveryLanguage,
     }
     if (roasBid) payload.roas_bid = Number(roasBid)
     if (scheduleStartTime) payload.schedule_start_time = scheduleStartTime
@@ -249,6 +253,15 @@ export default function TikTokMinisCreateForm({ tpl }: Props) {
               onChange={({ country_codes }) => setCountryCodes(country_codes)}
             />
           </div>
+          <DeliveryLanguageSelect
+            value={selectedDeliveryLanguage}
+            onChange={setSelectedDeliveryLanguage}
+            deliveryLanguages={tpl.delivery_languages}
+            defaultDeliveryLanguage={tpl.default_delivery_language}
+            templateId={tpl.id}
+            inputClassName={inputCls}
+            accent="pink"
+          />
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-medium text-gray-600 mb-1">App ID（minis 宿主 app）<span className="text-red-400">*</span></label>

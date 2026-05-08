@@ -26,6 +26,8 @@ import {
 } from '@/components/common/AssetPickerDialog'
 import { TikTokVideoMaterialPicker, type PickedVideo } from '@/components/common/TikTokVideoMaterialPicker'
 import { codesToLocationIds, type LocationSelection } from '@/constants/tiktok-locations'
+import { DEFAULT_DELIVERY_LANGUAGE } from '@/constants/deliveryLanguages'
+import DeliveryLanguageSelect from '@/components/ads-create/DeliveryLanguageSelect'
 
 const inputCls = 'w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-pink-500/20 focus:border-pink-400 transition'
 
@@ -140,6 +142,8 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
   // 已选素材的 ad_name 编辑（key: `${source}-${video_id}`）
   const [adNameOverrides, setAdNameOverrides] = useState<Record<string, string>>({})
   const [showVideoPicker, setShowVideoPicker] = useState(false)
+
+  const [selectedDeliveryLanguage, setSelectedDeliveryLanguage] = useState<string>(DEFAULT_DELIVERY_LANGUAGE)
 
   // 切换模板时回填默认值
   useEffect(() => {
@@ -266,6 +270,7 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
     if (optimizationEvent) payload.optimization_event = optimizationEvent
     if (scheduleStartTime) payload.schedule_start_time = scheduleStartTime
     if (scheduleEndTime) payload.schedule_end_time = scheduleEndTime
+    payload.selected_delivery_language = selectedDeliveryLanguage
 
     // 资产库引用 + 快照（后端只用于日志/operation_log 与模板回填，不影响 TikTok 主调用）
     payload.region_mode = regionMode
@@ -449,6 +454,16 @@ export default function TikTokWebToAppCreateForm({ tpl }: Props) {
               </div>
             )}
           </div>
+
+          <DeliveryLanguageSelect
+            value={selectedDeliveryLanguage}
+            onChange={setSelectedDeliveryLanguage}
+            deliveryLanguages={tpl.delivery_languages}
+            defaultDeliveryLanguage={tpl.default_delivery_language}
+            templateId={tpl.id}
+            inputClassName={inputCls}
+            accent="pink"
+          />
 
           {/* Landing Page URL（支持手填或从落地页库选择） */}
           <div>

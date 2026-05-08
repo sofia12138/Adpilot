@@ -84,6 +84,8 @@ export interface CreateAdsParams {
   metaSchedule?: MetaScheduleFields
   /** Meta CBO 模板的 Campaign 层日预算（USD，未乘 100）。仅 web_to_app_conversion_cbo 使用 */
   campaignDailyBudget?: number
+  /** 本次投放选择的语种（必须 ∈ template.delivery_languages）；后端会强制启用平台语言定向 */
+  selectedDeliveryLanguage?: string
 }
 
 export interface AdResult {
@@ -158,6 +160,9 @@ async function launchFromTemplate(p: CreateAdsParams): Promise<CreateResult> {
       template_id: p.templateId,
       campaign_name: p.campaignName,
       budget: p.budget || 50,
+    }
+    if (p.selectedDeliveryLanguage) {
+      body.selected_delivery_language = p.selectedDeliveryLanguage
     }
 
     if (tplPlatform === 'meta') {
