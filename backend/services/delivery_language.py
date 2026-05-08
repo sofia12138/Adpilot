@@ -18,28 +18,44 @@ DEFAULT_DELIVERY_LANGUAGES: list[str] = ["en"]
 DEFAULT_DELIVERY_LANGUAGE: str = "en"
 
 # 本系统支持的语种代码（与前端常量保持一致）
+#
+# 设计：每个 code 严格对应 *一个* Meta locale ID（保证后台只显示一条），
+# 多地区语言提供「全部」聚合 code（如 en）+ 各国家变体 code（如 en-US / en-GB），
+# 用户在模板内可任选粒度，例如同时勾选 en-US + en-GB 也合法。
 SUPPORTED_LANGUAGE_CODES: list[str] = [
-    "en", "es", "pt", "fr", "de", "it", "nl", "ru",
-    "ar", "ja", "ko", "id", "th", "vi", "zh-Hant", "zh-Hans",
+    "en", "en-US", "en-GB",
+    "es", "es-ES",
+    "pt", "pt-BR", "pt-PT",
+    "fr", "fr-FR", "fr-CA",
+    "de", "it", "nl", "ru", "ar", "ja", "ko", "id", "th", "vi",
+    "zh-Hant", "zh-HK", "zh-Hans",
 ]
 
 SUPPORTED_LANGUAGE_LABELS: dict[str, str] = {
-    "en":      "英语 (English)",
-    "es":      "西班牙语 (Español)",
-    "pt":      "葡萄牙语 (Português)",
-    "fr":      "法语 (Français)",
-    "de":      "德语 (Deutsch)",
-    "it":      "意大利语 (Italiano)",
-    "nl":      "荷兰语 (Nederlands)",
-    "ru":      "俄语 (Русский)",
-    "ar":      "阿拉伯语 (العربية)",
-    "ja":      "日语 (日本語)",
-    "ko":      "韩语 (한국어)",
-    "id":      "印尼语 (Bahasa Indonesia)",
-    "th":      "泰语 (ไทย)",
-    "vi":      "越南语 (Tiếng Việt)",
-    "zh-Hant": "繁体中文 (繁體中文)",
-    "zh-Hans": "简体中文 (简体中文)",
+    "en":      "英语（全部）",
+    "en-US":   "英语（美国）",
+    "en-GB":   "英语（英国）",
+    "es":      "西班牙语",
+    "es-ES":   "西班牙语（西班牙）",
+    "pt":      "葡萄牙语（全部）",
+    "pt-BR":   "葡萄牙语（巴西）",
+    "pt-PT":   "葡萄牙语（葡萄牙）",
+    "fr":      "法语（全部）",
+    "fr-FR":   "法语（法国）",
+    "fr-CA":   "法语（加拿大）",
+    "de":      "德语",
+    "it":      "意大利语",
+    "nl":      "荷兰语",
+    "ru":      "俄语",
+    "ar":      "阿拉伯语",
+    "ja":      "日语",
+    "ko":      "韩语",
+    "id":      "印尼语",
+    "th":      "泰语",
+    "vi":      "越南语",
+    "zh-Hant": "繁体中文（台湾）",
+    "zh-HK":   "繁体中文（香港）",
+    "zh-Hans": "简体中文",
 }
 
 
@@ -48,40 +64,55 @@ SUPPORTED_LANGUAGE_LABELS: dict[str, str] = {
 # 在生产环境拉取并核对（v22.0，2026-05-08）。一旦 Graph 报 "Invalid locale id"，
 # 请重新调用 /search?type=adlocale 校准。
 #
-# 多地区语言族（en/es/pt/fr）使用 1001~1005 的「语言全部」聚合 ID，
-# 这样 Meta Ads Manager 后台只显示一条而不是多条；覆盖范围比单独列国家变体更广。
+# 1:1 映射：每个 code 对应 *一个* locale ID，确保 Ads Manager 后台只显示一条。
+# 多地区语言提供「语言全部」聚合 ID（1001~1005）+ 各国家变体 ID 双轨可选。
 #
 # ⚠️ 切勿凭印象修改这些 ID：错位会导致广告投放到完全不同的语种（例如 nl=13 实际是
 # 「挪威语 nb_NO」而非「荷兰语 nl_NL」）。增减语种时也务必先用 Graph API 验证。
 META_LOCALES: dict[str, list[int]] = {
-    "en":      [1001],          # 1001=英语（全部，覆盖 en_US/en_GB 等）
-    "es":      [1002],          # 1002=西班牙语（所有，覆盖 es_ES/es_LA 等）
-    "pt":      [1005],          # 1005=葡萄牙语（所有，覆盖 pt_BR/pt_PT）
-    "fr":      [1003],          # 1003=法语（全部，覆盖 fr_FR/fr_CA）
-    "de":      [5],             # 5=德语
-    "it":      [10],            # 10=意大利语
-    "nl":      [14],            # 14=荷兰语
-    "ru":      [17],            # 17=俄语
-    "ar":      [28],            # 28=阿拉伯语
-    "ja":      [11],            # 11=日语
-    "ko":      [12],            # 12=韩语
-    "id":      [25],            # 25=印度尼西亚语
-    "th":      [35],            # 35=泰语
-    "vi":      [27],            # 27=越南语
-    # 中文不使用 1004「中文（全部）」，因为我们刻意把繁/简拆成两个独立 code 让用户精确选；
-    # 1004 会同时覆盖简繁，会与 zh-Hant/zh-Hans 的语义冲突。
-    "zh-Hant": [22, 21],        # 22=繁体中文(台湾), 21=繁体中文(香港)
-    "zh-Hans": [20],            # 20=简体中文(中国)
+    "en":      [1001],          # 英语（全部，覆盖所有英语地区）
+    "en-US":   [6],             # 英语（美国）
+    "en-GB":   [24],            # 英语（英国）
+    "es":      [23],            # 西班牙语（默认 / 拉美等地区）
+    "es-ES":   [7],             # 西班牙语（西班牙）
+    "pt":      [1005],          # 葡萄牙语（所有，覆盖巴西+葡萄牙）
+    "pt-BR":   [16],            # 葡萄牙语（巴西）
+    "pt-PT":   [31],            # 葡萄牙语（葡萄牙）
+    "fr":      [1003],          # 法语（全部）
+    "fr-FR":   [9],             # 法语（法国）
+    "fr-CA":   [44],            # 法语（加拿大）
+    "de":      [5],             # 德语
+    "it":      [10],            # 意大利语
+    "nl":      [14],            # 荷兰语
+    "ru":      [17],            # 俄语
+    "ar":      [28],            # 阿拉伯语
+    "ja":      [11],            # 日语
+    "ko":      [12],            # 韩语
+    "id":      [25],            # 印度尼西亚语
+    "th":      [35],            # 泰语
+    "vi":      [27],            # 越南语
+    # 中文不暴露 1004「中文（全部）」，因为我们刻意把繁/简拆成独立 code 精确投放；
+    # 1004 会同时覆盖简繁，与 zh-Hant/zh-HK/zh-Hans 的语义冲突。
+    "zh-Hant": [22],             # 繁体中文（台湾）
+    "zh-HK":   [21],             # 繁体中文（香港）
+    "zh-Hans": [20],             # 简体中文（中国）
 }
 
 
 # ── TikTok：languages 为小写 ISO-639-1 字符串列表（Marketing API targeting languages） ──
-# TikTok 不区分繁简，统一映射为 "zh"；其余按标准两位代码。
+# TikTok 不细分国家变体（en-US 与 en-GB 都映射为 "en"），也不区分繁简（统一 "zh"）。
 TIKTOK_LANGUAGES: dict[str, list[str]] = {
     "en":      ["en"],
+    "en-US":   ["en"],
+    "en-GB":   ["en"],
     "es":      ["es"],
+    "es-ES":   ["es"],
     "pt":      ["pt"],
+    "pt-BR":   ["pt"],
+    "pt-PT":   ["pt"],
     "fr":      ["fr"],
+    "fr-FR":   ["fr"],
+    "fr-CA":   ["fr"],
     "de":      ["de"],
     "it":      ["it"],
     "nl":      ["nl"],
@@ -93,6 +124,7 @@ TIKTOK_LANGUAGES: dict[str, list[str]] = {
     "th":      ["th"],
     "vi":      ["vi"],
     "zh-Hant": ["zh"],
+    "zh-HK":   ["zh"],
     "zh-Hans": ["zh"],
 }
 
