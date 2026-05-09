@@ -10,17 +10,19 @@
 - registrations   → attribution.registration              (数仓媒体口径注册事件数)
 - 衍生 cpa / roas → 用 blend 后分子分母重算
 
+attribution 双源策略（daily + intraday，daily 优先）：
+- daily 表：MaxCompute T+1 cohort（粒度 campaign/adgroup/ad 全有），数据稳定但延迟 1 天起
+- intraday 表：ClickHouse 实时（粒度只到 ad_id，每 30 分钟同步），D0 当天就能看
+- 同一 (date, ad_id) 同时存在时取 daily；daily 缺失才用 intraday → 当 daily 上游 SLA 滞后
+  时（如 metis_dw.ads_ad_delivery_di 分区延迟），intraday 自动兜底，前端不再显示 0
+
 JOIN 策略：
 - normalized 是主表（LEFT），attribution 子查询作为副表
 - 关联键：stat_date / platform_norm / account_id_norm / [campaign_id|adgroup_id|ad_id]
 - platform 归一：attribution.facebook → normalized.meta
 - account_id 归一：attribution 不带 act_ 前缀 → normalized.act_xxx (Meta)
-- attribution 没匹配上的行：conversions / revenue 为 0（前端可视化为"未归因"）
-
-⚠ 注意：
-- 当前 attribution 表 TikTok 覆盖率近 0%，blend 后 TikTok 行的 revenue 仍为 0
-- Meta 覆盖率约 84%，blend 后 Meta 行的 revenue 显著优于 normalized
-- 同步任务修复后此模块自动受益，无需修改代码
+- intraday 没有 campaign_id/adgroup_id 列，需通过 biz_ad_daily_normalized 反推上推聚合
+- attribution 都没匹配上的行：conversions / revenue 为 0（前端可视化为"未归因"）
 """
 from __future__ import annotations
 
@@ -82,23 +84,156 @@ _ATTR_ACC_EXPR  = (
 )
 
 
+def _plat_expr(alias: str) -> str:
+    """带表别名的 platform 归一表达式（attribution.facebook → meta）"""
+    p = f"{alias}." if alias else ""
+    return f"CASE WHEN {p}platform = 'facebook' THEN 'meta' ELSE {p}platform END"
+
+
+def _acc_expr(alias: str) -> str:
+    """带表别名的 account_id 归一表达式（Meta 加 act_ 前缀）"""
+    p = f"{alias}." if alias else ""
+    return (
+        f"CASE WHEN {p}platform = 'facebook' AND {p}account_id NOT LIKE 'act\\_%%' "
+        f"THEN CONCAT('act_', {p}account_id) ELSE {p}account_id END"
+    )
+
+
 def _attr_filter_args(platform: Optional[str],
-                      account_id: Optional[str]) -> tuple[str, list]:
+                      account_id: Optional[str],
+                      alias: str = "") -> tuple[str, list]:
     """构造 attribution 子查询内的 WHERE 过滤片段，
     把前端口径转换为 attribution 表存储口径，减小 JOIN 集合"""
+    p = f"{alias}." if alias else ""
     parts: list[str] = []
     args: list = []
     if platform:
-        p = platform.lower()
-        attr_p = "facebook" if p == "meta" else p
-        parts.append("platform = %s")
+        pl = platform.lower()
+        attr_p = "facebook" if pl == "meta" else pl
+        parts.append(f"{p}platform = %s")
         args.append(attr_p)
     if account_id:
         attr_a = account_id[4:] if account_id.startswith("act_") else account_id
-        parts.append("account_id = %s")
+        parts.append(f"{p}account_id = %s")
         args.append(attr_a)
     sql_part = (" AND " + " AND ".join(parts)) if parts else ""
     return sql_part, args
+
+
+# ─────────────────────────────────────────────────────────────
+#  attribution 双源子查询 helper（daily 优先 + intraday 兜底）
+# ─────────────────────────────────────────────────────────────
+
+def _attr_subquery(grain: str,
+                   start_date: str,
+                   end_date: str,
+                   platform: Optional[str],
+                   account_id: Optional[str]) -> tuple[str, list]:
+    """生成 attribution 子查询：daily 优先，intraday 兜底（按 (date, ad_id) 去重）。
+
+    输出列：
+        d, plat, acc, key_id, attr_conversions, attr_registrations, attr_revenue
+
+    Args:
+        grain: "campaign" | "adgroup" | "ad"
+        start_date / end_date: 查询窗口
+        platform / account_id: 前端口径过滤条件
+
+    Returns:
+        (sql_fragment, args_list) — sql 已包含 daily + intraday 两段日期 placeholder，
+        args 顺序为：[start, end] + daily_filter_args + [start, end] + intraday_filter_args
+    """
+    if grain == "campaign":
+        daily_grain_col = "campaign_id"
+    elif grain == "adgroup":
+        daily_grain_col = "adgroup_id"
+    elif grain == "ad":
+        daily_grain_col = "ad_id"
+    else:
+        raise ValueError(f"unknown grain: {grain}")
+
+    a_filter_d, a_args_d = _attr_filter_args(platform, account_id, alias="")
+    a_filter_i, a_args_i = _attr_filter_args(platform, account_id, alias="i")
+
+    # daily 部分：直接按粒度取行（外层 GROUP BY 再 SUM）
+    daily_part = f"""
+        SELECT
+            ds_account_local        AS d,
+            {_ATTR_PLAT_EXPR}       AS plat,
+            {_ATTR_ACC_EXPR}        AS acc,
+            {daily_grain_col}       AS key_id,
+            purchase                AS attr_conversions,
+            registration            AS attr_registrations,
+            total_recharge_amount   AS attr_revenue
+        FROM biz_attribution_ad_daily
+        WHERE ds_account_local BETWEEN %s AND %s
+          AND {daily_grain_col} <> '' {a_filter_d}
+    """
+
+    if grain == "ad":
+        # ad 粒度：直接按 intraday.ad_id（不需要反推 normalized）
+        intraday_part = f"""
+            SELECT
+                i.ds_account_local      AS d,
+                {_plat_expr("i")}       AS plat,
+                {_acc_expr("i")}        AS acc,
+                i.ad_id                 AS key_id,
+                i.purchase              AS attr_conversions,
+                i.registration          AS attr_registrations,
+                i.total_recharge_amount AS attr_revenue
+            FROM biz_attribution_ad_intraday i
+            LEFT JOIN biz_attribution_ad_daily d
+                ON d.ds_account_local = i.ds_account_local
+               AND d.platform         = i.platform
+               AND d.account_id       = i.account_id
+               AND d.ad_id            = i.ad_id
+            WHERE i.ds_account_local BETWEEN %s AND %s
+              AND d.id IS NULL
+              AND i.ad_id <> '' {a_filter_i}
+        """
+    else:
+        # campaign/adgroup 粒度：通过 biz_ad_daily_normalized 反推
+        norm_grain_col = f"n.{daily_grain_col}"
+        intraday_part = f"""
+            SELECT
+                i.ds_account_local      AS d,
+                n.platform              AS plat,
+                n.account_id            AS acc,
+                {norm_grain_col}        AS key_id,
+                i.purchase              AS attr_conversions,
+                i.registration          AS attr_registrations,
+                i.total_recharge_amount AS attr_revenue
+            FROM biz_attribution_ad_intraday i
+            INNER JOIN biz_ad_daily_normalized n
+                ON n.stat_date  = i.ds_account_local
+               AND n.platform   = {_plat_expr("i")}
+               AND n.account_id = {_acc_expr("i")}
+               AND n.ad_id      = i.ad_id
+            LEFT JOIN biz_attribution_ad_daily d
+                ON d.ds_account_local = i.ds_account_local
+               AND d.platform         = i.platform
+               AND d.account_id       = i.account_id
+               AND d.ad_id            = i.ad_id
+            WHERE i.ds_account_local BETWEEN %s AND %s
+              AND d.id IS NULL
+              AND {norm_grain_col} <> '' {a_filter_i}
+        """
+
+    sql = f"""
+        SELECT
+            d, plat, acc, key_id,
+            SUM(attr_conversions)   AS attr_conversions,
+            SUM(attr_registrations) AS attr_registrations,
+            SUM(attr_revenue)       AS attr_revenue
+        FROM (
+            {daily_part}
+            UNION ALL
+            {intraday_part}
+        ) u
+        GROUP BY d, plat, acc, key_id
+    """
+    args = [start_date, end_date] + a_args_d + [start_date, end_date] + a_args_i
+    return sql, args
 
 
 # ─────────────────────────────────────────────────────────────
@@ -114,7 +249,7 @@ def get_overview(start_date: str, end_date: str, *,
     conversions/revenue 来自 attribution（按 campaign 维度对齐）。
     """
     n_filter, n_args = _build_filter_n(platform, account_id)
-    a_filter, a_args = _attr_filter_args(platform, account_id)
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, account_id)
 
     sql = f"""
     SELECT
@@ -126,27 +261,14 @@ def get_overview(start_date: str, end_date: str, *,
         COALESCE(SUM(a.attr_registrations), 0)  AS total_registrations,
         COALESCE(SUM(a.attr_revenue), 0)        AS total_revenue
     FROM biz_campaign_daily_normalized n
-    LEFT JOIN (
-        SELECT
-            ds_account_local                            AS d,
-            {_ATTR_PLAT_EXPR}                           AS plat,
-            {_ATTR_ACC_EXPR}                            AS acc,
-            campaign_id                                 AS cid,
-            SUM(purchase)                               AS attr_conversions,
-            SUM(registration)                           AS attr_registrations,
-            SUM(total_recharge_amount)                  AS attr_revenue
-        FROM biz_attribution_ad_daily
-        WHERE ds_account_local BETWEEN %s AND %s
-          AND campaign_id <> '' {a_filter}
-        GROUP BY d, plat, acc, cid
-    ) a
-        ON a.d    = n.stat_date
-       AND a.plat = n.platform
-       AND a.acc  = n.account_id
-       AND a.cid  = n.campaign_id
+    LEFT JOIN ({attr_sql}) a
+        ON a.d      = n.stat_date
+       AND a.plat   = n.platform
+       AND a.acc    = n.account_id
+       AND a.key_id = n.campaign_id
     WHERE n.stat_date BETWEEN %s AND %s {n_filter}
     """
-    args = [start_date, end_date] + a_args + [start_date, end_date] + n_args
+    args = attr_args + [start_date, end_date] + n_args
     row = _query_one(sql, args)
 
     s   = float(row.get("total_spend") or 0)
@@ -195,7 +317,7 @@ def get_top_campaigns(start_date: str, end_date: str, *,
                       metric: str = "spend",
                       limit: int = 20) -> list[dict]:
     n_filter, n_args = _build_filter_n(platform, account_id)
-    a_filter, a_args = _attr_filter_args(platform, account_id)
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, account_id)
     order_expr = _TOP_CAMPAIGN_METRIC_EXPR.get(metric, "SUM(n.spend)")
     limit = min(max(int(limit), 1), 100)
 
@@ -216,31 +338,17 @@ def get_top_campaigns(start_date: str, end_date: str, *,
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
              ELSE NULL END                          AS avg_roas
     FROM biz_campaign_daily_normalized n
-    LEFT JOIN (
-        SELECT
-            ds_account_local                        AS d,
-            {_ATTR_PLAT_EXPR}                       AS plat,
-            {_ATTR_ACC_EXPR}                        AS acc,
-            campaign_id                             AS cid,
-            SUM(purchase)                           AS attr_conversions,
-            SUM(registration)                       AS attr_registrations,
-            SUM(total_recharge_amount)              AS attr_revenue
-        FROM biz_attribution_ad_daily
-        WHERE ds_account_local BETWEEN %s AND %s
-          AND campaign_id <> '' {a_filter}
-        GROUP BY d, plat, acc, cid
-    ) a
-        ON a.d    = n.stat_date
-       AND a.plat = n.platform
-       AND a.acc  = n.account_id
-       AND a.cid  = n.campaign_id
+    LEFT JOIN ({attr_sql}) a
+        ON a.d      = n.stat_date
+       AND a.plat   = n.platform
+       AND a.acc    = n.account_id
+       AND a.key_id = n.campaign_id
     WHERE n.stat_date BETWEEN %s AND %s {n_filter}
     GROUP BY n.platform, n.account_id, n.campaign_id
     ORDER BY {order_expr} DESC
     LIMIT %s
     """
-    args = ([start_date, end_date] + a_args
-            + [start_date, end_date] + n_args + [limit])
+    args = attr_args + [start_date, end_date] + n_args + [limit]
     return _query_all(sql, args)
 
 
@@ -268,7 +376,7 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
                             order_by: str = "total_spend",
                             order_dir: str = "desc") -> list[dict]:
     n_filter, n_args = _build_filter_n(platform, account_id)
-    a_filter, a_args = _attr_filter_args(platform, account_id)
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, account_id)
     order_col = _CAMPAIGN_AGG_ORDER.get(order_by, "total_spend")
     order_dir_l = order_dir.lower() if order_dir.lower() in ("asc", "desc") else "desc"
 
@@ -310,30 +418,16 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
              ELSE NULL END                          AS roas
     FROM biz_campaign_daily_normalized n
-    LEFT JOIN (
-        SELECT
-            ds_account_local AS d,
-            {_ATTR_PLAT_EXPR} AS plat,
-            {_ATTR_ACC_EXPR}  AS acc,
-            campaign_id       AS cid,
-            SUM(purchase)              AS attr_conversions,
-            SUM(registration)          AS attr_registrations,
-            SUM(total_recharge_amount) AS attr_revenue
-        FROM biz_attribution_ad_daily
-        WHERE ds_account_local BETWEEN %s AND %s
-          AND campaign_id <> '' {a_filter}
-        GROUP BY d, plat, acc, cid
-    ) a
-        ON a.d    = n.stat_date
-       AND a.plat = n.platform
-       AND a.acc  = n.account_id
-       AND a.cid  = n.campaign_id
+    LEFT JOIN ({attr_sql}) a
+        ON a.d      = n.stat_date
+       AND a.plat   = n.platform
+       AND a.acc    = n.account_id
+       AND a.key_id = n.campaign_id
     WHERE n.stat_date BETWEEN %s AND %s {n_filter} {name_sql}
     GROUP BY n.platform, n.account_id, n.campaign_id
     ORDER BY {order_col} {order_dir_l}
     """
-    args = ([start_date, end_date] + a_args
-            + [start_date, end_date] + n_args + name_args)
+    args = attr_args + [start_date, end_date] + n_args + name_args
     return _query_all(sql, args)
 
 
@@ -348,7 +442,7 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
                            order_by: str = "total_spend",
                            order_dir: str = "desc") -> list[dict]:
     n_filter, n_args = _build_filter_n(platform, account_id)
-    a_filter, a_args = _attr_filter_args(platform, account_id)
+    attr_sql, attr_args = _attr_subquery("adgroup", start_date, end_date, platform, account_id)
     order_col = _CAMPAIGN_AGG_ORDER.get(order_by, "total_spend")
     if order_col == "campaign_name":
         order_col = "adgroup_name"
@@ -394,30 +488,16 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
              ELSE NULL END                          AS roas
     FROM biz_adgroup_daily_normalized n
-    LEFT JOIN (
-        SELECT
-            ds_account_local AS d,
-            {_ATTR_PLAT_EXPR} AS plat,
-            {_ATTR_ACC_EXPR}  AS acc,
-            adgroup_id        AS aid,
-            SUM(purchase)              AS attr_conversions,
-            SUM(registration)          AS attr_registrations,
-            SUM(total_recharge_amount) AS attr_revenue
-        FROM biz_attribution_ad_daily
-        WHERE ds_account_local BETWEEN %s AND %s
-          AND adgroup_id <> '' {a_filter}
-        GROUP BY d, plat, acc, aid
-    ) a
-        ON a.d    = n.stat_date
-       AND a.plat = n.platform
-       AND a.acc  = n.account_id
-       AND a.aid  = n.adgroup_id
+    LEFT JOIN ({attr_sql}) a
+        ON a.d      = n.stat_date
+       AND a.plat   = n.platform
+       AND a.acc    = n.account_id
+       AND a.key_id = n.adgroup_id
     WHERE n.stat_date BETWEEN %s AND %s {n_filter} {cid_sql}
     GROUP BY n.platform, n.account_id, n.campaign_id, n.adgroup_id
     ORDER BY {order_col} {order_dir_l}
     """
-    args = ([start_date, end_date] + a_args
-            + [start_date, end_date] + n_args + cid_args)
+    args = attr_args + [start_date, end_date] + n_args + cid_args
     return _query_all(sql, args)
 
 
@@ -447,7 +527,7 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
                       order_by: str = "total_spend",
                       order_dir: str = "desc") -> list[dict]:
     n_filter, n_args = _build_filter_n(platform, account_id)
-    a_filter, a_args = _attr_filter_args(platform, account_id)
+    attr_sql, attr_args = _attr_subquery("ad", start_date, end_date, platform, account_id)
     order_col = _AD_AGG_ORDER_MAP.get(order_by, "total_spend")
     order_dir_l = order_dir.lower() if order_dir.lower() in ("asc", "desc") else "desc"
 
@@ -500,30 +580,16 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
              ELSE NULL END                          AS roas
     FROM biz_ad_daily_normalized n
-    LEFT JOIN (
-        SELECT
-            ds_account_local AS d,
-            {_ATTR_PLAT_EXPR} AS plat,
-            {_ATTR_ACC_EXPR}  AS acc,
-            ad_id             AS aid,
-            SUM(purchase)              AS attr_conversions,
-            SUM(registration)          AS attr_registrations,
-            SUM(total_recharge_amount) AS attr_revenue
-        FROM biz_attribution_ad_daily
-        WHERE ds_account_local BETWEEN %s AND %s
-          AND ad_id <> '' {a_filter}
-        GROUP BY d, plat, acc, aid
-    ) a
-        ON a.d    = n.stat_date
-       AND a.plat = n.platform
-       AND a.acc  = n.account_id
-       AND a.aid  = n.ad_id
+    LEFT JOIN ({attr_sql}) a
+        ON a.d      = n.stat_date
+       AND a.plat   = n.platform
+       AND a.acc    = n.account_id
+       AND a.key_id = n.ad_id
     WHERE n.stat_date BETWEEN %s AND %s {n_filter} {extra_sql}
     GROUP BY n.platform, n.account_id, n.campaign_id, n.adgroup_id, n.ad_id
     ORDER BY {order_col} {order_dir_l}
     """
-    args = ([start_date, end_date] + a_args
-            + [start_date, end_date] + n_args + extra_args)
+    args = attr_args + [start_date, end_date] + n_args + extra_args
     return _query_all(sql, args)
 
 
@@ -554,7 +620,7 @@ def get_campaign_daily_list(start_date: str, end_date: str, *,
                             order_by: str = "stat_date",
                             order_dir: str = "desc") -> dict:
     n_filter, n_args = _build_filter_n(platform, account_id)
-    a_filter, a_args = _attr_filter_args(platform, account_id)
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, account_id)
     order_dir_l = order_dir.lower() if order_dir.lower() in ("asc", "desc") else "desc"
     order_col = _CAMPAIGN_DAILY_ORDER_MAP.get(order_by, "stat_date")
     page = max(1, int(page))
@@ -605,30 +671,17 @@ def get_campaign_daily_list(start_date: str, end_date: str, *,
                  THEN ROUND(COALESCE(a.attr_revenue, 0) / n.spend, 4)
                  ELSE NULL END                          AS roas
         FROM biz_campaign_daily_normalized n
-        LEFT JOIN (
-            SELECT
-                ds_account_local AS d,
-                {_ATTR_PLAT_EXPR} AS plat,
-                {_ATTR_ACC_EXPR}  AS acc,
-                campaign_id       AS cid,
-                SUM(purchase)              AS attr_conversions,
-                SUM(registration)          AS attr_registrations,
-                SUM(total_recharge_amount) AS attr_revenue
-            FROM biz_attribution_ad_daily
-            WHERE ds_account_local BETWEEN %s AND %s
-              AND campaign_id <> '' {a_filter}
-            GROUP BY d, plat, acc, cid
-        ) a
-            ON a.d    = n.stat_date
-           AND a.plat = n.platform
-           AND a.acc  = n.account_id
-           AND a.cid  = n.campaign_id
+        LEFT JOIN ({attr_sql}) a
+            ON a.d      = n.stat_date
+           AND a.plat   = n.platform
+           AND a.acc    = n.account_id
+           AND a.key_id = n.campaign_id
         {base_where}
         ORDER BY {order_col} {order_dir_l}
         LIMIT %s OFFSET %s
     """
     list_args = (
-        [start_date, end_date] + a_args
+        attr_args
         + [start_date, end_date] + n_args + name_args
         + [page_size, (page - 1) * page_size]
     )
