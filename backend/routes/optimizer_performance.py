@@ -14,7 +14,7 @@ from repositories import optimizer_performance_repository
 router = APIRouter(prefix="/optimizer-performance", tags=["优化师人效报表"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_ALLOWED_SOURCE = {"auto", "attribution", "legacy"}
+_ALLOWED_SOURCE = {"auto", "attribution", "legacy", "blend"}
 
 
 def _check_dates(start_date: str, end_date: str):
@@ -33,12 +33,9 @@ def _resolve_source(source: str) -> str:
         return source
     settings = get_settings()
     default = (settings.data_source_default or "").lower()
-    # blend 在优化师面板降级为 attribution（fact_optimizer_daily 不能拼接 attribution 真值）
-    if default in {"blend", "attribution"}:
-        return "attribution"
-    if default == "legacy":
-        return "legacy"
-    return "attribution" if settings.attribution_primary else "attribution"
+    if default in {"blend", "attribution", "legacy"}:
+        return default
+    return "attribution" if settings.attribution_primary else "blend"
 
 
 def _float(v) -> Optional[float]:
@@ -58,7 +55,15 @@ async def optimizer_summary(
     _check_dates(start_date, end_date)
     src = _resolve_source(source)
 
-    if src == "attribution":
+    if src == "blend":
+        rows = await asyncio.to_thread(
+            optimizer_performance_repository.query_optimizer_summary_blend,
+            start_date, end_date,
+            platform=platform,
+            source_type=source_type,
+            keyword=keyword,
+        )
+    elif src == "attribution":
         rows = await asyncio.to_thread(
             optimizer_performance_repository.query_optimizer_summary_attribution,
             start_date, end_date,

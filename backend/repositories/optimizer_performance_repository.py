@@ -338,6 +338,83 @@ def query_optimizer_detail(
 #  → JOIN ON 子句里做 CASE 转换
 # ═══════════════════════════════════════════════════════════
 
+def query_optimizer_summary_blend(
+    start_date: str,
+    end_date: str,
+    *,
+    platform: Optional[str] = None,
+    source_type: Optional[str] = None,
+    keyword: Optional[str] = None,
+) -> list[dict]:
+    """按优化师维度聚合（blend 数据源）
+
+    spend / impressions / clicks / installs → biz_campaign_daily_normalized 全量
+    registrations / purchase_value          → biz_attribution_ad_daily + intraday 兜底
+
+    JOIN 路径：
+      biz_campaign_daily_normalized n
+        JOIN campaign_optimizer_mapping m
+          ON (n.platform, n.account_id, n.campaign_id) = (m.platform, m.account_id, m.campaign_id)
+        LEFT JOIN attr_subquery a   -- daily 优先 + intraday 兜底
+          ON (n.stat_date, n.platform, n.account_id, n.campaign_id) = (a.d, a.plat, a.acc, a.key_id)
+    """
+    # 复用 biz_blend_service 的 attribution 双源 helper（campaign 粒度）
+    from services.biz_blend_service import _attr_subquery
+
+    n_clauses = ["n.stat_date BETWEEN %s AND %s"]
+    n_params: list = [start_date, end_date]
+    if platform:
+        n_clauses.append("n.platform = %s")
+        n_params.append(platform.lower())
+    if source_type:
+        n_clauses.append("m.source_type = %s")
+        n_params.append(source_type)
+    n_where = " AND ".join(n_clauses)
+
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, None)
+
+    sql = f"""
+        SELECT
+            m.optimizer_name_normalized            AS optimizer_name,
+            SUM(n.spend)                           AS total_spend,
+            SUM(n.impressions)                     AS impressions,
+            SUM(n.clicks)                          AS clicks,
+            SUM(n.installs)                        AS installs,
+            COALESCE(SUM(a.attr_registrations), 0) AS registrations,
+            COALESCE(SUM(a.attr_revenue), 0)       AS purchase_value,
+            COUNT(DISTINCT n.campaign_id)          AS campaign_count,
+            COUNT(DISTINCT n.stat_date)            AS active_days,
+            CASE WHEN SUM(n.spend) > 0
+                 THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
+                 ELSE NULL END                                            AS roas
+        FROM biz_campaign_daily_normalized n
+        JOIN campaign_optimizer_mapping m
+          ON m.platform    = n.platform
+         AND m.account_id  = n.account_id
+         AND m.campaign_id = n.campaign_id
+        LEFT JOIN ({attr_sql}) a
+            ON a.d      = n.stat_date
+           AND a.plat   = n.platform
+           AND a.acc    = n.account_id
+           AND a.key_id = n.campaign_id
+        WHERE {n_where}
+        GROUP BY m.optimizer_name_normalized
+        ORDER BY total_spend DESC
+    """
+    args = attr_args + n_params
+
+    with get_biz_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, args)
+        rows = cur.fetchall()
+
+    if keyword:
+        kw = keyword.strip().upper()
+        rows = [r for r in rows if kw in (r.get("optimizer_name") or "").upper()]
+
+    return rows
+
+
 def query_optimizer_summary_attribution(
     start_date: str,
     end_date: str,

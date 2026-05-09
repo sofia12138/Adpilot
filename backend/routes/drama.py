@@ -27,7 +27,7 @@ from tasks import sync_drama
 router = APIRouter(prefix="/drama", tags=["剧级分析"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_ALLOWED_SOURCE = {"auto", "attribution", "legacy"}
+_ALLOWED_SOURCE = {"auto", "attribution", "legacy", "blend"}
 
 
 def _validate_dates(start_date: str, end_date: str) -> None:
@@ -46,12 +46,9 @@ def _resolve_source(source: str) -> str:
         return source
     settings = get_settings()
     default = (settings.data_source_default or "").lower()
-    # 剧级表无法 blend：fact_drama_daily 与 attribution 维度不一致
-    if default in {"blend", "attribution"}:
-        return "attribution"
-    if default == "legacy":
-        return "legacy"
-    return "attribution" if settings.attribution_primary else "attribution"
+    if default in {"blend", "attribution", "legacy"}:
+        return default
+    return "attribution" if settings.attribution_primary else "blend"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -85,7 +82,20 @@ async def drama_summary(
     _validate_dates(start_date, end_date)
     src = _resolve_source(source)
 
-    if src == "attribution":
+    if src == "blend":
+        result = await asyncio.to_thread(
+            drama_repository.query_drama_summary_blend,
+            start_date, end_date,
+            source_type=source_type,
+            platform=platform,
+            channel=channel,
+            country=country,
+            keyword=keyword,
+            language_code=language_code,
+            page=page,
+            page_size=page_size,
+        )
+    elif src == "attribution":
         result = await asyncio.to_thread(
             drama_repository.query_drama_summary_attribution,
             start_date, end_date,
@@ -140,7 +150,18 @@ async def locale_breakdown(
         raise HTTPException(400, "content_key 或 drama_id 至少提供一个")
 
     src = _resolve_source("auto")
-    if src == "attribution":
+    if src == "blend":
+        rows = await asyncio.to_thread(
+            drama_repository.query_locale_breakdown_blend,
+            start_date, end_date,
+            content_key=content_key,
+            drama_id=drama_id,
+            source_type=source_type,
+            platform=platform,
+            channel=channel,
+            country=country,
+        )
+    elif src == "attribution":
         rows = await asyncio.to_thread(
             drama_repository.query_locale_breakdown_attribution,
             start_date, end_date,
@@ -187,7 +208,18 @@ async def drama_trend(
     _validate_dates(start_date, end_date)
 
     src = _resolve_source("auto")
-    if src == "attribution":
+    if src == "blend":
+        rows = await asyncio.to_thread(
+            drama_repository.query_drama_trend_blend,
+            start_date, end_date,
+            content_key=content_key,
+            language_code=language_code,
+            source_type=source_type,
+            platform=platform,
+            channel=channel,
+            country=country,
+        )
+    elif src == "attribution":
         rows = await asyncio.to_thread(
             drama_repository.query_drama_trend_attribution,
             start_date, end_date,

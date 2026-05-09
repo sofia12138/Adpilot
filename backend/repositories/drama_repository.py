@@ -741,3 +741,291 @@ def query_drama_trend_attribution(
         }
         for r in rows
     ]
+
+
+# ═══════════════════════════════════════════════════════════
+#  Blend 版本：normalized 投放（全量 spend）+ attribution 真值业务结果
+#
+#  JOIN 路径：
+#    biz_campaign_daily_normalized n
+#      JOIN ad_drama_mapping m   -- campaign 粒度
+#        ON (n.platform, n.account_id, n.campaign_id) = (m.platform, m.account_id, m.campaign_id)
+#      LEFT JOIN attr_subquery("campaign") a   -- daily 优先 + intraday 兜底
+#        ON (n.stat_date, n.platform, n.account_id, n.campaign_id) = (a.d, a.plat, a.acc, a.key_id)
+#
+#  与 attribution 版的区别：spend / clicks / installs 来自 normalized 全量，
+#  覆盖未被 attribution 表收录的 campaign（数仓 SLA 滞后或归因失败的）。
+#  reg / rev 仍来自 attribution 真值，未匹配上的 campaign 这两项为 0。
+# ═══════════════════════════════════════════════════════════
+
+def query_drama_summary_blend(
+    start_date: str,
+    end_date: str,
+    source_type: Optional[str] = None,
+    platform: Optional[str] = None,
+    channel: Optional[str] = None,
+    country: Optional[str] = None,
+    keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    """剧级总览（blend：normalized 全量 spend + attribution 真值 reg/rev）"""
+    from services.biz_blend_service import _attr_subquery
+
+    n_clauses = ["n.stat_date BETWEEN %s AND %s"]
+    n_params: list = [start_date, end_date]
+
+    if source_type:
+        n_clauses.append("m.source_type = %s")
+        n_params.append(source_type)
+    if platform:
+        n_clauses.append("n.platform = %s")
+        n_params.append(platform.lower())
+    if channel:
+        n_clauses.append("m.channel = %s")
+        n_params.append(channel)
+    if country:
+        n_clauses.append("m.country = %s")
+        n_params.append(country)
+    if language_code:
+        n_clauses.append("m.language_code = %s")
+        n_params.append(language_code)
+    if keyword:
+        n_clauses.append("m.localized_drama_name LIKE %s")
+        n_params.append(f"%{keyword}%")
+
+    n_where = " AND ".join(n_clauses)
+
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, None)
+
+    join_block = f"""
+        FROM biz_campaign_daily_normalized n
+        JOIN ad_drama_mapping m
+          ON m.platform    = n.platform
+         AND m.account_id  = n.account_id
+         AND m.campaign_id = n.campaign_id
+        LEFT JOIN ({attr_sql}) a
+            ON a.d      = n.stat_date
+           AND a.plat   = n.platform
+           AND a.acc    = n.account_id
+           AND a.key_id = n.campaign_id
+        WHERE {n_where}
+    """
+
+    count_sql = f"SELECT COUNT(DISTINCT m.content_key) AS total {join_block}"
+    data_sql = f"""
+        SELECT
+            m.content_key                          AS content_key,
+            ANY_VALUE(m.drama_id)                  AS drama_id,
+            ANY_VALUE(m.drama_type)                AS drama_type,
+            ANY_VALUE(m.localized_drama_name)      AS localized_drama_name,
+            SUM(n.spend)                           AS spend,
+            SUM(n.impressions)                     AS impressions,
+            SUM(n.clicks)                          AS clicks,
+            SUM(n.installs)                        AS installs,
+            COALESCE(SUM(a.attr_registrations), 0) AS registrations,
+            COALESCE(SUM(a.attr_revenue), 0)       AS purchase_value,
+            COUNT(DISTINCT m.language_code)        AS language_count
+        {join_block}
+        GROUP BY m.content_key
+        ORDER BY spend DESC
+        LIMIT %s OFFSET %s
+    """
+    offset = (page - 1) * page_size
+
+    with get_biz_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(count_sql, attr_args + n_params)
+            total = cur.fetchone()["total"]
+
+            cur.execute(data_sql, attr_args + n_params + [page_size, offset])
+            rows = cur.fetchall()
+
+    result = []
+    for r in rows:
+        spend = float(r["spend"] or 0)
+        purchase = float(r["purchase_value"] or 0)
+        clicks = int(r["clicks"] or 0)
+        impressions = int(r["impressions"] or 0)
+        result.append({
+            "content_key": r["content_key"],
+            "drama_id": r["drama_id"] or "",
+            "drama_type": r["drama_type"] or "",
+            "localized_drama_name": r["localized_drama_name"] or "",
+            "spend": round(spend, 4),
+            "impressions": impressions,
+            "clicks": clicks,
+            "installs": int(r["installs"] or 0),
+            "registrations": int(r["registrations"] or 0),
+            "purchase_value": round(purchase, 4),
+            "ctr": round(clicks / impressions * 100, 4) if impressions else 0,
+            "cpc": round(spend / clicks, 4) if clicks else 0,
+            "roas": round(purchase / spend, 4) if spend else 0,
+            "language_count": int(r["language_count"] or 0),
+        })
+
+    return {"total": total, "page": page, "page_size": page_size, "rows": result}
+
+
+def query_locale_breakdown_blend(
+    start_date: str,
+    end_date: str,
+    content_key: Optional[str] = None,
+    drama_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    platform: Optional[str] = None,
+    channel: Optional[str] = None,
+    country: Optional[str] = None,
+) -> list[dict]:
+    """语言版本明细（blend）"""
+    from services.biz_blend_service import _attr_subquery
+
+    n_clauses = ["n.stat_date BETWEEN %s AND %s"]
+    n_params: list = [start_date, end_date]
+
+    if content_key:
+        n_clauses.append("m.content_key = %s")
+        n_params.append(content_key)
+    elif drama_id:
+        n_clauses.append("m.drama_id = %s")
+        n_params.append(drama_id)
+
+    if source_type:
+        n_clauses.append("m.source_type = %s")
+        n_params.append(source_type)
+    if platform:
+        n_clauses.append("n.platform = %s")
+        n_params.append(platform.lower())
+    if channel:
+        n_clauses.append("m.channel = %s")
+        n_params.append(channel)
+    if country:
+        n_clauses.append("m.country = %s")
+        n_params.append(country)
+
+    n_where = " AND ".join(n_clauses)
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, None)
+
+    sql = f"""
+        SELECT
+            m.language_code                        AS language_code,
+            ANY_VALUE(m.localized_drama_name)      AS localized_drama_name,
+            SUM(n.spend)                           AS spend,
+            SUM(n.clicks)                          AS clicks,
+            SUM(n.installs)                        AS installs,
+            COALESCE(SUM(a.attr_registrations), 0) AS registrations,
+            COALESCE(SUM(a.attr_revenue), 0)       AS purchase_value
+        FROM biz_campaign_daily_normalized n
+        JOIN ad_drama_mapping m
+          ON m.platform    = n.platform
+         AND m.account_id  = n.account_id
+         AND m.campaign_id = n.campaign_id
+        LEFT JOIN ({attr_sql}) a
+            ON a.d      = n.stat_date
+           AND a.plat   = n.platform
+           AND a.acc    = n.account_id
+           AND a.key_id = n.campaign_id
+        WHERE {n_where}
+        GROUP BY m.language_code
+        ORDER BY spend DESC
+    """
+
+    with get_biz_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, attr_args + n_params)
+            rows = cur.fetchall()
+
+    result = []
+    for r in rows:
+        spend = float(r["spend"] or 0)
+        purchase = float(r["purchase_value"] or 0)
+        result.append({
+            "language_code": r["language_code"],
+            "localized_drama_name": r["localized_drama_name"] or "",
+            "spend": round(spend, 4),
+            "clicks": int(r["clicks"] or 0),
+            "installs": int(r["installs"] or 0),
+            "registrations": int(r["registrations"] or 0),
+            "purchase_value": round(purchase, 4),
+            "roas": round(purchase / spend, 4) if spend else 0,
+        })
+    return result
+
+
+def query_drama_trend_blend(
+    start_date: str,
+    end_date: str,
+    content_key: Optional[str] = None,
+    language_code: Optional[str] = None,
+    source_type: Optional[str] = None,
+    platform: Optional[str] = None,
+    channel: Optional[str] = None,
+    country: Optional[str] = None,
+) -> list[dict]:
+    """按天趋势（blend）"""
+    from services.biz_blend_service import _attr_subquery
+
+    n_clauses = ["n.stat_date BETWEEN %s AND %s"]
+    n_params: list = [start_date, end_date]
+
+    if content_key:
+        n_clauses.append("m.content_key = %s")
+        n_params.append(content_key)
+    if language_code:
+        n_clauses.append("m.language_code = %s")
+        n_params.append(language_code)
+    if source_type:
+        n_clauses.append("m.source_type = %s")
+        n_params.append(source_type)
+    if platform:
+        n_clauses.append("n.platform = %s")
+        n_params.append(platform.lower())
+    if channel:
+        n_clauses.append("m.channel = %s")
+        n_params.append(channel)
+    if country:
+        n_clauses.append("m.country = %s")
+        n_params.append(country)
+
+    n_where = " AND ".join(n_clauses)
+    attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, None)
+
+    sql = f"""
+        SELECT
+            n.stat_date                            AS stat_date,
+            SUM(n.spend)                           AS spend,
+            SUM(n.clicks)                          AS clicks,
+            SUM(n.installs)                        AS installs,
+            COALESCE(SUM(a.attr_registrations), 0) AS registrations,
+            COALESCE(SUM(a.attr_revenue), 0)       AS purchase_value
+        FROM biz_campaign_daily_normalized n
+        JOIN ad_drama_mapping m
+          ON m.platform    = n.platform
+         AND m.account_id  = n.account_id
+         AND m.campaign_id = n.campaign_id
+        LEFT JOIN ({attr_sql}) a
+            ON a.d      = n.stat_date
+           AND a.plat   = n.platform
+           AND a.acc    = n.account_id
+           AND a.key_id = n.campaign_id
+        WHERE {n_where}
+        GROUP BY n.stat_date
+        ORDER BY n.stat_date ASC
+    """
+    with get_biz_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, attr_args + n_params)
+            rows = cur.fetchall()
+
+    return [
+        {
+            "stat_date": str(r["stat_date"]),
+            "spend": round(float(r["spend"] or 0), 4),
+            "clicks": int(r["clicks"] or 0),
+            "installs": int(r["installs"] or 0),
+            "registrations": int(r["registrations"] or 0),
+            "purchase_value": round(float(r["purchase_value"] or 0), 4),
+        }
+        for r in rows
+    ]
