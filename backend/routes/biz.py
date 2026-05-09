@@ -16,12 +16,13 @@ from repositories import (
     biz_adgroup_repository,
     biz_ad_repository,
 )
-from services import biz_attribution_service
+from services import biz_attribution_service, biz_blend_service
 
 router = APIRouter(prefix="/biz", tags=["BIZ 业务数据"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_ALLOWED_SOURCE = {"auto", "attribution", "legacy"}
+_ALLOWED_SOURCE = {"auto", "attribution", "legacy", "blend"}
+_SOURCE_DESC = "数据源: auto/blend/attribution/legacy"
 
 
 def _check_dates(start_date: str, end_date: str):
@@ -35,13 +36,17 @@ def _check_dates(start_date: str, end_date: str):
 
 def _resolve_source(source: str) -> str:
     """
-    auto → 由 env ATTRIBUTION_PRIMARY 决定（true=attribution，false=legacy）
-    attribution → 强制走归因表（biz_attribution_ad_daily/intraday）
-    legacy      → 强制走 normalized 表
+    auto        → 由 env DATA_SOURCE_DEFAULT 决定（默认 blend）
+    blend       → normalized 投放指标 + attribution 真值业务结果（推荐生产口径）
+    attribution → 强制走纯归因表（biz_attribution_ad_daily/intraday）
+    legacy      → 强制走 normalized 表（旧口径，spend 完整但 revenue 失真）
     """
     if source not in _ALLOWED_SOURCE:
         raise HTTPException(400, f"source 必须是 {_ALLOWED_SOURCE}, 实际: {source}")
     if source == "auto":
+        default = (get_settings().data_source_default or "").lower()
+        if default in ("blend", "attribution", "legacy"):
+            return default
         return "attribution" if get_settings().attribution_primary else "legacy"
     return source
 
@@ -129,6 +134,12 @@ async def biz_overview(
             start_date, end_date,
             platform=platform, account_id=account_id,
         )
+    elif src == "blend":
+        data = await asyncio.to_thread(
+            biz_blend_service.get_overview,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+        )
     else:
         data = await asyncio.to_thread(
             biz_daily_report_repository.get_overview,
@@ -162,6 +173,15 @@ async def biz_campaign_daily(
     if src == "attribution":
         data = await asyncio.to_thread(
             biz_attribution_service.get_campaign_daily_list,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            campaign_name=campaign_name,
+            page=page, page_size=page_size,
+            order_by=order_by, order_dir=order_dir,
+        )
+    elif src == "blend":
+        data = await asyncio.to_thread(
+            biz_blend_service.get_campaign_daily_list,
             start_date, end_date,
             platform=platform, account_id=account_id,
             campaign_name=campaign_name,
@@ -204,6 +224,13 @@ async def biz_top_campaigns(
             platform=platform, account_id=account_id,
             metric=metric, limit=limit,
         )
+    elif src == "blend":
+        rows = await asyncio.to_thread(
+            biz_blend_service.get_top_campaigns,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            metric=metric, limit=limit,
+        )
     else:
         rows = await asyncio.to_thread(
             biz_daily_report_repository.get_top_campaigns,
@@ -234,6 +261,13 @@ async def biz_campaign_aggregated(
     if src == "attribution":
         rows = await asyncio.to_thread(
             biz_attribution_service.get_campaign_aggregated,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            order_by=order_by, order_dir=order_dir,
+        )
+    elif src == "blend":
+        rows = await asyncio.to_thread(
+            biz_blend_service.get_campaign_aggregated,
             start_date, end_date,
             platform=platform, account_id=account_id,
             order_by=order_by, order_dir=order_dir,
@@ -272,6 +306,13 @@ async def biz_adgroup_aggregated(
             platform=platform, campaign_id=campaign_id,
             order_by=order_by, order_dir=order_dir,
         )
+    elif src == "blend":
+        rows = await asyncio.to_thread(
+            biz_blend_service.get_adgroup_aggregated,
+            start_date, end_date,
+            platform=platform, campaign_id=campaign_id,
+            order_by=order_by, order_dir=order_dir,
+        )
     else:
         rows = await asyncio.to_thread(
             biz_adgroup_daily_repository.get_adgroup_aggregated,
@@ -303,6 +344,14 @@ async def biz_ad_aggregated(
     if src == "attribution":
         rows = await asyncio.to_thread(
             biz_attribution_service.get_ad_aggregated,
+            start_date, end_date,
+            platform=platform,
+            campaign_id=campaign_id, adgroup_id=adgroup_id,
+            order_by=order_by, order_dir=order_dir,
+        )
+    elif src == "blend":
+        rows = await asyncio.to_thread(
+            biz_blend_service.get_ad_aggregated,
             start_date, end_date,
             platform=platform,
             campaign_id=campaign_id, adgroup_id=adgroup_id,
@@ -395,6 +444,13 @@ async def creative_analysis(
     if src == "attribution":
         agg_rows = await asyncio.to_thread(
             biz_attribution_service.get_ad_aggregated,
+            start_date, end_date,
+            platform=platform,
+            order_by="total_spend", order_dir="desc",
+        )
+    elif src == "blend":
+        agg_rows = await asyncio.to_thread(
+            biz_blend_service.get_ad_aggregated,
             start_date, end_date,
             platform=platform,
             order_by="total_spend", order_dir="desc",

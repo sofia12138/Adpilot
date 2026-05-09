@@ -59,10 +59,16 @@ class Settings(BaseSettings):
     # 30min 自动同步任务总开关（默认 disabled，环境变量 ENABLE_CK_INTRADAY_SYNC=1 开启）
     enable_ck_intraday_sync: bool = False
 
-    # 归因数据接入 11 视图：默认数据源
-    # - false（默认）：legacy = biz_*_daily_normalized
-    # - true         ：attribution = biz_attribution_ad_daily/intraday
-    # 前端 ?source=attribution|legacy 可强制指定，不传则取这里的默认值
+    # 归因数据接入 11 视图：默认数据源（auto 模式下生效）
+    # 取值：blend / attribution / legacy
+    #   blend       — normalized 投放指标 + attribution 真值业务结果（推荐生产口径，默认）
+    #   attribution — 纯归因表（biz_attribution_ad_daily/intraday，TikTok spend 当前不全）
+    #   legacy      — 纯 normalized 表（旧口径，spend 完整但 revenue 失真）
+    # 前端 ?source=blend|attribution|legacy 可强制指定，不传则按 auto 取这里的默认值
+    data_source_default: str = "blend"
+
+    # 兼容旧 env：仅当 data_source_default 未显式设置时才考虑 attribution_primary
+    # （True → attribution，False → legacy；不影响 blend）
     attribution_primary: bool = False
 
     meta_app_id: str = ""
