@@ -6,6 +6,19 @@
   - drama_name_raw 只来自活动名称第 10 字段
   - remark_raw 不参与任何聚合、搜索、content_key 生成
   - content_key: 小程序 = drama_id；APP 无 drama_id 时 = normalized(localized_drama_name)
+
+【归因切换决策（Tier 3）】
+fact_drama_daily 拥有 country / language_code / drama_id 等剧级独有维度，
+归因表 biz_attribution_ad_daily 只到 ad_id 粒度，没有 language_code / country
+（账户级 country ≠ 充值用户 country）。
+
+因此本视图（剧级分析）不直接从归因表读取，而是保留 fact_drama_daily 作为聚合源；
+若未来需要把 fact_drama_daily.purchase_value 替换为数仓真实充值，需要在
+tasks/sync_drama.py 的 ETL 里增加：
+    biz_attribution_ad_daily.ad_id → ad_drama_mapping → drama_id 聚合 total_recharge_amount
+然后回写 fact_drama_daily.purchase_value（保留 locale 拆分能力需重新设计 country / language_code 来源）。
+
+当前阶段建议：保留旧实现不动，归因切换以单独工作项跟踪。
 """
 from __future__ import annotations
 

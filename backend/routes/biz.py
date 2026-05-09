@@ -1,4 +1,4 @@
-"""BIZ 业务数据查询路由 — adpilot_biz 归一化数据"""
+"""BIZ 业务数据查询路由 — adpilot_biz 归一化数据 + 归因数据双源拼接"""
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +7,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Query, HTTPException
 
+from config import get_settings
 from repositories import (
     biz_daily_report_repository,
     biz_campaign_repository,
@@ -15,10 +16,12 @@ from repositories import (
     biz_adgroup_repository,
     biz_ad_repository,
 )
+from services import biz_attribution_service
 
 router = APIRouter(prefix="/biz", tags=["BIZ 业务数据"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ALLOWED_SOURCE = {"auto", "attribution", "legacy"}
 
 
 def _check_dates(start_date: str, end_date: str):
@@ -28,6 +31,19 @@ def _check_dates(start_date: str, end_date: str):
         raise HTTPException(400, f"end_date 格式错误，应为 YYYY-MM-DD，实际: {end_date}")
     if start_date > end_date:
         raise HTTPException(400, f"start_date({start_date}) 不能大于 end_date({end_date})")
+
+
+def _resolve_source(source: str) -> str:
+    """
+    auto → 由 env ATTRIBUTION_PRIMARY 决定（true=attribution，false=legacy）
+    attribution → 强制走归因表（biz_attribution_ad_daily/intraday）
+    legacy      → 强制走 normalized 表
+    """
+    if source not in _ALLOWED_SOURCE:
+        raise HTTPException(400, f"source 必须是 {_ALLOWED_SOURCE}, 实际: {source}")
+    if source == "auto":
+        return "attribution" if get_settings().attribution_primary else "legacy"
+    return source
 
 
 @router.get("/campaigns")
@@ -103,18 +119,28 @@ async def biz_overview(
     end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
     platform: Optional[str] = Query(None, description="平台过滤: tiktok / meta"),
     account_id: Optional[str] = Query(None, description="账户 ID 过滤"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     _check_dates(start_date, end_date)
-    data = await asyncio.to_thread(
-        biz_daily_report_repository.get_overview,
-        start_date, end_date,
-        platform=platform, account_id=account_id,
-    )
+    src = _resolve_source(source)
+    if src == "attribution":
+        data = await asyncio.to_thread(
+            biz_attribution_service.get_overview,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+        )
+    else:
+        data = await asyncio.to_thread(
+            biz_daily_report_repository.get_overview,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+        )
     for k, v in data.items():
         if hasattr(v, "__float__"):
             data[k] = float(v)
         elif hasattr(v, "__int__") and not isinstance(v, bool):
             data[k] = int(v)
+    data["_source"] = src
     return {"code": 0, "message": "ok", "data": data}
 
 
@@ -129,20 +155,33 @@ async def biz_campaign_daily(
     page_size: int = Query(20, ge=1, le=200),
     order_by: str = Query("stat_date"),
     order_dir: str = Query("desc"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     _check_dates(start_date, end_date)
-    data = await asyncio.to_thread(
-        biz_daily_report_repository.get_campaign_daily_list,
-        start_date, end_date,
-        platform=platform, account_id=account_id,
-        campaign_name=campaign_name,
-        page=page, page_size=page_size,
-        order_by=order_by, order_dir=order_dir,
-    )
+    src = _resolve_source(source)
+    if src == "attribution":
+        data = await asyncio.to_thread(
+            biz_attribution_service.get_campaign_daily_list,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            campaign_name=campaign_name,
+            page=page, page_size=page_size,
+            order_by=order_by, order_dir=order_dir,
+        )
+    else:
+        data = await asyncio.to_thread(
+            biz_daily_report_repository.get_campaign_daily_list,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            campaign_name=campaign_name,
+            page=page, page_size=page_size,
+            order_by=order_by, order_dir=order_dir,
+        )
     for row in data["list"]:
         for k, v in row.items():
             if hasattr(v, "__float__") and not isinstance(v, (int, bool)):
                 row[k] = float(v)
+    data["_source"] = src
     return {"code": 0, "message": "ok", "data": data}
 
 
@@ -154,19 +193,29 @@ async def biz_top_campaigns(
     account_id: Optional[str] = Query(None),
     metric: str = Query("spend", description="排序指标: spend/revenue/clicks/installs/conversions/roas"),
     limit: int = Query(20, ge=1, le=100),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     _check_dates(start_date, end_date)
-    rows = await asyncio.to_thread(
-        biz_daily_report_repository.get_top_campaigns,
-        start_date, end_date,
-        platform=platform, account_id=account_id,
-        metric=metric, limit=limit,
-    )
+    src = _resolve_source(source)
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            biz_attribution_service.get_top_campaigns,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            metric=metric, limit=limit,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            biz_daily_report_repository.get_top_campaigns,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            metric=metric, limit=limit,
+        )
     for row in rows:
         for k, v in row.items():
             if hasattr(v, "__float__") and not isinstance(v, (int, bool)):
                 row[k] = float(v)
-    return {"code": 0, "message": "ok", "data": rows}
+    return {"code": 0, "message": "ok", "data": rows, "_source": src}
 
 
 @router.get("/campaign-agg")
@@ -177,20 +226,30 @@ async def biz_campaign_aggregated(
     account_id: Optional[str] = Query(None),
     order_by: str = Query("total_spend"),
     order_dir: str = Query("desc"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """Campaign 聚合数据 — 按 campaign_id 分组，时间段内汇总"""
     _check_dates(start_date, end_date)
-    rows = await asyncio.to_thread(
-        biz_daily_report_repository.get_campaign_aggregated,
-        start_date, end_date,
-        platform=platform, account_id=account_id,
-        order_by=order_by, order_dir=order_dir,
-    )
+    src = _resolve_source(source)
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            biz_attribution_service.get_campaign_aggregated,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            order_by=order_by, order_dir=order_dir,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            biz_daily_report_repository.get_campaign_aggregated,
+            start_date, end_date,
+            platform=platform, account_id=account_id,
+            order_by=order_by, order_dir=order_dir,
+        )
     for row in rows:
         for k, v in row.items():
             if hasattr(v, "__float__") and not isinstance(v, (int, bool)):
                 row[k] = float(v)
-    return {"code": 0, "message": "ok", "data": rows}
+    return {"code": 0, "message": "ok", "data": rows, "_source": src}
 
 
 @router.get("/adgroup-agg")
@@ -201,20 +260,30 @@ async def biz_adgroup_aggregated(
     campaign_id: Optional[str] = Query(None, description="按 campaign 过滤"),
     order_by: str = Query("total_spend"),
     order_dir: str = Query("desc"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """Adgroup 聚合数据 — 按 adgroup_id 分组，支持按 campaign_id 过滤"""
     _check_dates(start_date, end_date)
-    rows = await asyncio.to_thread(
-        biz_adgroup_daily_repository.get_adgroup_aggregated,
-        start_date, end_date,
-        platform=platform, campaign_id=campaign_id,
-        order_by=order_by, order_dir=order_dir,
-    )
+    src = _resolve_source(source)
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            biz_attribution_service.get_adgroup_aggregated,
+            start_date, end_date,
+            platform=platform, campaign_id=campaign_id,
+            order_by=order_by, order_dir=order_dir,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            biz_adgroup_daily_repository.get_adgroup_aggregated,
+            start_date, end_date,
+            platform=platform, campaign_id=campaign_id,
+            order_by=order_by, order_dir=order_dir,
+        )
     for row in rows:
         for k, v in row.items():
             if hasattr(v, "__float__") and not isinstance(v, (int, bool)):
                 row[k] = float(v)
-    return {"code": 0, "message": "ok", "data": rows}
+    return {"code": 0, "message": "ok", "data": rows, "_source": src}
 
 
 @router.get("/ad-agg")
@@ -226,20 +295,31 @@ async def biz_ad_aggregated(
     adgroup_id: Optional[str] = Query(None, description="按 adgroup 过滤"),
     order_by: str = Query("total_spend"),
     order_dir: str = Query("desc"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """Ad 聚合数据 — 按 ad_id 分组，支持按 adgroup_id 过滤"""
     _check_dates(start_date, end_date)
-    rows = await asyncio.to_thread(
-        biz_ad_daily_repository.get_ad_aggregated,
-        start_date, end_date,
-        platform=platform, campaign_id=campaign_id, adgroup_id=adgroup_id,
-        order_by=order_by, order_dir=order_dir,
-    )
+    src = _resolve_source(source)
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            biz_attribution_service.get_ad_aggregated,
+            start_date, end_date,
+            platform=platform,
+            campaign_id=campaign_id, adgroup_id=adgroup_id,
+            order_by=order_by, order_dir=order_dir,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            biz_ad_daily_repository.get_ad_aggregated,
+            start_date, end_date,
+            platform=platform, campaign_id=campaign_id, adgroup_id=adgroup_id,
+            order_by=order_by, order_dir=order_dir,
+        )
     for row in rows:
         for k, v in row.items():
             if hasattr(v, "__float__") and not isinstance(v, (int, bool)):
                 row[k] = float(v)
-    return {"code": 0, "message": "ok", "data": rows}
+    return {"code": 0, "message": "ok", "data": rows, "_source": src}
 
 
 @router.get("/adgroup-daily")
@@ -307,16 +387,25 @@ async def creative_analysis(
     platform: Optional[str] = Query(None),
     min_spend: float = Query(10, description="低表现榜最小消耗门槛"),
     top_n: int = Query(5, ge=1, le=20),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """素材分析综合接口 — 基于 ad 维度聚合，返回 overview / top / low / list"""
     _check_dates(start_date, end_date)
-
-    agg_rows = await asyncio.to_thread(
-        biz_ad_daily_repository.get_ad_aggregated,
-        start_date, end_date,
-        platform=platform,
-        order_by="total_spend", order_dir="desc",
-    )
+    src = _resolve_source(source)
+    if src == "attribution":
+        agg_rows = await asyncio.to_thread(
+            biz_attribution_service.get_ad_aggregated,
+            start_date, end_date,
+            platform=platform,
+            order_by="total_spend", order_dir="desc",
+        )
+    else:
+        agg_rows = await asyncio.to_thread(
+            biz_ad_daily_repository.get_ad_aggregated,
+            start_date, end_date,
+            platform=platform,
+            order_by="total_spend", order_dir="desc",
+        )
 
     def _float(v):
         if v is None:
@@ -374,5 +463,6 @@ async def creative_analysis(
             "top": top_by_roas,
             "low": low_performers,
             "list": items,
+            "_source": src,
         },
     }

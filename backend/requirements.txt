@@ -12,3 +12,4 @@ bcrypt>=4.0.0,<4.1.0
 apscheduler>=3.10.0
 paramiko>=3.0.0
 pyyaml>=6.0
+pyodps>=0.12.0

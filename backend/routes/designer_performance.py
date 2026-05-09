@@ -7,11 +7,13 @@ from typing import Optional
 
 from fastapi import APIRouter, Query, HTTPException
 
+from config import get_settings
 from repositories import designer_performance_repository
 
 router = APIRouter(prefix="/designer-performance", tags=["设计师人效报表"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ALLOWED_SOURCE = {"auto", "attribution", "legacy"}
 
 
 def _check_dates(start_date: str, end_date: str):
@@ -21,6 +23,14 @@ def _check_dates(start_date: str, end_date: str):
         raise HTTPException(400, f"end_date 格式错误，应为 YYYY-MM-DD，实际: {end_date}")
     if start_date > end_date:
         raise HTTPException(400, f"start_date({start_date}) 不能大于 end_date({end_date})")
+
+
+def _resolve_source(source: str) -> str:
+    if source not in _ALLOWED_SOURCE:
+        raise HTTPException(400, f"source 必须是 {_ALLOWED_SOURCE}, 实际: {source}")
+    if source == "auto":
+        return "attribution" if get_settings().attribution_primary else "legacy"
+    return source
 
 
 def _float(v) -> Optional[float]:
@@ -33,16 +43,26 @@ async def designer_summary(
     end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
     platform: Optional[str] = Query(None, description="平台过滤: tiktok / meta"),
     keyword: Optional[str] = Query(None, description="设计师关键词搜索"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """按设计师维度聚合的人效汇总，默认按总消耗降序"""
     _check_dates(start_date, end_date)
+    src = _resolve_source(source)
 
-    rows = await asyncio.to_thread(
-        designer_performance_repository.get_designer_summary,
-        start_date, end_date,
-        platform=platform,
-        keyword=keyword,
-    )
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            designer_performance_repository.get_designer_summary_attribution,
+            start_date, end_date,
+            platform=platform,
+            keyword=keyword,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            designer_performance_repository.get_designer_summary,
+            start_date, end_date,
+            platform=platform,
+            keyword=keyword,
+        )
 
     result = []
     for r in rows:
@@ -59,7 +79,7 @@ async def designer_summary(
             "roas":           _float(r.get("roas")),
         })
 
-    return {"code": 0, "message": "ok", "data": result}
+    return {"code": 0, "message": "ok", "data": result, "_source": src}
 
 
 @router.get("/materials")
@@ -68,15 +88,24 @@ async def designer_materials(
     end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
     designer_name: str = Query(..., description="设计师名称"),
     platform: Optional[str] = Query(None, description="平台过滤: tiktok / meta"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """返回指定设计师在时间范围内的素材明细列表"""
     _check_dates(start_date, end_date)
+    src = _resolve_source(source)
 
-    rows = await asyncio.to_thread(
-        designer_performance_repository.get_designer_materials,
-        start_date, end_date, designer_name,
-        platform=platform,
-    )
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            designer_performance_repository.get_designer_materials_attribution,
+            start_date, end_date, designer_name,
+            platform=platform,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            designer_performance_repository.get_designer_materials,
+            start_date, end_date, designer_name,
+            platform=platform,
+        )
 
     result = []
     for r in rows:
@@ -95,4 +124,4 @@ async def designer_materials(
             "roas":           _float(r.get("roas")),
         })
 
-    return {"code": 0, "message": "ok", "data": result}
+    return {"code": 0, "message": "ok", "data": result, "_source": src}

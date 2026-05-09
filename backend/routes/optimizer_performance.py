@@ -8,11 +8,13 @@ from typing import Optional
 from fastapi import APIRouter, Query, HTTPException
 from pydantic import BaseModel
 
+from config import get_settings
 from repositories import optimizer_performance_repository
 
 router = APIRouter(prefix="/optimizer-performance", tags=["优化师人效报表"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ALLOWED_SOURCE = {"auto", "attribution", "legacy"}
 
 
 def _check_dates(start_date: str, end_date: str):
@@ -22,6 +24,14 @@ def _check_dates(start_date: str, end_date: str):
         raise HTTPException(400, f"end_date 格式错误: {end_date}")
     if start_date > end_date:
         raise HTTPException(400, f"start_date({start_date}) > end_date({end_date})")
+
+
+def _resolve_source(source: str) -> str:
+    if source not in _ALLOWED_SOURCE:
+        raise HTTPException(400, f"source 必须是 {_ALLOWED_SOURCE}, 实际: {source}")
+    if source == "auto":
+        return "attribution" if get_settings().attribution_primary else "legacy"
+    return source
 
 
 def _float(v) -> Optional[float]:
@@ -92,15 +102,24 @@ async def optimizer_detail(
     end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
     optimizer_name: str = Query(..., description="优化师名称"),
     platform: Optional[str] = Query(None, description="平台: tiktok / meta"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """返回指定优化师的 campaign 明细（含匹配来源）"""
     _check_dates(start_date, end_date)
+    src = _resolve_source(source)
 
-    rows = await asyncio.to_thread(
-        optimizer_performance_repository.query_optimizer_detail,
-        start_date, end_date, optimizer_name,
-        platform=platform,
-    )
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            optimizer_performance_repository.query_optimizer_detail_attribution,
+            start_date, end_date, optimizer_name,
+            platform=platform,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            optimizer_performance_repository.query_optimizer_detail,
+            start_date, end_date, optimizer_name,
+            platform=platform,
+        )
 
     result = []
     for r in rows:
@@ -116,12 +135,13 @@ async def optimizer_detail(
             "impressions":        int(r.get("impressions") or 0),
             "clicks":             int(r.get("clicks") or 0),
             "installs":           int(r.get("installs") or 0),
+            "registrations":      int(r.get("registrations") or 0),
             "purchase_value":     round(float(r.get("purchase_value") or 0), 2),
             "active_days":        int(r.get("active_days") or 0),
             "roas":               _float(r.get("roas")),
         })
 
-    return {"code": 0, "message": "ok", "data": result}
+    return {"code": 0, "message": "ok", "data": result, "_source": src}
 
 
 @router.get("/match-distribution")

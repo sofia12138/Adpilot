@@ -39,6 +39,32 @@ class Settings(BaseSettings):
     biz_mysql_password: str = ""
     biz_mysql_database: str = ""
 
+    # 归因数仓 MaxCompute（用于拉取 metis_dw.ads_ad_delivery_di 等 ADS 层）
+    odps_access_key_id: str = ""
+    odps_access_key_secret: str = ""
+    odps_endpoint: str = "https://service.us-west-1.maxcompute.aliyun.com/api"
+    odps_project: str = "metis_dw"
+    odps_tunnel_endpoint: str = ""  # 可选；不填使用默认
+
+    # 阿里云 DMS Enterprise OpenAPI（用于 ClickHouse 实时同步 + MaxCompute 回退查询）
+    # 鉴权复用 odps_access_key_id / odps_access_key_secret（同一 RAM 用户）
+    # 也可独立指定 dms_access_key_id / dms_access_key_secret 覆盖
+    dms_access_key_id: str = ""
+    dms_access_key_secret: str = ""
+    dms_endpoint: str = "dms-enterprise.us-west-1.aliyuncs.com"
+    dms_ck_db_id: int = 79572320       # metis (ClickHouse)
+    dms_mc_db_id: int = 80154230       # metis_dw (MaxCompute)
+    dms_max_retries: int = 3
+    dms_retry_backoff_sec: float = 1.5
+    # 30min 自动同步任务总开关（默认 disabled，环境变量 ENABLE_CK_INTRADAY_SYNC=1 开启）
+    enable_ck_intraday_sync: bool = False
+
+    # 归因数据接入 11 视图：默认数据源
+    # - false（默认）：legacy = biz_*_daily_normalized
+    # - true         ：attribution = biz_attribution_ad_daily/intraday
+    # 前端 ?source=attribution|legacy 可强制指定，不传则取这里的默认值
+    attribution_primary: bool = False
+
     meta_app_id: str = ""
     meta_app_secret: str = ""
     meta_access_token: str = ""

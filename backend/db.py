@@ -1093,6 +1093,152 @@ _BIZ_TABLES_SQL = [
     COMMENT='优化师名单配置表'
     """,
     # ─── TikTok 素材上传记录表 ────────────────────────
+    # ─── 归因日报（来自 metis_dw.ads_ad_delivery_di，经 CK 同步进 BIZ）────────
+    """
+    CREATE TABLE IF NOT EXISTS biz_attribution_ad_daily (
+        id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+        -- ── 时间 / 时区 ───────────────────────────────────────────
+        ds_la                    DATE          NOT NULL COMMENT '上游原始 LA cohort 日（America/Los_Angeles）',
+        ds_account_local         DATE          NOT NULL COMMENT '按账户时区近似的 cohort 日（LA+Phoenix 当前等于 ds_la）',
+        account_timezone         VARCHAR(64)   NOT NULL DEFAULT '' COMMENT '账户实际 IANA 时区',
+        timezone_source          VARCHAR(20)   NOT NULL DEFAULT '' COMMENT 'account_dim / media_fact / fallback',
+
+        -- ── 维度 ─────────────────────────────────────────────────
+        platform                 VARCHAR(20)   NOT NULL COMMENT '媒体源 lower：tiktok / facebook / google / ...',
+        account_id               VARCHAR(100)  NOT NULL,
+        account_name             VARCHAR(500)  NOT NULL DEFAULT '',
+        account_status           VARCHAR(50)   NOT NULL DEFAULT '',
+        campaign_id              VARCHAR(100)  NOT NULL DEFAULT '',
+        campaign_name            VARCHAR(500)  NOT NULL DEFAULT '',
+        delivery_method          VARCHAR(100)  NOT NULL DEFAULT '' COMMENT 'campaign_name 第 1 段',
+        operator_id              VARCHAR(100)  NOT NULL DEFAULT '' COMMENT 'campaign_name 第 2 段：投手 ID',
+        content_id               BIGINT        NOT NULL DEFAULT 0 COMMENT 'campaign_name 第 4 段：剧 ID',
+        objective_type           VARCHAR(100)  NOT NULL DEFAULT '',
+        budget_mode              VARCHAR(50)   NOT NULL DEFAULT '',
+        budget_amount            DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '预算金额 USD',
+        adgroup_id               VARCHAR(100)  NOT NULL DEFAULT '',
+        adgroup_name             VARCHAR(500)  NOT NULL DEFAULT '',
+        optimize_goal            VARCHAR(100)  NOT NULL DEFAULT '',
+        bid_type                 VARCHAR(50)   NOT NULL DEFAULT '',
+        ad_id                    VARCHAR(100)  NOT NULL,
+        ad_name                  VARCHAR(500)  NOT NULL DEFAULT '',
+        creative_id              VARCHAR(100)  NOT NULL DEFAULT '',
+        video_id                 VARCHAR(100)  NOT NULL DEFAULT '',
+        ad_status                VARCHAR(50)   NOT NULL DEFAULT '',
+
+        -- ── 投放原子指标（媒体口径）──────────────────────────────
+        spend                    DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '花费 USD',
+        impressions              BIGINT        NOT NULL DEFAULT 0,
+        clicks                   BIGINT        NOT NULL DEFAULT 0,
+        inline_link_clicks       BIGINT        NOT NULL DEFAULT 0,
+        landing_page_view        BIGINT        NOT NULL DEFAULT 0,
+        conversion               BIGINT        NOT NULL DEFAULT 0,
+        install                  BIGINT        NOT NULL DEFAULT 0,
+        activation               BIGINT        NOT NULL DEFAULT 0 COMMENT '激活事件数（媒体口径）',
+        registration             BIGINT        NOT NULL DEFAULT 0 COMMENT '注册事件数（媒体口径）',
+        purchase                 BIGINT        NOT NULL DEFAULT 0 COMMENT '购买事件数（媒体口径）',
+
+        -- ── Cohort UV（last-touch 归因）──────────────────────────
+        cohort_activations       BIGINT        NOT NULL DEFAULT 0 COMMENT '激活 cohort 人数（uniq UV）',
+        cohort_first_chargers    BIGINT        NOT NULL DEFAULT 0 COMMENT '120 天窗口内首充用户数',
+        cohort_pay_users         BIGINT        NOT NULL DEFAULT 0 COMMENT '120 天窗口内付费用户数',
+
+        -- ── 订阅 / 内购订单（金额单位 USD，已从美分转换）──────────
+        first_sub_count          BIGINT        NOT NULL DEFAULT 0 COMMENT '首次订阅订单数',
+        first_sub_amount         DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '首次订阅金额 USD',
+        renew_sub_count          BIGINT        NOT NULL DEFAULT 0 COMMENT '订阅续费订单数',
+        renew_sub_amount         DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '订阅续费金额 USD',
+        first_iap_count          BIGINT        NOT NULL DEFAULT 0 COMMENT '首次内购订单数',
+        first_iap_amount         DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '首次内购金额 USD',
+        repeat_iap_count         BIGINT        NOT NULL DEFAULT 0 COMMENT '复购内购订单数',
+        repeat_iap_amount        DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '复购内购金额 USD',
+
+        -- ── 累计充值（cohort N 日窗口）─────────────────────────
+        total_recharge_amount    DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '该 cohort 全周期累计付费金额 USD',
+        cum_recharge_1d          DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT 'D0 累计 USD',
+        cum_recharge_3d          DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT 'D0~D2 累计 USD',
+        cum_recharge_7d          DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT 'D0~D6 累计 USD',
+        cum_recharge_14d         DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT 'D0~D13 累计 USD',
+        cum_recharge_30d         DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT 'D0~D29 累计 USD',
+        cum_recharge_90d         DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT 'D0~D89 累计 USD',
+        cum_recharge_120d        DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT 'D0~D119 累计 USD',
+
+        -- ── 元信息 ──────────────────────────────────────────────
+        upstream_updated_at      DATETIME      DEFAULT NULL COMMENT '上游 INSERT OVERWRITE 时间 UTC',
+        synced_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        UNIQUE KEY uk_ad_dsla (platform, ad_id, ds_la),
+        INDEX idx_ds_account_local (ds_account_local),
+        INDEX idx_ds_la (ds_la),
+        INDEX idx_account_dsal (account_id, ds_account_local),
+        INDEX idx_campaign_dsal (campaign_id, ds_account_local),
+        INDEX idx_adgroup_dsal (adgroup_id, ds_account_local),
+        INDEX idx_content_dsal (content_id, ds_account_local)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='投放归因日报（来源 metis.ads_ad_delivery_di / metis_dw.ads_ad_delivery_di）'
+    """,
+    # ─── 当日实时归因（来自 ODS 小时级 + DWD 充值事实，30 分钟刷新窗口）──────
+    # 设计要点：
+    # 1) 主源 ods_media_report_data_hi（spend/imp/click/activation/registration/purchase 等媒体口径），
+    #    按 (platform, advertiser_id, ad_id, stat_time_day) argMax(updated_at_ms) 去重得到"截止当前最新"
+    # 2) 辅源 dwd_invest_recharge_df（first_inapp / first_subscribe 标记 + 美分金额），
+    #    按 (ad_id, pay_time→stat_time_day) 聚合，与主源 LEFT JOIN
+    # 3) spend 保留账户原币种原值（保留 currency 列），未来加汇率表再做 USD 换算；
+    #    充值金额（来自 dwd_invest_recharge_df）已经在统一口径，仍按"美分 / 100"转 USD
+    # 4) 与 biz_attribution_ad_daily 的关系：本表覆盖"今天/昨天"小时级实时窗口，
+    #    daily 表覆盖 T+1 cohort 完整窗口；前端"今天"用本表，"历史"用 daily 表
+    """
+    CREATE TABLE IF NOT EXISTS biz_attribution_ad_intraday (
+        id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+
+        -- ── 时间 / 时区 / 币种 ──────────────────────────────────────
+        ds_account_local         DATE          NOT NULL COMMENT '账户日 = ods.stat_time_day（账户 timezone 下）',
+        ds_la                    DATE          NOT NULL COMMENT 'LA 日（账户都是 LA/Phoenix 时近似等于 ds_account_local）',
+        account_timezone         VARCHAR(64)   NOT NULL DEFAULT '',
+        currency                 VARCHAR(8)    NOT NULL DEFAULT '' COMMENT '账户币种 USD / CNY / ...',
+
+        -- ── 维度 ────────────────────────────────────────────────────
+        platform                 VARCHAR(20)   NOT NULL COMMENT 'tiktok / facebook / google / ...',
+        account_id               VARCHAR(100)  NOT NULL COMMENT '= ods.advertiser_id',
+        ad_id                    VARCHAR(100)  NOT NULL,
+        country                  VARCHAR(8)    NOT NULL DEFAULT '',
+
+        -- ── 投放原子指标（来自 ods_media_report_data_hi，账户原币种原值）──
+        spend                    DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '账户原币种原值，未做汇率换算',
+        impressions              BIGINT        NOT NULL DEFAULT 0,
+        clicks                   BIGINT        NOT NULL DEFAULT 0,
+        inline_link_clicks       BIGINT        NOT NULL DEFAULT 0,
+        reach                    BIGINT        NOT NULL DEFAULT 0,
+        landing_page_view        BIGINT        NOT NULL DEFAULT 0,
+        conversion               BIGINT        NOT NULL DEFAULT 0,
+        install                  BIGINT        NOT NULL DEFAULT 0,
+        activation               BIGINT        NOT NULL DEFAULT 0 COMMENT '媒体口径事件次数',
+        registration             BIGINT        NOT NULL DEFAULT 0 COMMENT '媒体口径事件次数',
+        purchase                 BIGINT        NOT NULL DEFAULT 0 COMMENT '媒体口径首充数（事件次数）',
+        video_play_actions       BIGINT        NOT NULL DEFAULT 0,
+
+        -- ── 业务归因充值（来自 dwd_invest_recharge_df，金额单位 USD）─
+        first_iap_count          BIGINT        NOT NULL DEFAULT 0 COMMENT 'order_type=purchase AND first_inapp=1',
+        first_iap_amount         DECIMAL(14,4) NOT NULL DEFAULT 0,
+        first_sub_count          BIGINT        NOT NULL DEFAULT 0 COMMENT 'order_type=subscribe AND first_subscribe=1',
+        first_sub_amount         DECIMAL(14,4) NOT NULL DEFAULT 0,
+        total_recharge_amount    DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '当日归因到该 ad_id 的所有充值',
+
+        -- ── 元信息 ──────────────────────────────────────────────────
+        upstream_max_updated_at_ms BIGINT      NOT NULL DEFAULT 0 COMMENT 'ods 侧 MAX(updated_at_ms)，刷新版本号',
+        synced_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        UNIQUE KEY uk_ad_dsacc (platform, ad_id, ds_account_local),
+        INDEX idx_ds_la (ds_la),
+        INDEX idx_account_dsal (account_id, ds_account_local)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='当日实时归因（来源 ods_media_report_data_hi + dwd_invest_recharge_df，30min 刷新）'
+    """,
     """
     CREATE TABLE IF NOT EXISTS tiktok_material_uploads (
         id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
