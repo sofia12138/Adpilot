@@ -31,7 +31,6 @@ import { updateMetaAdStatus } from '@/services/meta-ads'
 // Formatters
 // ---------------------------------------------------------------------------
 
-function fmtUsd(n: number | null) { return n != null ? `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '-' }
 function fmtUsd2(n: number | null) { return n != null ? `$${n.toFixed(2)}` : '-' }
 function fmtPct(n: number | null) { return n != null ? `${(n * 100).toFixed(2)}%` : '-' }
 function fmtRatio(n: number | null) { return n != null ? n.toFixed(2) : '-' }
