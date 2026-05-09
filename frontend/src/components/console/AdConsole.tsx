@@ -41,7 +41,7 @@ function fmtNum(n: number | null) { return n != null ? n.toLocaleString() : '-' 
 // Column defs for hierarchical table (aggregated data)
 // ---------------------------------------------------------------------------
 
-type SortKey = 'total_spend' | 'total_revenue' | 'roas' | 'ctr' | 'cpc' | 'total_installs' | 'total_clicks' | 'total_impressions' | 'total_conversions' | 'cpi' | 'cpa' | 'cpm'
+type SortKey = 'total_spend' | 'total_revenue' | 'roas' | 'ctr' | 'cpc' | 'total_registrations' | 'total_installs' | 'total_clicks' | 'total_impressions' | 'total_conversions' | 'cpi' | 'cpa' | 'cpm'
 
 interface ColDef {
   key: string
@@ -54,18 +54,19 @@ interface ColDef {
 }
 
 const AGG_COLUMNS: ColDef[] = [
-  { key: 'total_spend',       label: '消耗', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd,   sortable: true },
-  { key: 'total_revenue',     label: '收入', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd,   sortable: true },
-  { key: 'roas',              label: 'ROI',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtRatio, sortable: true },
-  { key: 'ctr',               label: 'CTR',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtPct,   sortable: true },
-  { key: 'cpc',               label: 'CPC',  group: 'cost',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
-  { key: 'total_installs',    label: '安装', group: 'performance', defaultVisible: true,  align: 'right', format: fmtNum,   sortable: true },
-  { key: 'total_impressions', label: '展示', group: 'performance', defaultVisible: false, align: 'right', format: fmtNum,   sortable: true },
-  { key: 'total_clicks',      label: '点击', group: 'performance', defaultVisible: false, align: 'right', format: fmtNum,   sortable: true },
-  { key: 'total_conversions', label: '转化', group: 'performance', defaultVisible: false, align: 'right', format: fmtNum,   sortable: true },
-  { key: 'cpi',               label: 'CPI',  group: 'cost',        defaultVisible: false, align: 'right', format: fmtUsd2,  sortable: true },
-  { key: 'cpa',               label: 'CPA',  group: 'cost',        defaultVisible: false, align: 'right', format: fmtUsd2,  sortable: true },
-  { key: 'cpm',               label: 'CPM',  group: 'cost',        defaultVisible: false, align: 'right', format: fmtUsd2,  sortable: true },
+  { key: 'total_spend',         label: '消耗', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd,   sortable: true },
+  { key: 'total_revenue',       label: '收入', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd,   sortable: true },
+  { key: 'roas',                label: 'ROI',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtRatio, sortable: true },
+  { key: 'ctr',                 label: 'CTR',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtPct,   sortable: true },
+  { key: 'cpc',                 label: 'CPC',  group: 'cost',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
+  { key: 'total_registrations', label: '注册', group: 'performance', defaultVisible: true,  align: 'right', format: fmtNum,   sortable: true },
+  { key: 'total_installs',      label: '安装', group: 'performance', defaultVisible: false, align: 'right', format: fmtNum,   sortable: true },
+  { key: 'total_impressions',   label: '展示', group: 'performance', defaultVisible: false, align: 'right', format: fmtNum,   sortable: true },
+  { key: 'total_clicks',        label: '点击', group: 'performance', defaultVisible: false, align: 'right', format: fmtNum,   sortable: true },
+  { key: 'total_conversions',   label: '转化', group: 'performance', defaultVisible: false, align: 'right', format: fmtNum,   sortable: true },
+  { key: 'cpi',                 label: 'CPI',  group: 'cost',        defaultVisible: false, align: 'right', format: fmtUsd2,  sortable: true },
+  { key: 'cpa',                 label: 'CPA',  group: 'cost',        defaultVisible: false, align: 'right', format: fmtUsd2,  sortable: true },
+  { key: 'cpm',                 label: 'CPM',  group: 'cost',        defaultVisible: false, align: 'right', format: fmtUsd2,  sortable: true },
 ]
 
 // ---------------------------------------------------------------------------
@@ -190,7 +191,7 @@ const LEVEL_BADGE: Record<RowLevel, { label: string; cls: string }> = {
 // Column persistence
 // ---------------------------------------------------------------------------
 
-function colStorageKey(platform: string) { return `console_hier_cols_${platform}` }
+function colStorageKey(platform: string) { return `console_hier_cols_v2_${platform}` }
 function loadVisibleCols(platform: string): string[] {
   try {
     const raw = localStorage.getItem(colStorageKey(platform))

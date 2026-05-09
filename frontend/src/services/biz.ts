@@ -38,6 +38,7 @@ export interface BizOverview {
   total_clicks: number
   total_installs: number
   total_conversions: number
+  total_registrations?: number
   avg_ctr: number | null
   avg_cpc: number | null
   avg_cpm: number | null
@@ -60,6 +61,7 @@ export interface BizTopCampaign {
   total_clicks: number
   total_installs: number
   total_conversions: number
+  total_registrations?: number
   total_revenue: number
   avg_roas: number | null
 }
@@ -84,6 +86,7 @@ export interface BizCampaignDaily {
   clicks: number
   installs: number
   conversions: number
+  registrations?: number
   revenue: number
   ctr: number | null
   cpc: number | null
@@ -196,6 +199,7 @@ export interface AggRow {
   total_clicks: number
   total_installs: number
   total_conversions: number
+  total_registrations?: number
   ctr: number | null
   cpc: number | null
   cpm: number | null

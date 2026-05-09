@@ -5,7 +5,7 @@ import { StatCard } from '@/components/common/StatCard'
 import { SectionCard } from '@/components/common/SectionCard'
 import { DataTable, type Column } from '@/components/common/DataTable'
 import { DateRangeFilter, getDefaultDateRange, type DateRange } from '@/components/common/DateRangeFilter'
-import { Image, MousePointerClick, Eye, TrendingUp, Trophy, AlertTriangle, Loader2, AlertCircle } from 'lucide-react'
+import { Image, MousePointerClick, Eye, TrendingUp, Trophy, AlertTriangle, Loader2, AlertCircle, DollarSign } from 'lucide-react'
 import { fetchCreativeAnalysis, type CreativeItem } from '@/services/biz'
 import { GlobalSyncBar } from '@/components/common/GlobalSyncBar'
 
@@ -54,6 +54,7 @@ export default function CreativeAnalysisPage() {
     { key: 'impressions', title: '展示', align: 'right', render: (r) => fmt(r.impressions) },
     { key: 'clicks', title: '点击', align: 'right', render: (r) => fmt(r.clicks) },
     { key: 'ctr', title: 'CTR', align: 'right', render: (r) => fmtPct(r.ctr) },
+    { key: 'completion_rate', title: '完播率', align: 'right', render: () => <span className="text-gray-300">--</span> },
     { key: 'spend', title: '消耗', align: 'right', render: (r) => fmtUsd(r.spend) },
     { key: 'revenue', title: '收入', align: 'right', render: (r) => fmtUsd(r.revenue) },
     { key: 'roas', title: 'ROI', align: 'right', render: (r) => {
@@ -105,8 +106,9 @@ export default function CreativeAnalysisPage() {
 
       {!isLoading && !isError && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
             <StatCard label="素材总数" value={overview?.total_creatives ?? 0} icon={Image} />
+            <StatCard label="总消耗" value={overview?.total_spend != null ? fmtUsd(overview.total_spend) : '--'} icon={DollarSign} />
             <StatCard label="平均 CTR" value={overview?.avg_ctr != null ? fmtPct(overview.avg_ctr) : '--'} icon={MousePointerClick} />
             <StatCard label="平均完播率" value="--" icon={Eye} />
             <StatCard label="平均 ROI" value={overview?.avg_roas != null ? fmtRoas(overview.avg_roas) : '--'} icon={TrendingUp} />

@@ -22,7 +22,7 @@ import {
   Film,
   DollarSign,
   MousePointerClick,
-  Download,
+  UserPlus,
   Star,
   Languages,
 } from 'lucide-react'
@@ -144,7 +144,6 @@ function LocaleRows({
           <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtUsd(r.spend)}</td>
           <td className="px-4 py-2.5 text-right text-xs text-gray-500">—</td>
           <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtNum(r.clicks)}</td>
-          <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtNum(r.installs)}</td>
           <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtNum(r.registrations)}</td>
           <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtUsd(r.purchase_value)}</td>
           <td className="px-4 py-2.5 text-right text-xs font-medium text-emerald-600">
@@ -218,7 +217,7 @@ export default function DramaOverviewPage() {
   // ── 汇总统计 ───────────────────────────────────────────────
   const totalSpend = rows.reduce((s, r) => s + r.spend, 0)
   const totalClicks = rows.reduce((s, r) => s + r.clicks, 0)
-  const totalInstalls = rows.reduce((s, r) => s + r.installs, 0)
+  const totalRegistrations = rows.reduce((s, r) => s + (r.registrations ?? 0), 0)
   const totalPurchase = rows.reduce((s, r) => s + r.purchase_value, 0)
 
   // ── 手动同步 ───────────────────────────────────────────────
@@ -239,7 +238,7 @@ export default function DramaOverviewPage() {
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   // ── 列数（含展开箭头列）─────────────────────────────────────
-  const COL_COUNT = 9
+  const COL_COUNT = 8
 
   return (
     <div className="max-w-[1400px] mx-auto space-y-5">
@@ -327,7 +326,7 @@ export default function DramaOverviewPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <StatCard label="总花费" value={fmtUsd(totalSpend)} icon={DollarSign} />
         <StatCard label="总点击" value={fmtNum(totalClicks)} icon={MousePointerClick} />
-        <StatCard label="总安装" value={fmtNum(totalInstalls)} icon={Download} />
+        <StatCard label="总注册" value={fmtNum(totalRegistrations)} icon={UserPlus} />
         <StatCard label="总收入" value={fmtUsd(totalPurchase)} icon={Star} />
       </div>
 
@@ -350,7 +349,6 @@ export default function DramaOverviewPage() {
                 <th className="text-right px-4 py-3">花费</th>
                 <th className="text-right px-4 py-3">展示</th>
                 <th className="text-right px-4 py-3">点击</th>
-                <th className="text-right px-4 py-3">安装</th>
                 <th className="text-right px-4 py-3">注册</th>
                 <th className="text-right px-4 py-3">收入</th>
                 <th className="text-right px-4 py-3">ROAS</th>
@@ -419,9 +417,6 @@ export default function DramaOverviewPage() {
                       </td>
                       <td className="px-4 py-3 text-right text-gray-700">
                         {fmtNum(row.clicks)}
-                      </td>
-                      <td className="px-4 py-3 text-right text-gray-700">
-                        {fmtNum(row.installs)}
                       </td>
                       <td className="px-4 py-3 text-right text-gray-700">
                         {fmtNum(row.registrations)}

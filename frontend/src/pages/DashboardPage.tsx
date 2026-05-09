@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { DollarSign, TrendingUp, BarChart3, MousePointerClick, Download, Megaphone, Image as ImageIcon, Loader2, AlertCircle } from 'lucide-react'
+import { DollarSign, TrendingUp, BarChart3, MousePointerClick, UserPlus, Megaphone, Image as ImageIcon, Loader2, AlertCircle } from 'lucide-react'
 import { PageHeader } from '@/components/common/PageHeader'
 import { StatCard } from '@/components/common/StatCard'
 import { SectionCard } from '@/components/common/SectionCard'
@@ -70,7 +70,7 @@ export default function DashboardPage() {
               href="/overview"
             />
             <StatCard label="点击数" value={hasData ? overview.total_clicks.toLocaleString() : '-'} icon={MousePointerClick} href="/ads" />
-            <StatCard label="安装数" value={hasData ? overview.total_installs.toLocaleString() : '-'} icon={Download} href="/ads" />
+            <StatCard label="注册数" value={hasData ? (overview.total_registrations ?? 0).toLocaleString() : '-'} icon={UserPlus} href="/ads" />
           </div>
 
           {/* ===== 图表 + 异常提醒 ===== */}

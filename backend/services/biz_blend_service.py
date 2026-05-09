@@ -7,6 +7,7 @@
 - spend / impressions / clicks / installs / ctr / cpc / cpm / cpi → normalized（保留 TikTok / Meta 全量覆盖）
 - conversions     → attribution.purchase                  (数仓真实付费用户数)
 - revenue         → attribution.total_recharge_amount     (数仓真实充值)
+- registrations   → attribution.registration              (数仓媒体口径注册事件数)
 - 衍生 cpa / roas → 用 blend 后分子分母重算
 
 JOIN 策略：
@@ -122,6 +123,7 @@ def get_overview(start_date: str, end_date: str, *,
         COALESCE(SUM(n.clicks), 0)              AS total_clicks,
         COALESCE(SUM(n.installs), 0)            AS total_installs,
         COALESCE(SUM(a.attr_conversions), 0)    AS total_conversions,
+        COALESCE(SUM(a.attr_registrations), 0)  AS total_registrations,
         COALESCE(SUM(a.attr_revenue), 0)        AS total_revenue
     FROM biz_campaign_daily_normalized n
     LEFT JOIN (
@@ -131,6 +133,7 @@ def get_overview(start_date: str, end_date: str, *,
             {_ATTR_ACC_EXPR}                            AS acc,
             campaign_id                                 AS cid,
             SUM(purchase)                               AS attr_conversions,
+            SUM(registration)                           AS attr_registrations,
             SUM(total_recharge_amount)                  AS attr_revenue
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s
@@ -151,15 +154,17 @@ def get_overview(start_date: str, end_date: str, *,
     cl  = int(row.get("total_clicks") or 0)
     ins = int(row.get("total_installs") or 0)
     cv  = int(row.get("total_conversions") or 0)
+    reg = int(row.get("total_registrations") or 0)
     rv  = float(row.get("total_revenue") or 0)
 
     return {
-        "total_spend":       s,
-        "total_impressions": im,
-        "total_clicks":      cl,
-        "total_installs":    ins,
-        "total_conversions": cv,
-        "total_revenue":     rv,
+        "total_spend":         s,
+        "total_impressions":   im,
+        "total_clicks":        cl,
+        "total_installs":      ins,
+        "total_conversions":   cv,
+        "total_registrations": reg,
+        "total_revenue":       rv,
         "avg_ctr":  _safe_div(cl, im),
         "avg_cpc":  _safe_div(s, cl),
         "avg_cpm":  round(s / im * 1000, 4) if im else None,
@@ -205,6 +210,7 @@ def get_top_campaigns(start_date: str, end_date: str, *,
         COALESCE(SUM(n.clicks), 0)                 AS total_clicks,
         COALESCE(SUM(n.installs), 0)               AS total_installs,
         COALESCE(SUM(a.attr_conversions), 0)       AS total_conversions,
+        COALESCE(SUM(a.attr_registrations), 0)     AS total_registrations,
         COALESCE(SUM(a.attr_revenue), 0)           AS total_revenue,
         CASE WHEN SUM(n.spend) > 0
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
@@ -217,6 +223,7 @@ def get_top_campaigns(start_date: str, end_date: str, *,
             {_ATTR_ACC_EXPR}                        AS acc,
             campaign_id                             AS cid,
             SUM(purchase)                           AS attr_conversions,
+            SUM(registration)                       AS attr_registrations,
             SUM(total_recharge_amount)              AS attr_revenue
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s
@@ -283,6 +290,7 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
         SUM(n.clicks)                              AS total_clicks,
         SUM(n.installs)                            AS total_installs,
         COALESCE(SUM(a.attr_conversions), 0)       AS total_conversions,
+        COALESCE(SUM(a.attr_registrations), 0)     AS total_registrations,
         CASE WHEN SUM(n.impressions) > 0
              THEN ROUND(SUM(n.clicks) / SUM(n.impressions), 6)
              ELSE NULL END                          AS ctr,
@@ -309,6 +317,7 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
             {_ATTR_ACC_EXPR}  AS acc,
             campaign_id       AS cid,
             SUM(purchase)              AS attr_conversions,
+            SUM(registration)          AS attr_registrations,
             SUM(total_recharge_amount) AS attr_revenue
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s
@@ -365,6 +374,7 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
         SUM(n.clicks)                              AS total_clicks,
         SUM(n.installs)                            AS total_installs,
         COALESCE(SUM(a.attr_conversions), 0)       AS total_conversions,
+        COALESCE(SUM(a.attr_registrations), 0)     AS total_registrations,
         CASE WHEN SUM(n.impressions) > 0
              THEN ROUND(SUM(n.clicks) / SUM(n.impressions), 6)
              ELSE NULL END                          AS ctr,
@@ -391,6 +401,7 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
             {_ATTR_ACC_EXPR}  AS acc,
             adgroup_id        AS aid,
             SUM(purchase)              AS attr_conversions,
+            SUM(registration)          AS attr_registrations,
             SUM(total_recharge_amount) AS attr_revenue
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s
@@ -469,6 +480,7 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
         SUM(n.clicks)                              AS total_clicks,
         SUM(n.installs)                            AS total_installs,
         COALESCE(SUM(a.attr_conversions), 0)       AS total_conversions,
+        COALESCE(SUM(a.attr_registrations), 0)     AS total_registrations,
         CASE WHEN SUM(n.impressions) > 0
              THEN ROUND(SUM(n.clicks) / SUM(n.impressions), 6)
              ELSE NULL END                          AS ctr,
@@ -495,6 +507,7 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
             {_ATTR_ACC_EXPR}  AS acc,
             ad_id             AS aid,
             SUM(purchase)              AS attr_conversions,
+            SUM(registration)          AS attr_registrations,
             SUM(total_recharge_amount) AS attr_revenue
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s
@@ -579,6 +592,7 @@ def get_campaign_daily_list(start_date: str, end_date: str, *,
             n.clicks                                   AS clicks,
             n.installs                                 AS installs,
             COALESCE(a.attr_conversions, 0)            AS conversions,
+            COALESCE(a.attr_registrations, 0)          AS registrations,
             COALESCE(a.attr_revenue, 0)                AS revenue,
             n.ctr                                      AS ctr,
             n.cpc                                      AS cpc,
@@ -598,6 +612,7 @@ def get_campaign_daily_list(start_date: str, end_date: str, *,
                 {_ATTR_ACC_EXPR}  AS acc,
                 campaign_id       AS cid,
                 SUM(purchase)              AS attr_conversions,
+                SUM(registration)          AS attr_registrations,
                 SUM(total_recharge_amount) AS attr_revenue
             FROM biz_attribution_ad_daily
             WHERE ds_account_local BETWEEN %s AND %s
