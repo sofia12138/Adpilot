@@ -147,6 +147,13 @@ export function GlobalSyncBar({ defaultExpanded = false, className = '' }: Globa
           }
         </span>
 
+        <span
+          className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-medium tracking-wide cursor-help"
+          title="所有日期按 LA (America/Los_Angeles) 时区切分。当前夏令时为 UTC-7，11 月起冬令时为 UTC-8。如需固定 UTC-7（不随夏令时切换），需在媒体平台后台把广告账户时区改为 America/Phoenix。"
+        >
+          数据时区 UTC-7
+        </span>
+
         <span className="text-gray-400">全量每 20 分钟自动同步</span>
 
         <div className="ml-auto flex items-center gap-2">
