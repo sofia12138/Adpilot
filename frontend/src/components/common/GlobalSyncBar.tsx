@@ -147,6 +147,12 @@ export function GlobalSyncBar({ defaultExpanded = false, className = '' }: Globa
           }
         </span>
 
+        {/*
+          时区角标说明（维护提醒）：
+          - 现状：BIZ 表所有行的 ds_account_local 已按 LA 时区切分，当前夏令时偏移 UTC-7
+          - 2026-11-01 后冬令时切到 UTC-8 → 把 "UTC-7" 文案改成 "UTC-8" 或改成不带偏移的 "LA 时区"
+          - 媒体账户改为 America/Phoenix 后 → 角标可永久保持 "UTC-7"，并把 tooltip 改成"账户时区已对齐 Phoenix（固定 UTC-7）"
+        */}
         <span
           className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-medium tracking-wide cursor-help"
           title="所有日期按 LA (America/Los_Angeles) 时区切分。当前夏令时为 UTC-7，11 月起冬令时为 UTC-8。如需固定 UTC-7（不随夏令时切换），需在媒体平台后台把广告账户时区改为 America/Phoenix。"
