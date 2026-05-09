@@ -54,8 +54,8 @@ interface ColDef {
 }
 
 const AGG_COLUMNS: ColDef[] = [
-  { key: 'total_spend',         label: '消耗', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd,   sortable: true },
-  { key: 'total_revenue',       label: '收入', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd,   sortable: true },
+  { key: 'total_spend',         label: '消耗', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
+  { key: 'total_revenue',       label: '收入', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
   { key: 'roas',                label: 'ROI',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtRatio, sortable: true },
   { key: 'ctr',                 label: 'CTR',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtPct,   sortable: true },
   { key: 'cpc',                 label: 'CPC',  group: 'cost',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
@@ -646,8 +646,8 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
   // ── KPIs ──
   const ov = overview
   const kpis = [
-    { label: '总消耗', value: fmtUsd(ov?.total_spend ?? null), icon: DollarSign },
-    { label: '总收入', value: fmtUsd(ov?.total_revenue ?? null), icon: TrendingUp },
+    { label: '总消耗', value: fmtUsd2(ov?.total_spend ?? null), icon: DollarSign },
+    { label: '总收入', value: fmtUsd2(ov?.total_revenue ?? null), icon: TrendingUp },
     { label: 'ROI', value: fmtRatio(ov?.avg_roas ?? null), icon: BarChart3, warn: ov?.avg_roas != null && ov.avg_roas < roiThreshold },
     { label: 'CTR', value: fmtPct(ov?.avg_ctr ?? null), icon: MousePointerClick },
     { label: 'CPC', value: fmtUsd2(ov?.avg_cpc ?? null), icon: Target },
