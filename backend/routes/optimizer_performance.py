@@ -29,9 +29,16 @@ def _check_dates(start_date: str, end_date: str):
 def _resolve_source(source: str) -> str:
     if source not in _ALLOWED_SOURCE:
         raise HTTPException(400, f"source 必须是 {_ALLOWED_SOURCE}, 实际: {source}")
-    if source == "auto":
-        return "attribution" if get_settings().attribution_primary else "legacy"
-    return source
+    if source != "auto":
+        return source
+    settings = get_settings()
+    default = (settings.data_source_default or "").lower()
+    # blend 在优化师面板降级为 attribution（fact_optimizer_daily 不能拼接 attribution 真值）
+    if default in {"blend", "attribution"}:
+        return "attribution"
+    if default == "legacy":
+        return "legacy"
+    return "attribution" if settings.attribution_primary else "attribution"
 
 
 def _float(v) -> Optional[float]:
@@ -45,17 +52,28 @@ async def optimizer_summary(
     platform: Optional[str] = Query(None, description="平台: tiktok / meta"),
     source_type: Optional[str] = Query(None, description="来源: 小程序 / APP"),
     keyword: Optional[str] = Query(None, description="优化师关键词搜索"),
+    source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):
     """按优化师维度聚合的人效汇总（含未识别占比）"""
     _check_dates(start_date, end_date)
+    src = _resolve_source(source)
 
-    rows = await asyncio.to_thread(
-        optimizer_performance_repository.query_optimizer_summary,
-        start_date, end_date,
-        platform=platform,
-        source_type=source_type,
-        keyword=keyword,
-    )
+    if src == "attribution":
+        rows = await asyncio.to_thread(
+            optimizer_performance_repository.query_optimizer_summary_attribution,
+            start_date, end_date,
+            platform=platform,
+            source_type=source_type,
+            keyword=keyword,
+        )
+    else:
+        rows = await asyncio.to_thread(
+            optimizer_performance_repository.query_optimizer_summary,
+            start_date, end_date,
+            platform=platform,
+            source_type=source_type,
+            keyword=keyword,
+        )
 
     grand_total_spend = sum(float(r.get("total_spend") or 0) for r in rows)
     unidentified_spend = 0.0
@@ -88,6 +106,7 @@ async def optimizer_summary(
         "code": 0,
         "message": "ok",
         "data": result,
+        "_source": src,
         "meta": {
             "grand_total_spend": round(grand_total_spend, 2),
             "unidentified_spend": round(unidentified_spend, 2),

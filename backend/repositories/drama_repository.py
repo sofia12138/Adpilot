@@ -468,3 +468,276 @@ def query_drama_trend(
         }
         for r in rows
     ]
+
+
+# ═══════════════════════════════════════════════════════════
+#  Attribution 版本：从 biz_attribution_ad_daily JOIN ad_drama_mapping
+#
+#  关键事实：
+#  - ad_drama_mapping 是 campaign 粒度（ad_id 字段实际全为空），
+#    一个 campaign_id → 一个 content_key（一部剧的一个语言版本）
+#  - JOIN 通过 campaign_id（不是 ad_id）：mapping.platform/account_id 做反向归一
+#
+#  关键差异 vs fact_drama_daily：
+#  - country / language_code 来自 mapping（campaign 级标签），不是日报粒度
+#  - drama_id 同样来自 mapping
+#  - 全平台覆盖率取决于 mapping 同步完整度，未匹配的 campaign 不计入
+# ═══════════════════════════════════════════════════════════
+
+def query_drama_summary_attribution(
+    start_date: str,
+    end_date: str,
+    source_type: Optional[str] = None,
+    platform: Optional[str] = None,
+    channel: Optional[str] = None,
+    country: Optional[str] = None,
+    keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    """剧级总览（attribution 数仓真值）。
+
+    JOIN 路径：biz_attribution_ad_daily.campaign_id → ad_drama_mapping.campaign_id
+    业务结果（registration / total_recharge_amount）来自 attribution 数仓。
+    """
+    conditions = ["a.ds_account_local BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+
+    if source_type:
+        conditions.append("m.source_type = %s")
+        params.append(source_type)
+    if platform:
+        norm_p = "facebook" if platform.lower() == "meta" else platform.lower()
+        conditions.append("a.platform = %s")
+        params.append(norm_p)
+    if channel:
+        conditions.append("m.channel = %s")
+        params.append(channel)
+    if country:
+        conditions.append("m.country = %s")
+        params.append(country)
+    if language_code:
+        conditions.append("m.language_code = %s")
+        params.append(language_code)
+    if keyword:
+        conditions.append("m.localized_drama_name LIKE %s")
+        params.append(f"%{keyword}%")
+
+    where = " AND ".join(conditions)
+
+    join_on = """
+        ON m.campaign_id = a.campaign_id
+       AND CASE WHEN m.platform = 'meta' THEN 'facebook' ELSE m.platform END = a.platform
+       AND CASE WHEN m.account_id LIKE 'act\\_%%' THEN SUBSTRING(m.account_id, 5) ELSE m.account_id END = a.account_id
+    """
+
+    count_sql = f"""
+        SELECT COUNT(DISTINCT m.content_key) AS total
+        FROM biz_attribution_ad_daily a
+        JOIN ad_drama_mapping m {join_on}
+        WHERE {where}
+    """
+    data_sql = f"""
+        SELECT
+            m.content_key                          AS content_key,
+            ANY_VALUE(m.drama_id)                  AS drama_id,
+            ANY_VALUE(m.drama_type)                AS drama_type,
+            ANY_VALUE(m.localized_drama_name)      AS localized_drama_name,
+            SUM(a.spend)                           AS spend,
+            SUM(a.impressions)                     AS impressions,
+            SUM(a.clicks)                          AS clicks,
+            SUM(a.activation)                      AS installs,
+            SUM(a.registration)                    AS registrations,
+            SUM(a.total_recharge_amount)           AS purchase_value,
+            COUNT(DISTINCT m.language_code)        AS language_count
+        FROM biz_attribution_ad_daily a
+        JOIN ad_drama_mapping m {join_on}
+        WHERE {where}
+        GROUP BY m.content_key
+        ORDER BY spend DESC
+        LIMIT %s OFFSET %s
+    """
+    offset = (page - 1) * page_size
+
+    with get_biz_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(count_sql, params)
+            total = cur.fetchone()["total"]
+
+            cur.execute(data_sql, params + [page_size, offset])
+            rows = cur.fetchall()
+
+    result = []
+    for r in rows:
+        spend = float(r["spend"] or 0)
+        purchase = float(r["purchase_value"] or 0)
+        clicks = int(r["clicks"] or 0)
+        impressions = int(r["impressions"] or 0)
+        result.append({
+            "content_key": r["content_key"],
+            "drama_id": r["drama_id"] or "",
+            "drama_type": r["drama_type"] or "",
+            "localized_drama_name": r["localized_drama_name"] or "",
+            "spend": round(spend, 4),
+            "impressions": impressions,
+            "clicks": clicks,
+            "installs": int(r["installs"] or 0),
+            "registrations": int(r["registrations"] or 0),
+            "purchase_value": round(purchase, 4),
+            "ctr": round(clicks / impressions * 100, 4) if impressions else 0,
+            "cpc": round(spend / clicks, 4) if clicks else 0,
+            "roas": round(purchase / spend, 4) if spend else 0,
+            "language_count": int(r["language_count"] or 0),
+        })
+
+    return {"total": total, "page": page, "page_size": page_size, "rows": result}
+
+
+def query_locale_breakdown_attribution(
+    start_date: str,
+    end_date: str,
+    content_key: Optional[str] = None,
+    drama_id: Optional[str] = None,
+    source_type: Optional[str] = None,
+    platform: Optional[str] = None,
+    channel: Optional[str] = None,
+    country: Optional[str] = None,
+) -> list[dict]:
+    """语言版本明细（attribution 数仓真值）"""
+    conditions = ["a.ds_account_local BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+
+    if content_key:
+        conditions.append("m.content_key = %s")
+        params.append(content_key)
+    elif drama_id:
+        conditions.append("m.drama_id = %s")
+        params.append(drama_id)
+
+    if source_type:
+        conditions.append("m.source_type = %s")
+        params.append(source_type)
+    if platform:
+        norm_p = "facebook" if platform.lower() == "meta" else platform.lower()
+        conditions.append("a.platform = %s")
+        params.append(norm_p)
+    if channel:
+        conditions.append("m.channel = %s")
+        params.append(channel)
+    if country:
+        conditions.append("m.country = %s")
+        params.append(country)
+
+    where = " AND ".join(conditions)
+
+    sql = f"""
+        SELECT
+            m.language_code                        AS language_code,
+            ANY_VALUE(m.localized_drama_name)      AS localized_drama_name,
+            SUM(a.spend)                           AS spend,
+            SUM(a.clicks)                          AS clicks,
+            SUM(a.activation)                      AS installs,
+            SUM(a.registration)                    AS registrations,
+            SUM(a.total_recharge_amount)           AS purchase_value
+        FROM biz_attribution_ad_daily a
+        JOIN ad_drama_mapping m
+          ON m.campaign_id = a.campaign_id
+         AND CASE WHEN m.platform = 'meta' THEN 'facebook' ELSE m.platform END = a.platform
+         AND CASE WHEN m.account_id LIKE 'act\\_%%' THEN SUBSTRING(m.account_id, 5) ELSE m.account_id END = a.account_id
+        WHERE {where}
+        GROUP BY m.language_code
+        ORDER BY spend DESC
+    """
+
+    with get_biz_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    result = []
+    for r in rows:
+        spend = float(r["spend"] or 0)
+        purchase = float(r["purchase_value"] or 0)
+        result.append({
+            "language_code": r["language_code"],
+            "localized_drama_name": r["localized_drama_name"] or "",
+            "spend": round(spend, 4),
+            "clicks": int(r["clicks"] or 0),
+            "installs": int(r["installs"] or 0),
+            "registrations": int(r["registrations"] or 0),
+            "purchase_value": round(purchase, 4),
+            "roas": round(purchase / spend, 4) if spend else 0,
+        })
+    return result
+
+
+def query_drama_trend_attribution(
+    start_date: str,
+    end_date: str,
+    content_key: Optional[str] = None,
+    language_code: Optional[str] = None,
+    source_type: Optional[str] = None,
+    platform: Optional[str] = None,
+    channel: Optional[str] = None,
+    country: Optional[str] = None,
+) -> list[dict]:
+    """按天趋势（attribution 数仓真值）"""
+    conditions = ["a.ds_account_local BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+
+    if content_key:
+        conditions.append("m.content_key = %s")
+        params.append(content_key)
+    if language_code:
+        conditions.append("m.language_code = %s")
+        params.append(language_code)
+    if source_type:
+        conditions.append("m.source_type = %s")
+        params.append(source_type)
+    if platform:
+        norm_p = "facebook" if platform.lower() == "meta" else platform.lower()
+        conditions.append("a.platform = %s")
+        params.append(norm_p)
+    if channel:
+        conditions.append("m.channel = %s")
+        params.append(channel)
+    if country:
+        conditions.append("m.country = %s")
+        params.append(country)
+
+    where = " AND ".join(conditions)
+
+    sql = f"""
+        SELECT
+            a.ds_account_local                    AS stat_date,
+            SUM(a.spend)                          AS spend,
+            SUM(a.clicks)                         AS clicks,
+            SUM(a.activation)                     AS installs,
+            SUM(a.registration)                   AS registrations,
+            SUM(a.total_recharge_amount)          AS purchase_value
+        FROM biz_attribution_ad_daily a
+        JOIN ad_drama_mapping m
+          ON m.campaign_id = a.campaign_id
+         AND CASE WHEN m.platform = 'meta' THEN 'facebook' ELSE m.platform END = a.platform
+         AND CASE WHEN m.account_id LIKE 'act\\_%%' THEN SUBSTRING(m.account_id, 5) ELSE m.account_id END = a.account_id
+        WHERE {where}
+        GROUP BY a.ds_account_local
+        ORDER BY a.ds_account_local ASC
+    """
+    with get_biz_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return [
+        {
+            "stat_date": str(r["stat_date"]),
+            "spend": round(float(r["spend"] or 0), 4),
+            "clicks": int(r["clicks"] or 0),
+            "installs": int(r["installs"] or 0),
+            "registrations": int(r["registrations"] or 0),
+            "purchase_value": round(float(r["purchase_value"] or 0), 4),
+        }
+        for r in rows
+    ]

@@ -338,6 +338,75 @@ def query_optimizer_detail(
 #  → JOIN ON 子句里做 CASE 转换
 # ═══════════════════════════════════════════════════════════
 
+def query_optimizer_summary_attribution(
+    start_date: str,
+    end_date: str,
+    *,
+    platform: Optional[str] = None,
+    source_type: Optional[str] = None,
+    keyword: Optional[str] = None,
+) -> list[dict]:
+    """按优化师维度聚合（attribution 数据源 + JOIN mapping）。
+
+    与 query_optimizer_summary 接口一致，但底层数据源换成 biz_attribution_ad_daily：
+      - spend / impressions / clicks / installs → attribution（数仓真值，与 normalized 量级一致）
+      - registrations / purchase_value          → attribution.registration / total_recharge_amount
+    avg_daily_spend / active_days / campaign_count 都按 attribution 行重算。
+
+    JOIN 注意点：
+      - mapping.platform = meta / tiktok      ↔  attribution.platform = facebook / tiktok
+      - mapping.account_id 带 act_ 前缀 (Meta) ↔  attribution.account_id 无前缀
+      - source_type 来自 mapping，attribution 表没有该列
+    """
+    clauses = ["a.ds_account_local BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+
+    if platform:
+        norm_p = "facebook" if platform.lower() == "meta" else platform.lower()
+        clauses.append("a.platform = %s")
+        params.append(norm_p)
+    if source_type:
+        clauses.append("m.source_type = %s")
+        params.append(source_type)
+
+    where = " AND ".join(clauses)
+
+    sql = f"""
+        SELECT
+            m.optimizer_name_normalized            AS optimizer_name,
+            SUM(a.spend)                           AS total_spend,
+            SUM(a.impressions)                     AS impressions,
+            SUM(a.clicks)                          AS clicks,
+            SUM(a.activation)                      AS installs,
+            SUM(a.registration)                    AS registrations,
+            SUM(a.total_recharge_amount)           AS purchase_value,
+            COUNT(DISTINCT a.campaign_id)          AS campaign_count,
+            COUNT(DISTINCT a.ds_account_local)     AS active_days,
+            CASE WHEN SUM(a.spend) > 0
+                 THEN ROUND(SUM(a.total_recharge_amount) / SUM(a.spend), 4)
+                 ELSE NULL END                                            AS roas
+        FROM biz_attribution_ad_daily a
+        JOIN campaign_optimizer_mapping m
+          ON m.campaign_id = a.campaign_id
+         AND CASE WHEN m.platform = 'meta' THEN 'facebook' ELSE m.platform END = a.platform
+         AND CASE WHEN m.account_id LIKE 'act\\_%%' THEN SUBSTRING(m.account_id, 5) ELSE m.account_id END = a.account_id
+        WHERE {where}
+        GROUP BY m.optimizer_name_normalized
+        ORDER BY total_spend DESC
+    """
+
+    with get_biz_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+
+    if keyword:
+        kw = keyword.strip().upper()
+        rows = [r for r in rows if kw in (r.get("optimizer_name") or "").upper()]
+
+    return rows
+
+
 def query_optimizer_detail_attribution(
     start_date: str,
     end_date: str,

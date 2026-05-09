@@ -13,7 +13,7 @@ from repositories import designer_performance_repository
 router = APIRouter(prefix="/designer-performance", tags=["设计师人效报表"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_ALLOWED_SOURCE = {"auto", "attribution", "legacy"}
+_ALLOWED_SOURCE = {"auto", "attribution", "legacy", "blend"}
 
 
 def _check_dates(start_date: str, end_date: str):
@@ -28,9 +28,13 @@ def _check_dates(start_date: str, end_date: str):
 def _resolve_source(source: str) -> str:
     if source not in _ALLOWED_SOURCE:
         raise HTTPException(400, f"source 必须是 {_ALLOWED_SOURCE}, 实际: {source}")
-    if source == "auto":
-        return "attribution" if get_settings().attribution_primary else "legacy"
-    return source
+    if source != "auto":
+        return source
+    settings = get_settings()
+    default = (settings.data_source_default or "").lower()
+    if default in {"blend", "attribution", "legacy"}:
+        return default
+    return "attribution" if settings.attribution_primary else "blend"
 
 
 def _float(v) -> Optional[float]:
@@ -49,7 +53,14 @@ async def designer_summary(
     _check_dates(start_date, end_date)
     src = _resolve_source(source)
 
-    if src == "attribution":
+    if src == "blend":
+        rows = await asyncio.to_thread(
+            designer_performance_repository.get_designer_summary_blend,
+            start_date, end_date,
+            platform=platform,
+            keyword=keyword,
+        )
+    elif src == "attribution":
         rows = await asyncio.to_thread(
             designer_performance_repository.get_designer_summary_attribution,
             start_date, end_date,
@@ -94,7 +105,13 @@ async def designer_materials(
     _check_dates(start_date, end_date)
     src = _resolve_source(source)
 
-    if src == "attribution":
+    if src == "blend":
+        rows = await asyncio.to_thread(
+            designer_performance_repository.get_designer_materials_blend,
+            start_date, end_date, designer_name,
+            platform=platform,
+        )
+    elif src == "attribution":
         rows = await asyncio.to_thread(
             designer_performance_repository.get_designer_materials_attribution,
             start_date, end_date, designer_name,
