@@ -10,7 +10,7 @@ import { useBizOverview, useBizTopCampaigns } from '@/hooks/use-biz'
 import { useInsightConfig } from '@/hooks/use-insight'
 import type { BizTopCampaign } from '@/services/biz'
 
-const fmtUsd = (n: number) => `$${n.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+const fmtUsd = (n: number) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const platformLabel: Record<string, string> = { tiktok: 'TikTok', meta: 'Meta' }
 
 interface ChannelSummary {

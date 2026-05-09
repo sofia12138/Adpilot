@@ -11,7 +11,7 @@ import { useBizOverview, useBizTopCampaigns, useCampaignDaily } from '@/hooks/us
 import { SpendRevenueTrendChart } from '@/components/charts/SpendRevenueTrendChart'
 import { useInsightConfig } from '@/hooks/use-insight'
 
-const fmtUsd = (n: number) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+const fmtUsd = (n: number) => `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 
 export default function DashboardPage() {
   const [dateRange, setDateRange] = useState<DateRange>(() => getDefaultDateRange('all'))
