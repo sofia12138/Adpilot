@@ -1,119 +1,309 @@
 import { useMemo, useState } from 'react'
-import { Loader2, AlertCircle } from 'lucide-react'
+import { Loader2, AlertCircle, Calendar, Info } from 'lucide-react'
 import { PageHeader } from '@/components/common/PageHeader'
 import { cn } from '@/utils/cn'
 import { useOpsStats } from '@/hooks/useOpsStats'
-import type { DailyOpsRow, DateRange } from '@/types/ops'
+import type { DailyOpsRow, DatePreset, DateRange } from '@/types/ops'
 import { KpiCard } from '@/components/ops/KpiCard'
 import { RegTrendChart } from '@/components/ops/RegTrendChart'
 import { RevenuePlatformChart } from '@/components/ops/RevenuePlatformChart'
 import { RevenueTypeChart } from '@/components/ops/RevenueTypeChart'
 import { PayerComboChart } from '@/components/ops/PayerComboChart'
-import { fmtCentsToWan, calcDelta } from '@/components/ops/formatters'
+import { SpendRoiChart } from '@/components/ops/SpendRoiChart'
+import { fmtUsd, calcDelta } from '@/components/ops/formatters'
+import { presetToRange, periodLabel, isSingleDay, rangeDisplay } from '@/components/ops/rangeUtils'
 
 // ─── 通用样式 ─────────────────────────────────────
 const chartCardCls = 'bg-card border border-card-border rounded-xl p-4'
 const chartTitleCls = 'text-sm font-semibold text-gray-700 mb-3'
 
 // ─── 时间范围按钮组 ───────────────────────────────
-const RANGE_OPTIONS: { value: DateRange; label: string }[] = [
-  { value: 7,  label: '7天' },
-  { value: 14, label: '14天' },
-  { value: 30, label: '30天' },
+const PRESET_OPTIONS: { value: DatePreset; label: string }[] = [
+  { value: 'yesterday', label: '昨天' },
+  { value: 'today',     label: '今天' },
+  { value: 'last7',     label: '近7天' },
+  { value: 'last14',    label: '近14天' },
+  { value: 'last30',    label: '近30天' },
+  { value: 'custom',    label: '自定义' },
 ]
 
-function RangeSwitch({ value, onChange }: { value: DateRange; onChange: (v: DateRange) => void }) {
+interface RangeSwitchProps {
+  range: DateRange
+  customDraft: { start: string; end: string }
+  onPresetChange: (p: DatePreset) => void
+  onCustomChange: (next: { start: string; end: string }) => void
+}
+
+function RangeSwitch({ range, customDraft, onPresetChange, onCustomChange }: RangeSwitchProps) {
   return (
-    <div className="inline-flex bg-muted rounded-lg p-0.5 text-xs">
-      {RANGE_OPTIONS.map(opt => (
-        <button
-          key={opt.value}
-          onClick={() => onChange(opt.value)}
-          className={cn(
-            'px-3 py-1.5 rounded-md transition-colors',
-            value === opt.value
-              ? 'bg-white text-gray-900 shadow-sm font-medium'
-              : 'text-muted-foreground hover:text-gray-700',
-          )}
-        >
-          {opt.label}
-        </button>
-      ))}
+    <div className="flex flex-col items-end gap-2">
+      <div className="inline-flex bg-muted rounded-lg p-0.5 text-xs">
+        {PRESET_OPTIONS.map(opt => (
+          <button
+            key={opt.value}
+            onClick={() => onPresetChange(opt.value)}
+            className={cn(
+              'px-3 py-1.5 rounded-md transition-colors flex items-center gap-1',
+              range.preset === opt.value
+                ? 'bg-white text-gray-900 shadow-sm font-medium'
+                : 'text-muted-foreground hover:text-gray-700',
+            )}
+          >
+            {opt.value === 'custom' && <Calendar className="w-3 h-3" />}
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {range.preset === 'custom' && (
+        <div className="inline-flex items-center gap-2 bg-card border border-card-border rounded-lg px-3 py-1.5 text-xs">
+          <input
+            type="date"
+            value={customDraft.start}
+            max={customDraft.end || undefined}
+            onChange={e => onCustomChange({ ...customDraft, start: e.target.value })}
+            className="bg-transparent outline-none text-gray-700"
+          />
+          <span className="text-muted-foreground">至</span>
+          <input
+            type="date"
+            value={customDraft.end}
+            min={customDraft.start || undefined}
+            onChange={e => onCustomChange({ ...customDraft, end: e.target.value })}
+            className="bg-transparent outline-none text-gray-700"
+          />
+        </div>
+      )}
     </div>
   )
 }
 
-// ─── KPI 计算（取 data 末尾两条对比） ────────────
+// ─── KPI 计算 ────────────────────────────────────
 interface Kpis {
-  todayRegTotal: number
+  // 用户
+  regTotal: number
   regDelta: number | null
-  regIos: number
-  regAndroid: number
+  newActive: number
 
-  todayRevenueTotal: number
+  // 充值
+  revenueTotal: number    // USD
   revenueDelta: number | null
 
-  iosRevenueToday: number
-  androidRevenueToday: number
+  iosRevenue: number
+  androidRevenue: number
   iosShare: number   // 0~100
 
-  subRevenueToday: number
-  onetimeRevenueToday: number
+  subRevenue: number
+  onetimeRevenue: number
   subShare: number   // 0~100
+
+  // 付费 UV
+  //   单日：等于该天 ios_payer_uv + android_payer_uv
+  //   多日：区间累计「人次」（同一用户多天付费会被多次计入）
+  payerUv: number
+
+  // 投放 / ROI
+  /** 当日（或区间累计）广告消耗 USD */
+  adSpend: number
+  /** D0 流水 ROI = revenueTotal / adSpend，spend=0 时为 null */
+  roi: number | null
+  /** ROI 较前日变化（仅单日时有值） */
+  roiDelta: number | null
+
+  /** 该 KPI 是单日口径还是区间累计 — 用于 subtitle 用词 */
+  isAggregate: boolean
 }
 
-function computeKpis(rows: DailyOpsRow[]): Kpis | null {
+/**
+ * 计算 KPI
+ *   rows[0]      = baseline（start - 1 那一天，由 service 多请求一天）
+ *   rows[1..n]   = 用户选区间
+ *
+ *   单日 preset：本期 = rows[1]，上期 = rows[0]，显示当日值 + 较前日 delta
+ *   多日区间：本期 = sum(rows[1..n])，上期不算（区间累计无对照），不显示 delta
+ *
+ * 这样设计避免「近 N 天」KPI 被「末日 = 今天 = 数据未出齐」拉低成全 0。
+ */
+function computeKpis(rows: DailyOpsRow[], range: DateRange): Kpis | null {
   if (!rows || rows.length === 0) return null
-  const last = rows[rows.length - 1]
-  const prev = rows.length >= 2 ? rows[rows.length - 2] : undefined
 
-  const lastRegTotal = (last.ios_new_users || 0) + (last.android_new_users || 0)
-  const prevRegTotal = prev ? (prev.ios_new_users || 0) + (prev.android_new_users || 0) : undefined
+  const baseline = rows[0]
+  const main = rows.slice(1).length > 0 ? rows.slice(1) : rows
 
-  const lastIosRevenue = (last.ios_sub_revenue || 0) + (last.ios_onetime_revenue || 0)
-  const lastAndroidRevenue = (last.android_sub_revenue || 0) + (last.android_onetime_revenue || 0)
-  const lastSubRevenue = (last.ios_sub_revenue || 0) + (last.android_sub_revenue || 0)
-  const lastOnetimeRevenue = (last.ios_onetime_revenue || 0) + (last.android_onetime_revenue || 0)
-  const lastRevenueTotal = lastIosRevenue + lastAndroidRevenue
+  if (isSingleDay(range)) {
+    const last = main[main.length - 1]
+    const prev = rows.length > 1 ? baseline : undefined
+    return singleDayKpis(last, prev)
+  }
+  return aggregateKpis(main)
+}
 
-  const prevRevenueTotal = prev
-    ? (prev.ios_sub_revenue || 0) + (prev.ios_onetime_revenue || 0)
-      + (prev.android_sub_revenue || 0) + (prev.android_onetime_revenue || 0)
+function safeRoi(rev: number, spend: number): number | null {
+  if (!isFinite(rev) || !isFinite(spend) || spend <= 0) return null
+  return rev / spend
+}
+
+function singleDayKpis(last: DailyOpsRow, prev: DailyOpsRow | undefined): Kpis {
+  const lastReg = last.new_register_uv || 0
+  const prevReg = prev?.new_register_uv
+
+  const lastIosRev      = (last.ios_subscribe_revenue || 0) + (last.ios_onetime_revenue || 0)
+  const lastAndroidRev  = (last.android_subscribe_revenue || 0) + (last.android_onetime_revenue || 0)
+  const lastSubRev      = (last.ios_subscribe_revenue || 0) + (last.android_subscribe_revenue || 0)
+  const lastOnetimeRev  = (last.ios_onetime_revenue || 0) + (last.android_onetime_revenue || 0)
+  const lastTotalRev    = lastIosRev + lastAndroidRev
+  const lastSpend       = last.ad_spend || 0
+  const lastRoi         = safeRoi(lastTotalRev, lastSpend)
+
+  const prevTotalRev = prev
+    ? (prev.ios_subscribe_revenue || 0) + (prev.ios_onetime_revenue || 0)
+      + (prev.android_subscribe_revenue || 0) + (prev.android_onetime_revenue || 0)
     : undefined
+  const prevSpend = prev?.ad_spend
+  const prevRoi = prev != null && prevTotalRev != null && prevSpend != null
+    ? safeRoi(prevTotalRev, prevSpend)
+    : null
 
   return {
-    todayRegTotal: lastRegTotal,
-    regDelta: calcDelta(lastRegTotal, prevRegTotal),
-    regIos: last.ios_new_users || 0,
-    regAndroid: last.android_new_users || 0,
+    regTotal: lastReg,
+    regDelta: calcDelta(lastReg, prevReg),
+    newActive: last.new_active_uv || 0,
 
-    todayRevenueTotal: lastRevenueTotal,
-    revenueDelta: calcDelta(lastRevenueTotal, prevRevenueTotal),
+    revenueTotal: lastTotalRev,
+    revenueDelta: calcDelta(lastTotalRev, prevTotalRev),
 
-    iosRevenueToday: lastIosRevenue,
-    androidRevenueToday: lastAndroidRevenue,
-    iosShare: lastRevenueTotal > 0 ? (lastIosRevenue / lastRevenueTotal) * 100 : 0,
+    iosRevenue: lastIosRev,
+    androidRevenue: lastAndroidRev,
+    iosShare: lastTotalRev > 0 ? (lastIosRev / lastTotalRev) * 100 : 0,
 
-    subRevenueToday: lastSubRevenue,
-    onetimeRevenueToday: lastOnetimeRevenue,
-    subShare: lastRevenueTotal > 0 ? (lastSubRevenue / lastRevenueTotal) * 100 : 0,
+    subRevenue: lastSubRev,
+    onetimeRevenue: lastOnetimeRev,
+    subShare: lastTotalRev > 0 ? (lastSubRev / lastTotalRev) * 100 : 0,
+
+    payerUv: (last.ios_payer_uv || 0) + (last.android_payer_uv || 0),
+
+    adSpend: lastSpend,
+    roi: lastRoi,
+    roiDelta: calcDelta(lastRoi ?? undefined, prevRoi ?? undefined),
+
+    isAggregate: false,
+  }
+}
+
+function aggregateKpis(rows: DailyOpsRow[]): Kpis {
+  let reg = 0
+  let act = 0
+  let iosRev = 0
+  let androidRev = 0
+  let subRev = 0
+  let onetimeRev = 0
+  let payerUv = 0
+  let spend = 0
+
+  for (const r of rows) {
+    reg += r.new_register_uv || 0
+    act += r.new_active_uv || 0
+    iosRev      += (r.ios_subscribe_revenue || 0) + (r.ios_onetime_revenue || 0)
+    androidRev  += (r.android_subscribe_revenue || 0) + (r.android_onetime_revenue || 0)
+    subRev      += (r.ios_subscribe_revenue || 0) + (r.android_subscribe_revenue || 0)
+    onetimeRev  += (r.ios_onetime_revenue || 0) + (r.android_onetime_revenue || 0)
+    payerUv     += (r.ios_payer_uv || 0) + (r.android_payer_uv || 0)
+    spend       += r.ad_spend || 0
+  }
+
+  const totalRev = iosRev + androidRev
+
+  return {
+    regTotal: reg,
+    regDelta: null,
+    newActive: act,
+
+    revenueTotal: totalRev,
+    revenueDelta: null,
+
+    iosRevenue: iosRev,
+    androidRevenue: androidRev,
+    iosShare: totalRev > 0 ? (iosRev / totalRev) * 100 : 0,
+
+    subRevenue: subRev,
+    onetimeRevenue: onetimeRev,
+    subShare: totalRev > 0 ? (subRev / totalRev) * 100 : 0,
+
+    payerUv,
+
+    adSpend: spend,
+    roi: safeRoi(totalRev, spend),
+    roiDelta: null,
+
+    isAggregate: true,
   }
 }
 
 // ─── 页面 ─────────────────────────────────────────
 export default function OpsDashboard() {
-  const [activeRange, setActiveRange] = useState<DateRange>(14)
-  const { data, isLoading, isError } = useOpsStats(activeRange)
+  // 默认近 14 天
+  const [range, setRange] = useState<DateRange>(() => presetToRange('last14'))
 
-  const kpis = useMemo(() => computeKpis(data ?? []), [data])
+  // 自定义模式下用户正在编辑的草稿
+  const [customDraft, setCustomDraft] = useState<{ start: string; end: string }>(() => ({
+    start: presetToRange('last7').start,
+    end:   presetToRange('today').end,
+  }))
+
+  const handlePresetChange = (preset: DatePreset) => {
+    if (preset === 'custom') {
+      setRange(presetToRange('custom', customDraft))
+    } else {
+      setRange(presetToRange(preset))
+    }
+  }
+
+  const handleCustomChange = (next: { start: string; end: string }) => {
+    setCustomDraft(next)
+    if (next.start && next.end && next.start <= next.end) {
+      setRange({ preset: 'custom', start: next.start, end: next.end })
+    }
+  }
+
+  const { data, isLoading, isError } = useOpsStats(range)
+
+  // 图表用的数据：去掉 baseline 行，只保留用户选定区间内的天数
+  const chartData = useMemo(() => (data && data.length > 1 ? data.slice(1) : data ?? []), [data])
+
+  const kpis = useMemo(() => computeKpis(data ?? [], range), [data, range])
+  const period = periodLabel(range)
 
   return (
     <div className="max-w-7xl mx-auto space-y-5">
       <PageHeader
         title="运营数据"
-        description="iOS / Android 双端注册、充值、付费人数趋势 — 仅超管可见"
-        action={<RangeSwitch value={activeRange} onChange={setActiveRange} />}
+        description="新注册 / 激活 / 双端充值 / 付费 UV 全景看板 — 仅超管可见"
+        action={
+          <RangeSwitch
+            range={range}
+            customDraft={customDraft}
+            onPresetChange={handlePresetChange}
+            onCustomChange={handleCustomChange}
+          />
+        }
       />
+
+      {/* 数据口径 + 当前区间 */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100 text-xs text-blue-700">
+        <div className="inline-flex items-center gap-1.5">
+          <Info className="w-3.5 h-3.5 shrink-0" />
+          <span className="font-medium">时区:</span>
+          <span className="font-mono">America/Los_Angeles (LA)</span>
+        </div>
+        <div className="inline-flex items-center gap-1.5">
+          <span className="font-medium">当前区间:</span>
+          <span className="font-mono">{rangeDisplay(range)}</span>
+          <span className="text-blue-500/80">· {periodLabel(range)}</span>
+        </div>
+        <div className="text-blue-500/80">
+          T-1 延迟（今天数据次日同步）· 用户侧无 OS 拆分，付费侧已拆 iOS / Android
+        </div>
+      </div>
 
       {isLoading && (
         <div className="flex items-center justify-center py-32 text-gray-400">
@@ -132,36 +322,72 @@ export default function OpsDashboard() {
       {!isLoading && !isError && kpis && (
         <>
           {/* ── 1) KPI 卡片行 ── */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
             <KpiCard
-              title="今日新注册用户"
-              value={kpis.todayRegTotal.toLocaleString()}
-              delta={kpis.regDelta}
-              subtitle={`iOS ${kpis.regIos.toLocaleString()} / Android ${kpis.regAndroid.toLocaleString()}`}
+              title={kpis.isAggregate ? `${period}累计广告消耗` : `${period}广告消耗`}
+              value={fmtUsd(kpis.adSpend)}
+              subtitle="全平台合计 (TikTok + Meta)"
             />
             <KpiCard
-              title="今日总充值"
-              value={fmtCentsToWan(kpis.todayRevenueTotal)}
+              title={kpis.isAggregate ? `${period}累计 ROI` : `${period} ROI`}
+              value={kpis.roi == null ? '--' : kpis.roi.toFixed(2)}
+              delta={kpis.roiDelta}
+              subtitle={
+                kpis.roi == null
+                  ? '当日无消耗'
+                  : kpis.roi >= 1
+                    ? '盈利 (≥ 1.00)'
+                    : '亏损 (< 1.00)'
+              }
+              valueClassName={
+                kpis.roi == null
+                  ? undefined
+                  : kpis.roi >= 1
+                    ? 'text-green-600'
+                    : 'text-red-500'
+              }
+            />
+            <KpiCard
+              title={kpis.isAggregate ? `${period}累计总充值` : `${period}总充值`}
+              value={fmtUsd(kpis.revenueTotal)}
               delta={kpis.revenueDelta}
-              subtitle="iOS + Android · 订阅 + 普通"
+              subtitle="iOS + Android · 订阅 + 内购"
+            />
+            <KpiCard
+              title={kpis.isAggregate ? `${period}累计新注册` : `${period}新注册用户`}
+              value={kpis.regTotal.toLocaleString()}
+              delta={kpis.regDelta}
+              subtitle={
+                kpis.isAggregate
+                  ? `累计新激活 ${kpis.newActive.toLocaleString()} · 累计付费人次 ${kpis.payerUv.toLocaleString()}`
+                  : `新激活 ${kpis.newActive.toLocaleString()} · 付费 UV ${kpis.payerUv.toLocaleString()}`
+              }
             />
             <KpiCard
               title="iOS / Android"
               value={`iOS ${kpis.iosShare.toFixed(1)}%`}
-              subtitle={`iOS ${fmtCentsToWan(kpis.iosRevenueToday)} / Android ${fmtCentsToWan(kpis.androidRevenueToday)}`}
+              subtitle={`iOS ${fmtUsd(kpis.iosRevenue)} / Android ${fmtUsd(kpis.androidRevenue)}`}
             />
             <KpiCard
-              title="订阅 / 普通"
+              title="订阅 / 内购"
               value={`订阅 ${kpis.subShare.toFixed(1)}%`}
-              subtitle={`订阅 ${fmtCentsToWan(kpis.subRevenueToday)} / 普通 ${fmtCentsToWan(kpis.onetimeRevenueToday)}`}
+              subtitle={`订阅 ${fmtUsd(kpis.subRevenue)} / 内购 ${fmtUsd(kpis.onetimeRevenue)}`}
             />
           </div>
 
-          {/* ── 2) 注册趋势（全宽） ── */}
+          {/* ── 2) 广告消耗 vs 总充值 + ROI（最重要 — 盈利监控） ── */}
           <div className={chartCardCls}>
-            <h3 className={chartTitleCls}>新注册用户趋势</h3>
+            <h3 className={chartTitleCls}>广告消耗 vs 总充值（含 D0 流水 ROI）</h3>
+            <div style={{ height: 240 }}>
+              <SpendRoiChart data={chartData} />
+            </div>
+          </div>
+
+          {/* ── 3) 用户增长趋势 ── */}
+          <div className={chartCardCls}>
+            <h3 className={chartTitleCls}>新注册 / 新激活趋势</h3>
             <div style={{ height: 220 }}>
-              <RegTrendChart data={data!} />
+              <RegTrendChart data={chartData} />
             </div>
           </div>
 
@@ -170,22 +396,22 @@ export default function OpsDashboard() {
             <div className={chartCardCls}>
               <h3 className={chartTitleCls}>iOS / Android 充值（堆叠）</h3>
               <div style={{ height: 220 }}>
-                <RevenuePlatformChart data={data!} />
+                <RevenuePlatformChart data={chartData} />
               </div>
             </div>
             <div className={chartCardCls}>
-              <h3 className={chartTitleCls}>订阅 / 普通 充值（堆叠）</h3>
+              <h3 className={chartTitleCls}>订阅 / 内购 充值（堆叠）</h3>
               <div style={{ height: 220 }}>
-                <RevenueTypeChart data={data!} />
+                <RevenueTypeChart data={chartData} />
               </div>
             </div>
           </div>
 
-          {/* ── 4) 付费人数构成（全宽，4 系列堆叠） ── */}
+          {/* ── 4) 订单结构（全宽，4 系列堆叠） ── */}
           <div className={chartCardCls}>
-            <h3 className={chartTitleCls}>付费人数构成（平台 × 类型）</h3>
+            <h3 className={chartTitleCls}>订单结构（首/复订 × 首/复购）</h3>
             <div style={{ height: 220 }}>
-              <PayerComboChart data={data!} />
+              <PayerComboChart data={chartData} />
             </div>
           </div>
         </>

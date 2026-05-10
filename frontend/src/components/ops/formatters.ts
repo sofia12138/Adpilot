@@ -2,10 +2,19 @@
  * 运营数据面板 — 通用格式化与工具函数
  */
 
-/** 分 → ¥X.XX万（金额格式） */
-export function fmtCentsToWan(cents: number): string {
-  const wan = (cents || 0) / 1_000_000
-  return `¥${wan.toFixed(2)}万`
+/**
+ * USD → 人民币常用展示格式
+ *   0 ~ 999       → "$0", "$99", "$999"
+ *   1k ~ 999.9k   → "$1.2k", "$99.9k"
+ *   1M+           → "$1.23M"
+ *
+ * 后端字段已是 USD 浮点（已从美分换算）
+ */
+export function fmtUsd(usd: number): string {
+  const v = usd || 0
+  if (Math.abs(v) >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`
+  if (Math.abs(v) >= 1_000) return `$${(v / 1_000).toFixed(1)}k`
+  return `$${v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`
 }
 
 /** 整数 + 「人」（人数格式） */

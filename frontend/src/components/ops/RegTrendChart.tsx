@@ -1,30 +1,33 @@
 import {
-  ResponsiveContainer, ComposedChart,
-  Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ResponsiveContainer, AreaChart,
+  Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from 'recharts'
 import type { DailyOpsRow } from '@/types/ops'
 import { COLORS } from './chartColors'
-import { fmtDateMMDD, fmtPersons, pickTicks } from './formatters'
+import { fmtDateMMDD, pickTicks } from './formatters'
 
 /**
- * 新注册用户趋势图（双折线 + 面积填充）
+ * 用户增长趋势图（双线 + 面积填充）
  *
- * 系列：
- *   - iOS 新增用户（ios_new_users）
- *   - Android 新增用户（android_new_users）
+ * 系列（用户侧无 OS 拆分）：
+ *   - 新注册账号 UV (new_register_uv)
+ *   - 新激活 UV     (new_active_uv)
+ *
+ * 实现：用 <Area> 同时承担 stroke（折线）+ fill（渐变面积）的角色，避免
+ * 之前 Area + Line 双系列同 dataKey 导致 Tooltip 显示 2 倍行数的问题。
  */
 export function RegTrendChart({ data }: { data: DailyOpsRow[] }) {
   const ticks = pickTicks(data.map(d => d.date), 7)
 
   return (
     <ResponsiveContainer width="100%" height="100%">
-      <ComposedChart data={data} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
+      <AreaChart data={data} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
         <defs>
-          <linearGradient id="grad-reg-ios" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id="grad-reg-register" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={COLORS.ios} stopOpacity={0.28} />
             <stop offset="100%" stopColor={COLORS.ios} stopOpacity={0} />
           </linearGradient>
-          <linearGradient id="grad-reg-android" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id="grad-reg-active" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={COLORS.android} stopOpacity={0.28} />
             <stop offset="100%" stopColor={COLORS.android} stopOpacity={0} />
           </linearGradient>
@@ -46,7 +49,7 @@ export function RegTrendChart({ data }: { data: DailyOpsRow[] }) {
         />
         <Tooltip
           labelFormatter={(label) => fmtDateMMDD(String(label ?? ''))}
-          formatter={(v) => [fmtPersons(Number(v) || 0), ''] as [string, string]}
+          formatter={(v, name) => [(Number(v) || 0).toLocaleString(), name] as [string, string]}
           contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e7eb' }}
         />
         <Legend
@@ -55,43 +58,25 @@ export function RegTrendChart({ data }: { data: DailyOpsRow[] }) {
         />
         <Area
           type="monotone"
-          dataKey="ios_new_users"
-          name="iOS"
-          stroke="none"
-          fill="url(#grad-reg-ios)"
-          legendType="none"
+          dataKey="new_register_uv"
+          name="新注册"
+          stroke={COLORS.ios}
+          strokeWidth={2}
+          fill="url(#grad-reg-register)"
+          activeDot={{ r: 4 }}
           isAnimationActive={false}
         />
         <Area
           type="monotone"
-          dataKey="android_new_users"
-          name="Android"
-          stroke="none"
-          fill="url(#grad-reg-android)"
-          legendType="none"
-          isAnimationActive={false}
-        />
-        <Line
-          type="monotone"
-          dataKey="ios_new_users"
-          name="iOS"
-          stroke={COLORS.ios}
-          strokeWidth={2}
-          dot={false}
-          activeDot={{ r: 4 }}
-          isAnimationActive={false}
-        />
-        <Line
-          type="monotone"
-          dataKey="android_new_users"
-          name="Android"
+          dataKey="new_active_uv"
+          name="新激活"
           stroke={COLORS.android}
           strokeWidth={2}
-          dot={false}
+          fill="url(#grad-reg-active)"
           activeDot={{ r: 4 }}
           isAnimationActive={false}
         />
-      </ComposedChart>
+      </AreaChart>
     </ResponsiveContainer>
   )
 }

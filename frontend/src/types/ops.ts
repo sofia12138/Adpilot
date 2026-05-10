@@ -1,39 +1,71 @@
 /**
  * 运营数据面板 — 类型定义
  *
- * 与后端约定：
- *   - 金额字段单位为「分」（cents），渲染时统一转「¥X.XX 万」（÷ 1_000_000）
- *   - 日期字段为 'YYYY-MM-DD' 格式
- *   - new_users / payers 单位为「人」，整数
+ * 数据源：MaxCompute metis_dw.{ads_app_di, dwd_recharge_order_df}
+ *        → 每日同步到 BIZ.biz_ops_daily
+ *        → GET /api/ops/daily-stats?start_date=&end_date=
  *
- * TODO: 当后端接口落地后（GET /api/v1/ops/daily-stats?days={days}）这里类型保持不变
+ * 单位约定：
+ *   - 金额字段（subscribe_revenue / onetime_revenue）单位 USD（已在后端从美分换算）
+ *   - UV / orders 字段为整数
+ *   - date 字段为 'YYYY-MM-DD'（LA 时区）
+ *
+ * OS 拆分约束：
+ *   - 用户侧（new_register / new_active / DAU / 留存 / total_payer）当前数仓只有
+ *     一个 app_id，无法按 OS 拆分，统一展示全量
+ *   - 付费侧（金额 / 订单数 / 付费 UV）按 dwd_recharge_order_df.os_type 完整拆分
+ *     Android(=1) → android_*
+ *     iOS(=2)     → ios_*
  */
 export interface DailyOpsRow {
-  /** 统计日期，'YYYY-MM-DD' */
   date: string
 
-  // ── 新注册用户（单位：人） ──
-  /** iOS 新注册用户数 */
-  ios_new_users: number
-  /** Android 新注册用户数 */
-  android_new_users: number
+  // ── 用户侧（全量，无 OS 拆分） ────────────────────────────
+  /** 新注册账号 UV：dim_user_df.register_time_utc 转 LA = ds */
+  new_register_uv: number
+  /** 新激活 UV：App 首次启动 */
+  new_active_uv: number
+  /** DAU：当日 app_start UV */
+  active_uv: number
+  d1_retained_uv: number
+  d7_retained_uv: number
+  d30_retained_uv: number
+  /** 当日充值付费 UV（来自 ads_app_di.recharge_pay_uv，全量不拆 OS） */
+  total_payer_uv: number
 
-  // ── 充值金额（单位：分 / cents） ──
-  /** iOS 订阅充值 */
-  ios_sub_revenue: number
-  /** iOS 普通充值 */
-  ios_onetime_revenue: number
-  /** Android 订阅充值 */
-  android_sub_revenue: number
-  /** Android 普通充值 */
+  // ── 投放侧（全量平台合计；单位 USD） ───────────────────────
+  /** 当日广告消耗 USD（全平台合计，来自 biz_attribution_ad_daily.spend SUM） */
+  ad_spend: number
+
+  // ── iOS 付费侧 ─────────────────────────────────────────────
+  ios_subscribe_revenue: number    // USD
+  ios_onetime_revenue: number      // USD
+  ios_first_sub_orders: number
+  ios_repeat_sub_orders: number
+  ios_first_iap_orders: number
+  ios_repeat_iap_orders: number
+  ios_payer_uv: number
+
+  // ── Android 付费侧 ────────────────────────────────────────
+  android_subscribe_revenue: number
   android_onetime_revenue: number
-
-  // ── 付费人数（单位：人） ──
-  ios_sub_payers: number
-  ios_onetime_payers: number
-  android_sub_payers: number
-  android_onetime_payers: number
+  android_first_sub_orders: number
+  android_repeat_sub_orders: number
+  android_first_iap_orders: number
+  android_repeat_iap_orders: number
+  android_payer_uv: number
 }
 
-/** 时间范围筛选 — 7/14/30 天 */
-export type DateRange = 7 | 14 | 30
+/** 时间范围 preset — UI 上的快捷按钮 */
+export type DatePreset = 'yesterday' | 'today' | 'last7' | 'last14' | 'last30' | 'custom'
+
+/**
+ * 时间范围筛选 — 统一以「起止日期」为底层概念
+ *   start / end 均为 'YYYY-MM-DD'，闭区间（含 start、含 end）
+ *   preset 仅用于 UI 高亮当前按钮 / KPI 卡标题文案
+ */
+export interface DateRange {
+  preset: DatePreset
+  start: string
+  end: string
+}

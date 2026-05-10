@@ -10,6 +10,8 @@ interface KpiCardProps {
   delta?: number | null
   /** 副文字（小一号字号、灰色） */
   subtitle?: string
+  /** 主数字的额外样式（如 ROI 卡盈利/亏损不同颜色） */
+  valueClassName?: string
 }
 
 /**
@@ -20,7 +22,7 @@ interface KpiCardProps {
  *   - 圆角 rounded-xl，无阴影
  *   - 涨跌色：上涨 text-green-600，下跌 text-red-500
  */
-export function KpiCard({ title, value, delta, subtitle }: KpiCardProps) {
+export function KpiCard({ title, value, delta, subtitle, valueClassName }: KpiCardProps) {
   const showDelta = typeof delta === 'number' && isFinite(delta)
   const isUp = showDelta && (delta as number) >= 0
   const deltaAbs = showDelta ? Math.abs(delta as number) : 0
@@ -30,7 +32,7 @@ export function KpiCard({ title, value, delta, subtitle }: KpiCardProps) {
       <div className="text-xs text-muted-foreground">{title}</div>
 
       <div className="flex items-baseline gap-2 flex-wrap">
-        <span className="text-xl font-semibold text-foreground tabular-nums">{value}</span>
+        <span className={cn('text-xl font-semibold tabular-nums', valueClassName ?? 'text-foreground')}>{value}</span>
         {showDelta && (
           <span
             className={cn(

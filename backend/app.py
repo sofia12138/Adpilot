@@ -115,6 +115,29 @@ async def _sync_attribution_job():
         logger.error(f"归因日报同步失败: {e}")
 
 
+async def _sync_ops_daily_job():
+    """Job 5：运营数据日报同步（每天 1 次，默认回填最近 30 天）
+
+    数据流：metis_dw.{ads_app_di, dwd_recharge_order_df} (MaxCompute, via DMS)
+        → adpilot_biz.biz_ops_daily
+
+    覆盖运营面板所有指标：注册 / 激活 / DAU / 留存 / 双端订阅+内购充值 / 付费 UV
+    """
+    import asyncio
+    settings = get_settings()
+    if not (settings.dms_access_key_id or settings.odps_access_key_id):
+        logger.info("运营数据同步：缺少 AccessKey（DMS_/ODPS_*），跳过本次")
+        return
+
+    from tasks.sync_ops_daily import run as sync_ops_run
+    logger.info("运营数据日报同步开始（默认 30 天回刷窗口）")
+    try:
+        result = await asyncio.to_thread(sync_ops_run)
+        logger.info(f"运营数据日报同步完成: {result}")
+    except Exception as e:
+        logger.error(f"运营数据日报同步失败: {e}")
+
+
 async def _sync_attribution_intraday_job():
     """Job 4：CK D0 实时归因同步 (默认窗口=今天+昨天 LA)
 
@@ -184,6 +207,16 @@ async def lifespan(application: FastAPI):
         replace_existing=True,
     )
 
+    # Job 5：运营数据日报同步（每天 1 次，错开归因任务 30 分钟）
+    # 拉 metis_dw.{ads_app_di, dwd_recharge_order_df} → biz_ops_daily
+    _scheduler.add_job(
+        _sync_ops_daily_job,
+        trigger="cron",
+        hour=3, minute=0,  # Asia/Shanghai 凌晨 03:00 ≈ LA 上午 11:00 / 12:00
+        id="sync_ops_daily",
+        replace_existing=True,
+    )
+
     # Job 4：CK D0 实时归因同步（默认 disabled；ENABLE_CK_INTRADAY_SYNC=true 开启）
     # 启用后每 30 分钟拉 metis.dwd_*_rt 当天 + 昨天 LA 数据，覆盖到 biz_attribution_ad_intraday
     _settings = get_settings()
@@ -198,12 +231,12 @@ async def lifespan(application: FastAPI):
         )
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
-            "归因每日 02:30 | CK 实时每 30 分钟）"
+            "归因每日 02:30 | 运营每日 03:00 | CK 实时每 30 分钟）"
         )
     else:
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
-            "归因每日 02:30）—— CK 实时同步未启用 (ENABLE_CK_INTRADAY_SYNC=false)"
+            "归因每日 02:30 | 运营每日 03:00）—— CK 实时同步未启用 (ENABLE_CK_INTRADAY_SYNC=false)"
         )
 
     _scheduler.start()
@@ -276,6 +309,7 @@ def _register_routers(application: FastAPI):
     from routes.ad_assets import router as ad_assets_router
     from routes.tiktok_materials import router as tiktok_materials_router
     from routes.attribution import router as attribution_router
+    from routes.ops import router as ops_router
 
     for r in [
         auth_router, users_router, campaign_router, adgroup_router,
@@ -286,7 +320,7 @@ def _register_routers(application: FastAPI):
         accounts_router, analysis_router, sync_router, drama_router,
         designer_performance_router, optimizer_performance_router,
         optimizer_directory_router, meta_assets_router, ad_assets_router,
-        tiktok_materials_router, attribution_router,
+        tiktok_materials_router, attribution_router, ops_router,
     ]:
         application.include_router(r, prefix="/api")
 

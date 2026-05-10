@@ -633,6 +633,7 @@ def init_app_tables():
         conn.commit()
         _seed_panels(cur, conn)
         _seed_role_panels(cur, conn)
+        _migrate_super_admin_ops_dashboard_user_override(cur, conn)
         _seed_insight_config(cur, conn)
         logger.info("APP 应用库元数据表初始化完成")
     except Exception as e:
@@ -671,6 +672,44 @@ def _seed_role_panels(cur, conn):
     conn.commit()
     if count:
         logger.info(f"已补充写入 {count} 条角色默认面板权限")
+
+
+def _migrate_super_admin_ops_dashboard_user_override(cur, conn):
+    """幂等：super_admin 若启用了用户级面板覆盖但缺少 ops_dashboard，则补一行。
+
+    resolve_user_allowed_panels 在存在 user_panel_permissions 时只返回用户列表、
+    不再合并角色默认；历史上部分账号只有 tiktok_materials 等少数面板，
+    会导致 /api/ops/daily-stats 403。补全后运营面板与路由权限一致。
+    """
+    cur.execute(
+        """
+        SELECT DISTINCT u.username
+        FROM app_users u
+        INNER JOIN user_panel_permissions up
+            ON up.username = u.username AND up.can_view = 1
+        WHERE u.role = 'super_admin'
+          AND NOT EXISTS (
+              SELECT 1 FROM user_panel_permissions x
+              WHERE x.username = u.username
+                AND x.panel_key = 'ops_dashboard'
+                AND x.can_view = 1
+          )
+        """
+    )
+    names = [r["username"] for r in cur.fetchall()]
+    if not names:
+        return
+    for username in names:
+        cur.execute(
+            """INSERT IGNORE INTO user_panel_permissions (username, panel_key, can_view)
+               VALUES (%s, 'ops_dashboard', 1)""",
+            (username,),
+        )
+    conn.commit()
+    logger.info(
+        "super_admin 用户面板覆盖补全: 已为 %s 个账号写入 ops_dashboard",
+        len(names),
+    )
 
 
 def _seed_insight_config(cur, conn):
@@ -1270,6 +1309,46 @@ _BIZ_TABLES_SQL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     COMMENT='TikTok 素材 API 上传记录'
     """,
+    """
+    -- 运营数据面板日报：从 MaxCompute metis_dw 同步
+    --   os_type=0 行：用户侧全量指标（注册/激活/DAU/留存）— 来自 ads_app_di
+    --   os_type=1/2 行：付费侧双端拆分指标（金额/订单数/付费UV）— 来自 dwd_recharge_order_df
+    -- 同步任务：tasks/sync_ops_daily.py，每日 03:00 LA 执行，回填 30 天
+    CREATE TABLE IF NOT EXISTS biz_ops_daily (
+        id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+        ds                       DATE          NOT NULL COMMENT '统计日 LA',
+        os_type                  TINYINT       NOT NULL COMMENT '0=全量(用户侧) / 1=Android / 2=iOS',
+
+        -- 用户侧（仅 os_type=0 行有值）
+        new_register_uv          BIGINT        NOT NULL DEFAULT 0 COMMENT '新注册账号 UV (register_time_utc 转 LA = ds)',
+        new_active_uv            BIGINT        NOT NULL DEFAULT 0 COMMENT '新激活 UV (App 首次启动)',
+        active_uv                BIGINT        NOT NULL DEFAULT 0 COMMENT 'DAU',
+        d1_retained_uv           BIGINT        NOT NULL DEFAULT 0,
+        d7_retained_uv           BIGINT        NOT NULL DEFAULT 0,
+        d30_retained_uv          BIGINT        NOT NULL DEFAULT 0,
+        total_payer_uv           BIGINT        NOT NULL DEFAULT 0 COMMENT '当日充值付费 UV (来自 ads_app_di.recharge_pay_uv，全量不拆 OS)',
+
+        -- 付费侧（仅 os_type=1/2 行有值，单位 USD 已从美分换算）
+        subscribe_revenue_usd    DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '订阅充值金额 USD',
+        onetime_revenue_usd      DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '内购充值金额 USD',
+        first_sub_orders         BIGINT        NOT NULL DEFAULT 0 COMMENT '首次订阅订单数',
+        repeat_sub_orders        BIGINT        NOT NULL DEFAULT 0 COMMENT '续订订单数',
+        first_iap_orders         BIGINT        NOT NULL DEFAULT 0 COMMENT '首次内购订单数',
+        repeat_iap_orders        BIGINT        NOT NULL DEFAULT 0 COMMENT '复购内购订单数',
+        payer_uv                 BIGINT        NOT NULL DEFAULT 0 COMMENT '该 OS 当日付费 UV',
+
+        -- 投放侧（仅 os_type=0 行有值，全平台合计；单位 USD）
+        ad_spend_usd             DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '当日广告消耗 USD（全量平台合计，来自 biz_attribution_ad_daily）',
+
+        synced_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        UNIQUE KEY uk_ds_os (ds, os_type),
+        INDEX idx_ds (ds)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='运营数据面板日报：os_type=0 全量用户侧 + os_type=1/2 双端付费侧'
+    """,
 ]
 
 
@@ -1292,12 +1371,34 @@ def init_biz_tables():
         _migrate_returned_conversion_d0_columns(cur)
         _migrate_returned_conversion_cleanup(cur)
         _migrate_optimizer_mapping_columns(cur)
+        _migrate_biz_ops_daily_ad_spend(cur)
         conn.commit()
         logger.info("BIZ 业务库数据沉淀表初始化完成")
     except Exception as e:
         logger.error(f"init_biz_tables 失败: {e}")
     finally:
         conn.close()
+
+
+def _migrate_biz_ops_daily_ad_spend(cur):
+    """幂等：为既有 biz_ops_daily 表补 ad_spend_usd 列。
+
+    新建表时 _BIZ_TABLES_SQL 已经包含此列；本函数仅处理"先建表再加列"场景。
+    """
+    cur.execute(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_ops_daily'"
+    )
+    cols = {r["COLUMN_NAME"] for r in cur.fetchall()}
+    if not cols:
+        return  # 表还没建出来（首次启动），跳过
+    if "ad_spend_usd" not in cols:
+        cur.execute(
+            "ALTER TABLE biz_ops_daily "
+            "ADD COLUMN ad_spend_usd DECIMAL(14,4) NOT NULL DEFAULT 0 "
+            "COMMENT '当日广告消耗 USD（全量平台合计）' AFTER payer_uv"
+        )
+        logger.info("biz_ops_daily 已补字段 ad_spend_usd")
 
 
 def _migrate_optimizer_mapping_columns(cur):
