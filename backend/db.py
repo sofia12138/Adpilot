@@ -566,6 +566,8 @@ _APP_TABLES_SQL = [
 
 _PANEL_SEED = [
     ("dashboard",          "首页概览",      "首页概览",   "/dashboard",          10),
+    # 运营数据面板（仅超管可见，see _ROLE_DEFAULT_PANELS）
+    ("ops_dashboard",      "运营数据",      "首页概览",   "/dashboard/ops",      11),
     ("ads_data",           "广告数据",      "投放管理",   "/ads",                20),
     ("tiktok_console",     "TikTok操作台",  "投放管理",   "/console/tiktok",     21),
     ("meta_console",       "Meta操作台",    "投放管理",   "/console/meta",       22),
@@ -601,7 +603,8 @@ _PANEL_SEED = [
 
 _ROLE_DEFAULT_PANELS: dict[str, list[str]] = {
     "super_admin": [p[0] for p in _PANEL_SEED],
-    "admin":       [p[0] for p in _PANEL_SEED if p[0] != "role_perm"],
+    # admin 不含 role_perm（角色权限管理）和 ops_dashboard（运营数据，超管专属）
+    "admin":       [p[0] for p in _PANEL_SEED if p[0] not in ("role_perm", "ops_dashboard")],
     "optimizer":   ["dashboard", "ads_data", "tiktok_console", "meta_console", "ad_create",
                     "template_mgmt", "creatives", "creative_analysis", "optimizer_performance",
                     "optimizer_directory", "designer_performance", "drama_analysis",
