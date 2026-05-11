@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from repositories import biz_attribution_ad_intraday_repository as intraday_repo
 from repositories import biz_ops_daily_repository as repo
 
 
@@ -107,4 +108,27 @@ def query_daily_ops(start_date: str, end_date: str) -> list[dict]:
         elif os_type == 2:  # iOS
             _merge_pay_row(by_ds[ds_str], raw, "ios_")
 
+    # ad_spend 兜底：T+1 cohort 表 biz_attribution_ad_daily 通常昨天/今天还没分区，
+    # sync_ops_daily 也只在每天 LA 03:00 跑一次，导致面板上昨天/今天的 ad_spend 为 0。
+    # 这里对 ad_spend == 0 的日期，从实时归因表 biz_attribution_ad_intraday 取 SUM(spend) 兜底。
+    # 已经被 daily 同步过来的非零值不会被覆盖，避免历史数据被实时口径污染。
+    _fill_ad_spend_from_intraday(by_ds, start_date, end_date)
+
     return [by_ds[k] for k in sorted(by_ds.keys())]
+
+
+def _fill_ad_spend_from_intraday(by_ds: dict[str, dict],
+                                 start_date: str, end_date: str) -> None:
+    """对 by_ds 里 ad_spend == 0 的日期，用 biz_attribution_ad_intraday 实时 spend 兜底。"""
+    zero_days = [ds for ds, row in by_ds.items() if not row.get("ad_spend")]
+    if not zero_days:
+        return
+    try:
+        intraday_spend = intraday_repo.sum_spend_by_ds_la(start_date, end_date)
+    except Exception:
+        # 兜底失败不影响主流程，保持现有 0 值返回
+        return
+    for ds in zero_days:
+        v = intraday_spend.get(ds)
+        if v and v > 0:
+            by_ds[ds]["ad_spend"] = float(v)

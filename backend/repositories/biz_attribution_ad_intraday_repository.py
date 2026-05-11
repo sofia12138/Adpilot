@@ -212,6 +212,32 @@ def get_daily_trend(start_date: str, end_date: str, *,
         return cur.fetchall() or []
 
 
+def sum_spend_by_ds_la(start_date: str, end_date: str) -> dict[str, float]:
+    """按 ds_la 聚合 SUM(spend)，返回 {YYYY-MM-DD: spend_usd}。
+
+    用途：当 T+1 cohort 表 biz_attribution_ad_daily 还没落到某天的分区时，
+    运营面板/任何按 LA 日聚合 spend 的场景可以用本函数实时兜底。
+    spend 已是 USD 浮点（同步层已换算），但精度/口径与 daily 表会有微小差异，
+    因此 daily 有值时不应被本函数覆盖。
+    """
+    out: dict[str, float] = {}
+    with get_biz_conn() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ds_la, SUM(spend) AS spend FROM biz_attribution_ad_intraday "
+            "WHERE ds_la BETWEEN %s AND %s GROUP BY ds_la",
+            (start_date, end_date),
+        )
+        for row in cur.fetchall():
+            ds = row.get("ds_la")
+            ds_str = ds.strftime("%Y-%m-%d") if hasattr(ds, "strftime") else str(ds)[:10]
+            try:
+                out[ds_str] = round(float(row.get("spend") or 0), 4)
+            except (TypeError, ValueError):
+                out[ds_str] = 0.0
+    return out
+
+
 def get_aggregated(start_date: str, end_date: str, *,
                    group_by: str = "ad",
                    tz_basis: str = "account_local",
