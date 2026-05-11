@@ -597,8 +597,8 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
   const highSpendLowConv = useMemo(() => filteredCampaigns.filter(r => r.total_spend > 100 && r.total_conversions < 5), [filteredCampaigns])
   const noAttrCampaigns = useMemo(() => filteredCampaigns.filter(isMissingAttribution), [filteredCampaigns])
   const overviewMissingAttr = isMissingAttribution({
-    total_spend: ov?.total_spend ?? 0,
-    attribution_spend: ov?.attribution_spend,
+    total_spend: overview?.total_spend ?? 0,
+    attribution_spend: overview?.attribution_spend,
   })
 
   // Generic meta lookup
