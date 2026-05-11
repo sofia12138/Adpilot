@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 from repositories import biz_attribution_ad_intraday_repository as intraday_repo
+from repositories import biz_daily_report_repository as norm_repo
 from repositories import biz_ops_daily_repository as repo
 
 
@@ -108,27 +109,45 @@ def query_daily_ops(start_date: str, end_date: str) -> list[dict]:
         elif os_type == 2:  # iOS
             _merge_pay_row(by_ds[ds_str], raw, "ios_")
 
-    # ad_spend 兜底：T+1 cohort 表 biz_attribution_ad_daily 通常昨天/今天还没分区，
-    # sync_ops_daily 也只在每天 LA 03:00 跑一次，导致面板上昨天/今天的 ad_spend 为 0。
-    # 这里对 ad_spend == 0 的日期，从实时归因表 biz_attribution_ad_intraday 取 SUM(spend) 兜底。
-    # 已经被 daily 同步过来的非零值不会被覆盖，避免历史数据被实时口径污染。
-    _fill_ad_spend_from_intraday(by_ds, start_date, end_date)
+    # ad_spend 数据源切换说明：
+    #   主源：biz_campaign_daily_normalized — 直接来自 Meta/TikTok 平台 API，
+    #         跟 AdPilot Meta 操作台 / 平台后台账单 1:1 同源（口径最准）。
+    #   fallback：biz_attribution_ad_intraday — 仅在主源对某天没有任何分区时兜底，
+    #         避免主源同步任务中断导致面板完全空白。
+    # 不再使用 biz_ops_daily.ad_spend_usd（其上游 biz_attribution_ad_daily 是归因
+    # cohort 口径，TikTok 归因数据缺失会导致系统性偏低，与平台后台不符）。
+    _override_ad_spend_from_normalized(by_ds, start_date, end_date)
 
     return [by_ds[k] for k in sorted(by_ds.keys())]
 
 
-def _fill_ad_spend_from_intraday(by_ds: dict[str, dict],
-                                 start_date: str, end_date: str) -> None:
-    """对 by_ds 里 ad_spend == 0 的日期，用 biz_attribution_ad_intraday 实时 spend 兜底。"""
-    zero_days = [ds for ds, row in by_ds.items() if not row.get("ad_spend")]
-    if not zero_days:
+def _override_ad_spend_from_normalized(by_ds: dict[str, dict],
+                                       start_date: str, end_date: str) -> None:
+    """用 biz_campaign_daily_normalized 的 SUM(spend) 覆盖每天的 ad_spend。
+
+    主源命中的日期：直接覆盖（无论原值是 0 还是非 0），保证跟操作台口径一致。
+    主源未命中的日期：兜底到 biz_attribution_ad_intraday；都没有则保持原值（通常为 0）。
+    """
+    try:
+        norm_spend = norm_repo.sum_spend_by_stat_date(start_date, end_date)
+    except Exception:
+        norm_spend = {}
+
+    missing_days: list[str] = []
+    for ds in by_ds.keys():
+        v = norm_spend.get(ds)
+        if v is not None:
+            by_ds[ds]["ad_spend"] = float(v)
+        elif not by_ds[ds].get("ad_spend"):
+            missing_days.append(ds)
+
+    if not missing_days:
         return
     try:
         intraday_spend = intraday_repo.sum_spend_by_ds_la(start_date, end_date)
     except Exception:
-        # 兜底失败不影响主流程，保持现有 0 值返回
         return
-    for ds in zero_days:
+    for ds in missing_days:
         v = intraday_spend.get(ds)
         if v and v > 0:
             by_ds[ds]["ad_spend"] = float(v)
