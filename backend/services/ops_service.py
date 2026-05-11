@@ -52,6 +52,8 @@ def _empty_row(ds: str) -> dict:
         "android_first_iap_orders": 0,
         "android_repeat_iap_orders": 0,
         "android_payer_uv": 0,
+        # 数据来源标记 (前端可据此提示)
+        "revenue_source": "platform",  # 'platform' = MC 全量真值；'intraday_fallback' = CK 归因兜底（偏低）
     }
 
 
@@ -118,6 +120,12 @@ def query_daily_ops(start_date: str, end_date: str) -> list[dict]:
     # cohort 口径，TikTok 归因数据缺失会导致系统性偏低，与平台后台不符）。
     _override_ad_spend_from_normalized(by_ds, start_date, end_date)
 
+    # 收入兜底：sync_ops_daily / sync_ops_pay_intraday 都没拉到付费侧时（如 DMS
+    # AccessKey 失效），从 biz_attribution_ad_intraday 取 first_sub/first_iap 实时
+    # 归因金额作为最后兜底。注意这是「投放归因流水」口径，比 dwd_recharge_order_df
+    # 全量真值偏低（漏自然流量、漏未归因、漏二次充值），仅作为应急展示。
+    _fill_revenue_from_intraday(by_ds, start_date, end_date)
+
     return [by_ds[k] for k in sorted(by_ds.keys())]
 
 
@@ -151,3 +159,68 @@ def _override_ad_spend_from_normalized(by_ds: dict[str, dict],
         v = intraday_spend.get(ds)
         if v and v > 0:
             by_ds[ds]["ad_spend"] = float(v)
+
+
+def _fill_revenue_from_intraday(by_ds: dict[str, dict],
+                                start_date: str, end_date: str) -> None:
+    """对 daily 付费侧完全为空的日期，从 biz_attribution_ad_intraday 取归因流水兜底。
+
+    判定条件：iOS / Android 的订阅 + 内购 4 项金额全为 0 且 4 项订单数全为 0。
+    满足时，该天有可能是 sync_ops_daily / sync_ops_pay_intraday 都没拉到的应急情况。
+    口径警示：CK intraday 是「按 ad_id 归因」的投放流水，比 MC 全量订单流水偏低，
+    仅作为兜底展示，待 MC 同步任务恢复后会被覆盖回真值。
+    """
+    def _is_pay_empty(row: dict) -> bool:
+        for prefix in ("ios_", "android_"):
+            for k in ("subscribe_revenue", "onetime_revenue",
+                      "first_sub_orders", "first_iap_orders",
+                      "repeat_sub_orders", "repeat_iap_orders"):
+                if row.get(f"{prefix}{k}"):
+                    return False
+        return True
+
+    empty_days = [ds for ds, row in by_ds.items() if _is_pay_empty(row)]
+    if not empty_days:
+        return
+    try:
+        from db import get_biz_conn
+        intraday_rev: dict[str, dict] = {}
+        with get_biz_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT ds_la, "
+                "       SUM(first_sub_amount)  AS first_sub_amount, "
+                "       SUM(first_iap_amount)  AS first_iap_amount, "
+                "       SUM(first_sub_count)   AS first_sub_count, "
+                "       SUM(first_iap_count)   AS first_iap_count "
+                "FROM biz_attribution_ad_intraday "
+                "WHERE ds_la BETWEEN %s AND %s "
+                "GROUP BY ds_la",
+                (start_date, end_date),
+            )
+            for r in cur.fetchall():
+                ds = r.get("ds_la")
+                ds_str = ds.strftime("%Y-%m-%d") if hasattr(ds, "strftime") else str(ds)[:10]
+                intraday_rev[ds_str] = r
+    except Exception:
+        return
+
+    for ds in empty_days:
+        rec = intraday_rev.get(ds)
+        if not rec:
+            continue
+        sub_amt = float(rec.get("first_sub_amount") or 0)
+        iap_amt = float(rec.get("first_iap_amount") or 0)
+        sub_cnt = int(rec.get("first_sub_count") or 0)
+        iap_cnt = int(rec.get("first_iap_count") or 0)
+        if sub_amt + iap_amt <= 0 and sub_cnt + iap_cnt <= 0:
+            continue
+        # CK intraday 表无 os_type 维度，兜底时把总量统一塞到 iOS 字段（不拆平台）。
+        # KPI 卡总收入 = iOS+Android 仍然正确；按平台拆分会显示在 iOS 一侧偏高，
+        # 这是有意为之的「警示性失真」 — 配合 revenue_source 标记前端会提示。
+        # 真值口径恢复后会被 MC 全量数据覆盖。
+        by_ds[ds]["ios_subscribe_revenue"]    = round(sub_amt, 4)
+        by_ds[ds]["ios_onetime_revenue"]      = round(iap_amt, 4)
+        by_ds[ds]["ios_first_sub_orders"]     = sub_cnt
+        by_ds[ds]["ios_first_iap_orders"]     = iap_cnt
+        by_ds[ds]["revenue_source"]           = "intraday_fallback"

@@ -138,6 +138,28 @@ async def _sync_ops_daily_job():
         logger.error(f"运营数据日报同步失败: {e}")
 
 
+async def _sync_ops_pay_intraday_job():
+    """Job 6：运营面板付费侧高频同步 (每 30 分钟，默认窗口=今天+昨天 LA)
+
+    数据流：metis_dw.dwd_recharge_order_df → biz_ops_daily (os_type=1/2 行)
+    口径与 sync_ops_daily 付费侧完全一致；本任务只为压低收入展示时延。
+    user 侧 (ads_app_di) + spend 仍由 sync_ops_daily 主任务处理。
+    """
+    import asyncio
+    settings = get_settings()
+    if not (settings.dms_access_key_id or settings.odps_access_key_id):
+        logger.info("运营付费侧高频同步：缺少 AccessKey（DMS_/ODPS_*），跳过本次")
+        return
+
+    from tasks.sync_ops_pay_intraday import run as sync_ops_pay_run
+    logger.info("运营付费侧高频同步开始（默认窗口=今天+昨天 LA）")
+    try:
+        result = await asyncio.to_thread(sync_ops_pay_run)
+        logger.info(f"运营付费侧高频同步完成: {result}")
+    except Exception as e:
+        logger.error(f"运营付费侧高频同步失败: {e}")
+
+
 async def _sync_attribution_intraday_job():
     """Job 4：CK D0 实时归因同步 (默认窗口=今天+昨天 LA)
 
@@ -207,14 +229,27 @@ async def lifespan(application: FastAPI):
         replace_existing=True,
     )
 
-    # Job 5：运营数据日报同步（每天 1 次，错开归因任务 30 分钟）
+    # Job 5：运营数据日报同步（每 2 小时跑一次，user 侧 + 付费侧 + spend 全量回填）
     # 拉 metis_dw.{ads_app_di, dwd_recharge_order_df} → biz_ops_daily
+    # 注：付费侧的实时刷新已交给 Job 6（每 30min），本任务保证 user 侧 / 历史窗口的全量准确性。
     _scheduler.add_job(
         _sync_ops_daily_job,
-        trigger="cron",
-        hour=3, minute=0,  # Asia/Shanghai 凌晨 03:00 ≈ LA 上午 11:00 / 12:00
+        trigger="interval",
+        hours=2,
         id="sync_ops_daily",
         replace_existing=True,
+        next_run_time=now + timedelta(minutes=2),
+    )
+
+    # Job 6：运营面板付费侧高频同步（每 30 分钟，仅刷今天+昨天 LA 的付费侧）
+    # 拉 metis_dw.dwd_recharge_order_df → biz_ops_daily (os_type=1/2)
+    _scheduler.add_job(
+        _sync_ops_pay_intraday_job,
+        trigger="interval",
+        minutes=30,
+        id="sync_ops_pay_intraday",
+        replace_existing=True,
+        next_run_time=now + timedelta(minutes=10),
     )
 
     # Job 4：CK D0 实时归因同步（默认 disabled；ENABLE_CK_INTRADAY_SYNC=true 开启）
@@ -231,12 +266,13 @@ async def lifespan(application: FastAPI):
         )
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
-            "归因每日 02:30 | 运营每日 03:00 | CK 实时每 30 分钟）"
+            "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟 | CK 实时每 30 分钟）"
         )
     else:
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
-            "归因每日 02:30 | 运营每日 03:00）—— CK 实时同步未启用 (ENABLE_CK_INTRADAY_SYNC=false)"
+            "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟）"
+            "—— CK 实时同步未启用 (ENABLE_CK_INTRADAY_SYNC=false)"
         )
 
     _scheduler.start()
