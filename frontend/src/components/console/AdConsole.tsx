@@ -37,6 +37,21 @@ function fmtRatio(n: number | null) { return n != null ? n.toFixed(2) : '-' }
 function fmtNum(n: number | null) { return n != null ? n.toLocaleString() : '-' }
 
 // ---------------------------------------------------------------------------
+// 归因覆盖判定
+// 判定规则：
+//   normalized 端 spend > $5（排除浮点漂移/极小测试消耗），
+//   但 attribution 数仓侧自报 spend 为 0 → 该账号/广告未被数仓的归因表覆盖。
+//   此时 total_revenue / roas / 注册转化数大概率不可信，需在 UI 显著标注。
+// 仅 source=blend/auto 时 attribution_spend 字段非 undefined。
+// ---------------------------------------------------------------------------
+const NO_ATTR_SPEND_THRESHOLD_USD = 5
+
+function isMissingAttribution(row: Pick<AggRow, 'total_spend' | 'attribution_spend'>): boolean {
+  if (row.attribution_spend === undefined) return false
+  return row.total_spend > NO_ATTR_SPEND_THRESHOLD_USD && (row.attribution_spend || 0) <= 0
+}
+
+// ---------------------------------------------------------------------------
 // Column defs for hierarchical table (aggregated data)
 // ---------------------------------------------------------------------------
 
@@ -580,6 +595,11 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
   // Insight warnings
   const lowRoiCampaigns = useMemo(() => filteredCampaigns.filter(r => r.roas != null && r.roas > 0 && r.roas < roiThreshold), [filteredCampaigns, roiThreshold])
   const highSpendLowConv = useMemo(() => filteredCampaigns.filter(r => r.total_spend > 100 && r.total_conversions < 5), [filteredCampaigns])
+  const noAttrCampaigns = useMemo(() => filteredCampaigns.filter(isMissingAttribution), [filteredCampaigns])
+  const overviewMissingAttr = isMissingAttribution({
+    total_spend: ov?.total_spend ?? 0,
+    attribution_spend: ov?.attribution_spend,
+  })
 
   // Generic meta lookup
   function getEntityMeta(entityId: string, entityType: RowLevel): EntityMeta | undefined {
@@ -680,8 +700,24 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
       </div>
 
       {/* Warnings */}
-      {(lowRoiCampaigns.length > 0 || highSpendLowConv.length > 0) && (
+      {(lowRoiCampaigns.length > 0 || highSpendLowConv.length > 0 || noAttrCampaigns.length > 0 || overviewMissingAttr) && (
         <div className="flex flex-wrap gap-3">
+          {(noAttrCampaigns.length > 0 || overviewMissingAttr) && (
+            <div className="flex items-start gap-2 px-4 py-2.5 bg-orange-50 border border-orange-200 rounded-xl shadow-sm">
+              <AlertCircle className="w-4 h-4 text-orange-500 mt-0.5 shrink-0" />
+              <div className="flex flex-col">
+                <span className="text-xs text-orange-700 font-semibold">
+                  {noAttrCampaigns.length > 0
+                    ? `${noAttrCampaigns.length} 个 Campaign 无归因数据`
+                    : '所选区间整体无归因数据'}
+                </span>
+                <span className="text-[11px] text-orange-600/80 mt-0.5 leading-relaxed">
+                  数仓归因表（dwd_media_stats_rt / dwd_invest_recharge_rt）未覆盖该账号广告事件，
+                  收入 / ROI / 注册 / 转化数为 0 不准确，需联系数据团队补采。
+                </span>
+              </div>
+            </div>
+          )}
           {lowRoiCampaigns.length > 0 && (
             <div className="flex items-center gap-2 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl shadow-sm">
               <AlertTriangle className="w-4 h-4 text-amber-500" />
@@ -901,6 +937,19 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
                             }`} title={row.name}>
                               {row.name}
                             </span>
+                            {isMissingAttribution(row.data) && (
+                              <span
+                                className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-orange-50 text-orange-600 border border-orange-200 cursor-help"
+                                title={
+                                  '该' + (row.rowType === 'campaign' ? 'Campaign' : row.rowType === 'adset' ? 'Adset' : 'Ad') +
+                                  ` 在所选区间消耗 $${row.data.total_spend.toFixed(2)}，但数仓归因表未采集到任何归因事件（attribution_spend = 0），\n` +
+                                  '故此处的"收入 / ROI / 注册 / 转化"为 0 不可信，请联系数据团队检查。'
+                                }
+                              >
+                                <AlertCircle className="w-3 h-3" />
+                                无归因
+                              </span>
+                            )}
                           </div>
                         </td>
 

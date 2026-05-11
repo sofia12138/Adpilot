@@ -39,6 +39,12 @@ export interface BizOverview {
   total_installs: number
   total_conversions: number
   total_registrations?: number
+  /**
+   * Attribution 数仓侧自报的 spend 总和。仅 source=blend/auto 返回。
+   * normalized 端 spend>0 但 attribution_spend≈0 → 数仓未采集该账号广告事件，
+   * 此时 total_revenue / avg_roas 不可信，前端应给出"无归因数据"警示。
+   */
+  attribution_spend?: number
   avg_ctr: number | null
   avg_cpc: number | null
   avg_cpm: number | null
@@ -200,6 +206,8 @@ export interface AggRow {
   total_installs: number
   total_conversions: number
   total_registrations?: number
+  /** Attribution 数仓侧自报 spend；详见 BizOverview.attribution_spend 注释。 */
+  attribution_spend?: number
   ctr: number | null
   cpc: number | null
   cpm: number | null

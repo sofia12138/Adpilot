@@ -132,7 +132,10 @@ def _attr_subquery(grain: str,
     """生成 attribution 子查询：daily 优先，intraday 兜底（按 (date, ad_id) 去重）。
 
     输出列：
-        d, plat, acc, key_id, attr_conversions, attr_registrations, attr_revenue
+        d, plat, acc, key_id,
+        attr_conversions, attr_registrations, attr_revenue,
+        attr_spend  -- attribution 数仓侧自报的 spend，用于"无归因覆盖"判定
+                       （normalized 端 spend > 0 但 attr_spend = 0 → 数仓未采集该账号）
 
     Args:
         grain: "campaign" | "adgroup" | "ad"
@@ -164,7 +167,8 @@ def _attr_subquery(grain: str,
             {daily_grain_col}       AS key_id,
             purchase                AS attr_conversions,
             registration            AS attr_registrations,
-            total_recharge_amount   AS attr_revenue
+            total_recharge_amount   AS attr_revenue,
+            spend                   AS attr_spend
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s
           AND {daily_grain_col} <> '' {a_filter_d}
@@ -180,7 +184,8 @@ def _attr_subquery(grain: str,
                 i.ad_id                 AS key_id,
                 i.purchase              AS attr_conversions,
                 i.registration          AS attr_registrations,
-                i.total_recharge_amount AS attr_revenue
+                i.total_recharge_amount AS attr_revenue,
+                i.spend                 AS attr_spend
             FROM biz_attribution_ad_intraday i
             LEFT JOIN biz_attribution_ad_daily d
                 ON d.ds_account_local = i.ds_account_local
@@ -202,7 +207,8 @@ def _attr_subquery(grain: str,
                 {norm_grain_col}        AS key_id,
                 i.purchase              AS attr_conversions,
                 i.registration          AS attr_registrations,
-                i.total_recharge_amount AS attr_revenue
+                i.total_recharge_amount AS attr_revenue,
+                i.spend                 AS attr_spend
             FROM biz_attribution_ad_intraday i
             INNER JOIN biz_ad_daily_normalized n
                 ON n.stat_date  = i.ds_account_local
@@ -224,7 +230,8 @@ def _attr_subquery(grain: str,
             d, plat, acc, key_id,
             SUM(attr_conversions)   AS attr_conversions,
             SUM(attr_registrations) AS attr_registrations,
-            SUM(attr_revenue)       AS attr_revenue
+            SUM(attr_revenue)       AS attr_revenue,
+            SUM(attr_spend)         AS attr_spend
         FROM (
             {daily_part}
             UNION ALL
@@ -259,7 +266,8 @@ def get_overview(start_date: str, end_date: str, *,
         COALESCE(SUM(n.installs), 0)            AS total_installs,
         COALESCE(SUM(a.attr_conversions), 0)    AS total_conversions,
         COALESCE(SUM(a.attr_registrations), 0)  AS total_registrations,
-        COALESCE(SUM(a.attr_revenue), 0)        AS total_revenue
+        COALESCE(SUM(a.attr_revenue), 0)        AS total_revenue,
+        COALESCE(SUM(a.attr_spend), 0)          AS attribution_spend
     FROM biz_campaign_daily_normalized n
     LEFT JOIN ({attr_sql}) a
         ON a.d      = n.stat_date
@@ -278,6 +286,7 @@ def get_overview(start_date: str, end_date: str, *,
     cv  = int(row.get("total_conversions") or 0)
     reg = int(row.get("total_registrations") or 0)
     rv  = float(row.get("total_revenue") or 0)
+    attr_s = float(row.get("attribution_spend") or 0)
 
     return {
         "total_spend":         s,
@@ -287,6 +296,7 @@ def get_overview(start_date: str, end_date: str, *,
         "total_conversions":   cv,
         "total_registrations": reg,
         "total_revenue":       rv,
+        "attribution_spend":   attr_s,
         "avg_ctr":  _safe_div(cl, im),
         "avg_cpc":  _safe_div(s, cl),
         "avg_cpm":  round(s / im * 1000, 4) if im else None,
@@ -334,6 +344,7 @@ def get_top_campaigns(start_date: str, end_date: str, *,
         COALESCE(SUM(a.attr_conversions), 0)       AS total_conversions,
         COALESCE(SUM(a.attr_registrations), 0)     AS total_registrations,
         COALESCE(SUM(a.attr_revenue), 0)           AS total_revenue,
+        COALESCE(SUM(a.attr_spend), 0)             AS attribution_spend,
         CASE WHEN SUM(n.spend) > 0
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
              ELSE NULL END                          AS avg_roas
@@ -394,6 +405,7 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
         MAX(n.campaign_name)                       AS campaign_name,
         SUM(n.spend)                               AS total_spend,
         COALESCE(SUM(a.attr_revenue), 0)           AS total_revenue,
+        COALESCE(SUM(a.attr_spend), 0)             AS attribution_spend,
         SUM(n.impressions)                         AS total_impressions,
         SUM(n.clicks)                              AS total_clicks,
         SUM(n.installs)                            AS total_installs,
@@ -464,6 +476,7 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
         MAX(n.adgroup_name)                        AS adgroup_name,
         SUM(n.spend)                               AS total_spend,
         COALESCE(SUM(a.attr_revenue), 0)           AS total_revenue,
+        COALESCE(SUM(a.attr_spend), 0)             AS attribution_spend,
         SUM(n.impressions)                         AS total_impressions,
         SUM(n.clicks)                              AS total_clicks,
         SUM(n.installs)                            AS total_installs,
@@ -556,6 +569,7 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
         MAX(n.ad_name)                             AS ad_name,
         SUM(n.spend)                               AS total_spend,
         COALESCE(SUM(a.attr_revenue), 0)           AS total_revenue,
+        COALESCE(SUM(a.attr_spend), 0)             AS attribution_spend,
         SUM(n.impressions)                         AS total_impressions,
         SUM(n.clicks)                              AS total_clicks,
         SUM(n.installs)                            AS total_installs,
