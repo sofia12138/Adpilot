@@ -51,3 +51,33 @@ export function calcDelta(last: number | undefined, prev: number | undefined): n
   if (prev === 0) return null
   return ((last - prev) / prev) * 100
 }
+
+/**
+ * 通道费率（净 ROI 用）— 四象限分别维护，便于后续微调。
+ * 当前：Apple App Store / Google Play 订阅、内购统一 15%。
+ * 未来若要改为渠道差异化（如 iOS 订阅第二年 15%、首年 30%），
+ * 只需调下面四个数值，不需要改 KPI / 图表逻辑。
+ */
+export const CHANNEL_FEE = {
+  iosSub: 0.15,
+  iosIap: 0.15,
+  androidSub: 0.15,
+  androidIap: 0.15,
+} as const
+
+/**
+ * 给定一行 daily 拆分收入，计算净收入（已扣通道费，单位 USD）。
+ * iosSubscribe / iosOnetime / androidSubscribe / androidOnetime 任一缺失按 0 处理。
+ */
+export function calcNetRevenue(parts: {
+  iosSubscribe?: number
+  iosOnetime?: number
+  androidSubscribe?: number
+  androidOnetime?: number
+}): number {
+  const iosSub  = (parts.iosSubscribe   || 0) * (1 - CHANNEL_FEE.iosSub)
+  const iosIap  = (parts.iosOnetime     || 0) * (1 - CHANNEL_FEE.iosIap)
+  const andSub  = (parts.androidSubscribe || 0) * (1 - CHANNEL_FEE.androidSub)
+  const andIap  = (parts.androidOnetime   || 0) * (1 - CHANNEL_FEE.androidIap)
+  return iosSub + iosIap + andSub + andIap
+}

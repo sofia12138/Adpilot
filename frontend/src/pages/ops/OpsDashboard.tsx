@@ -10,7 +10,7 @@ import { RevenuePlatformChart } from '@/components/ops/RevenuePlatformChart'
 import { RevenueTypeChart } from '@/components/ops/RevenueTypeChart'
 import { PayerComboChart } from '@/components/ops/PayerComboChart'
 import { SpendRoiChart } from '@/components/ops/SpendRoiChart'
-import { fmtUsd, calcDelta } from '@/components/ops/formatters'
+import { fmtUsd, calcDelta, calcNetRevenue } from '@/components/ops/formatters'
 import { presetToRange, periodLabel, isSingleDay, rangeDisplay } from '@/components/ops/rangeUtils'
 
 // ─── 通用样式 ─────────────────────────────────────
@@ -110,6 +110,13 @@ interface Kpis {
   /** ROI 较前日变化（仅单日时有值） */
   roiDelta: number | null
 
+  /** 净收入（扣通道费）USD，按 calcNetRevenue 公式 */
+  revenueNet: number
+  /** 净 ROI = revenueNet / adSpend，spend=0 时为 null */
+  roiNet: number | null
+  /** 净 ROI 较前日变化（仅单日时有值） */
+  roiNetDelta: number | null
+
   /** 该 KPI 是单日口径还是区间累计 — 用于 subtitle 用词 */
   isAggregate: boolean
 }
@@ -155,6 +162,14 @@ function singleDayKpis(last: DailyOpsRow, prev: DailyOpsRow | undefined): Kpis {
   const lastSpend       = last.ad_spend || 0
   const lastRoi         = safeRoi(lastTotalRev, lastSpend)
 
+  const lastNetRev = calcNetRevenue({
+    iosSubscribe: last.ios_subscribe_revenue,
+    iosOnetime: last.ios_onetime_revenue,
+    androidSubscribe: last.android_subscribe_revenue,
+    androidOnetime: last.android_onetime_revenue,
+  })
+  const lastRoiNet = safeRoi(lastNetRev, lastSpend)
+
   const prevTotalRev = prev
     ? (prev.ios_subscribe_revenue || 0) + (prev.ios_onetime_revenue || 0)
       + (prev.android_subscribe_revenue || 0) + (prev.android_onetime_revenue || 0)
@@ -162,6 +177,18 @@ function singleDayKpis(last: DailyOpsRow, prev: DailyOpsRow | undefined): Kpis {
   const prevSpend = prev?.ad_spend
   const prevRoi = prev != null && prevTotalRev != null && prevSpend != null
     ? safeRoi(prevTotalRev, prevSpend)
+    : null
+
+  const prevNetRev = prev
+    ? calcNetRevenue({
+        iosSubscribe: prev.ios_subscribe_revenue,
+        iosOnetime: prev.ios_onetime_revenue,
+        androidSubscribe: prev.android_subscribe_revenue,
+        androidOnetime: prev.android_onetime_revenue,
+      })
+    : undefined
+  const prevRoiNet = prev != null && prevNetRev != null && prevSpend != null
+    ? safeRoi(prevNetRev, prevSpend)
     : null
 
   return {
@@ -186,6 +213,10 @@ function singleDayKpis(last: DailyOpsRow, prev: DailyOpsRow | undefined): Kpis {
     roi: lastRoi,
     roiDelta: calcDelta(lastRoi ?? undefined, prevRoi ?? undefined),
 
+    revenueNet: lastNetRev,
+    roiNet: lastRoiNet,
+    roiNetDelta: calcDelta(lastRoiNet ?? undefined, prevRoiNet ?? undefined),
+
     isAggregate: false,
   }
 }
@@ -197,6 +228,7 @@ function aggregateKpis(rows: DailyOpsRow[]): Kpis {
   let androidRev = 0
   let subRev = 0
   let onetimeRev = 0
+  let netRev = 0
   let payerUv = 0
   let spend = 0
 
@@ -207,6 +239,12 @@ function aggregateKpis(rows: DailyOpsRow[]): Kpis {
     androidRev  += (r.android_subscribe_revenue || 0) + (r.android_onetime_revenue || 0)
     subRev      += (r.ios_subscribe_revenue || 0) + (r.android_subscribe_revenue || 0)
     onetimeRev  += (r.ios_onetime_revenue || 0) + (r.android_onetime_revenue || 0)
+    netRev      += calcNetRevenue({
+      iosSubscribe: r.ios_subscribe_revenue,
+      iosOnetime: r.ios_onetime_revenue,
+      androidSubscribe: r.android_subscribe_revenue,
+      androidOnetime: r.android_onetime_revenue,
+    })
     payerUv     += (r.ios_payer_uv || 0) + (r.android_payer_uv || 0)
     spend       += r.ad_spend || 0
   }
@@ -234,6 +272,10 @@ function aggregateKpis(rows: DailyOpsRow[]): Kpis {
     adSpend: spend,
     roi: safeRoi(totalRev, spend),
     roiDelta: null,
+
+    revenueNet: netRev,
+    roiNet: safeRoi(netRev, spend),
+    roiNetDelta: null,
 
     isAggregate: true,
   }
@@ -303,6 +345,9 @@ export default function OpsDashboard() {
         <div className="text-blue-500/80">
           T-1 延迟（今天数据次日同步）· 用户侧无 OS 拆分，付费侧已拆 iOS / Android
         </div>
+        <div className="text-blue-500/80">
+          净 ROI = (订阅 + 内购) × (1 − 通道费) / 广告消耗 · 当前 iOS/Android 订阅与内购通道费均按 15% 计算
+        </div>
       </div>
 
       {isLoading && (
@@ -322,7 +367,7 @@ export default function OpsDashboard() {
       {!isLoading && !isError && kpis && (
         <>
           {/* ── 1) KPI 卡片行 ── */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-7 gap-3">
             <KpiCard
               title={kpis.isAggregate ? `${period}累计广告消耗` : `${period}广告消耗`}
               value={fmtUsd(kpis.adSpend)}
@@ -343,6 +388,23 @@ export default function OpsDashboard() {
                 kpis.roi == null
                   ? undefined
                   : kpis.roi >= 1
+                    ? 'text-green-600'
+                    : 'text-red-500'
+              }
+            />
+            <KpiCard
+              title={kpis.isAggregate ? `${period}累计净 ROI` : `${period}净 ROI`}
+              value={kpis.roiNet == null ? '--' : kpis.roiNet.toFixed(2)}
+              delta={kpis.roiNetDelta}
+              subtitle={
+                kpis.roiNet == null
+                  ? '当日无消耗'
+                  : `净收入 ${fmtUsd(kpis.revenueNet)} · 已扣 15% 通道费`
+              }
+              valueClassName={
+                kpis.roiNet == null
+                  ? undefined
+                  : kpis.roiNet >= 1
                     ? 'text-green-600'
                     : 'text-red-500'
               }
@@ -375,9 +437,9 @@ export default function OpsDashboard() {
             />
           </div>
 
-          {/* ── 2) 广告消耗 vs 总充值 + ROI（最重要 — 盈利监控） ── */}
+          {/* ── 2) 广告消耗 vs 总充值 + 净 ROI（最重要 — 盈利监控） ── */}
           <div className={chartCardCls}>
-            <h3 className={chartTitleCls}>广告消耗 vs 总充值（含 D0 流水 ROI）</h3>
+            <h3 className={chartTitleCls}>广告消耗 vs 总充值（含 D0 净 ROI）</h3>
             <div style={{ height: 240 }}>
               <SpendRoiChart data={chartData} />
             </div>

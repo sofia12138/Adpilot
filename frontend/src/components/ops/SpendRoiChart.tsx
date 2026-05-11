@@ -4,31 +4,37 @@ import {
 } from 'recharts'
 import type { DailyOpsRow } from '@/types/ops'
 import { COLORS } from './chartColors'
-import { fmtDateMMDD, fmtUsd, pickTicks } from './formatters'
+import { fmtDateMMDD, fmtUsd, pickTicks, calcNetRevenue } from './formatters'
 
 /**
- * 广告消耗 vs 总充值 + D0 ROI 趋势图
+ * 广告消耗 vs 总充值 + D0 净 ROI 趋势图
  *
  * 双轴：
- *   - 左轴: 金额（USD），柱状显示 spend / revenue
- *   - 右轴: ROI 倍数，折线 + 1.0 参考线（盈利分水岭）
+ *   - 左轴: 金额（USD），柱状显示 spend / revenue（毛收入）
+ *   - 右轴: 净 ROI 倍数，折线 + 1.0 参考线（盈利分水岭）
  *
- * D0 流水 ROI = 当日总充值 / 当日 spend
+ * D0 净 ROI = 当日净收入（扣通道费） / 当日 spend；通道费率见 formatters.CHANNEL_FEE
  */
 export function SpendRoiChart({ data }: { data: DailyOpsRow[] }) {
   const transformed = data.map(d => {
     const revenue = (d.ios_subscribe_revenue || 0) + (d.ios_onetime_revenue || 0)
                   + (d.android_subscribe_revenue || 0) + (d.android_onetime_revenue || 0)
+    const netRevenue = calcNetRevenue({
+      iosSubscribe: d.ios_subscribe_revenue,
+      iosOnetime: d.ios_onetime_revenue,
+      androidSubscribe: d.android_subscribe_revenue,
+      androidOnetime: d.android_onetime_revenue,
+    })
     const spend = d.ad_spend || 0
-    const roi = spend > 0 ? revenue / spend : null
-    return { date: d.date, spend, revenue, roi }
+    const roiNet = spend > 0 ? netRevenue / spend : null
+    return { date: d.date, spend, revenue, roiNet }
   })
   const ticks = pickTicks(transformed.map(d => d.date), 7)
 
-  // ROI 轴上限 — 取数据最大值与 1.5 的较大值，确保 ROI=1 参考线显眼
+  // ROI 轴上限 — 取净 ROI 最大值与 1.5 的较大值，确保 ROI=1 参考线显眼
   const roiMax = Math.max(
     1.5,
-    ...transformed.map(d => (d.roi == null ? 0 : d.roi)),
+    ...transformed.map(d => (d.roiNet == null ? 0 : d.roiNet)),
   )
 
   return (
@@ -65,7 +71,7 @@ export function SpendRoiChart({ data }: { data: DailyOpsRow[] }) {
           labelFormatter={(label) => fmtDateMMDD(String(label ?? ''))}
           formatter={(value, name) => {
             const v = Number(value) || 0
-            if (name === 'ROI') {
+            if (name === '净 ROI') {
               return [v > 0 ? v.toFixed(2) : '--', name] as [string, string]
             }
             return [fmtUsd(v), name] as [string, string]
@@ -102,8 +108,8 @@ export function SpendRoiChart({ data }: { data: DailyOpsRow[] }) {
         <Line
           yAxisId="roi"
           type="monotone"
-          dataKey="roi"
-          name="ROI"
+          dataKey="roiNet"
+          name="净 ROI"
           stroke="#10b981"
           strokeWidth={2}
           dot={{ r: 3 }}
