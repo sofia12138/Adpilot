@@ -13,3 +13,6 @@ apscheduler>=3.10.0
 paramiko>=3.0.0
 pyyaml>=6.0
 pyodps>=0.12.0
+alibabacloud-dms-enterprise20181101>=2.0.0
+alibabacloud-tea-openapi>=0.3.0
+alibabacloud-tea-util>=0.3.0

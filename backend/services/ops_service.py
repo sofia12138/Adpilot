@@ -18,6 +18,7 @@ from repositories import biz_daily_report_repository as norm_repo
 from repositories import biz_ops_daily_intraday_repository as ops_intraday_repo
 from repositories import biz_ops_daily_repository as repo
 from repositories import biz_ops_daily_shadow_repository as shadow_repo
+from repositories import recharge_order_repository as recharge_repo
 
 _LA_TZ = ZoneInfo("America/Los_Angeles")
 
@@ -308,3 +309,62 @@ def _fill_revenue_from_intraday(by_ds: dict[str, dict],
         by_ds[ds]["ios_first_sub_orders"]     = sub_cnt
         by_ds[ds]["ios_first_iap_orders"]     = iap_cnt
         by_ds[ds]["revenue_source"]           = "intraday_fallback"
+
+
+# ─────────────────────────────────────────────────────────────
+#  分时段（LA 小时）充值趋势
+# ─────────────────────────────────────────────────────────────
+
+def query_hourly_revenue(start_date: str, end_date: str) -> dict:
+    """从 PolarDB 拉取 [start_date, end_date] 区间每日 × 每小时（LA）的充值数据。
+
+    返回结构（前端友好）：
+      {
+        "days": ["2026-05-06", "2026-05-07", ...],         # 升序日期
+        "series": [
+          { "ds": "2026-05-06", "hours": [{h, orders, payer_uv,
+            total_usd, android_usd, ios_usd, sub_usd, iap_usd}, ...24 项] },
+          ...
+        ]
+      }
+    每天 24 小时全部补齐（无数据时各指标为 0），便于前端按 X 轴 0~23 直接画线。
+    """
+    rows = recharge_repo.fetch_hourly_by_la_day(start_date, end_date)
+
+    by_day: dict[str, dict[int, dict]] = {}
+    for r in rows:
+        ds = _ds_to_str(r["ds"])
+        h = int(r["h"])
+        by_day.setdefault(ds, {})[h] = {
+            "h": h,
+            "orders":      int(r.get("orders") or 0),
+            "payer_uv":    int(r.get("payer_uv") or 0),
+            "total_usd":   float(r.get("total_usd") or 0),
+            "android_usd": float(r.get("android_usd") or 0),
+            "ios_usd":     float(r.get("ios_usd") or 0),
+            "sub_usd":     float(r.get("sub_usd") or 0),
+            "iap_usd":     float(r.get("iap_usd") or 0),
+        }
+
+    days: list[str] = []
+    cur = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    while cur <= end:
+        days.append(cur.strftime("%Y-%m-%d"))
+        cur = cur + timedelta(days=1)
+
+    def _empty_hour(h: int) -> dict:
+        return {
+            "h": h, "orders": 0, "payer_uv": 0,
+            "total_usd": 0.0, "android_usd": 0.0, "ios_usd": 0.0,
+            "sub_usd": 0.0, "iap_usd": 0.0,
+        }
+
+    series = []
+    for ds in days:
+        hrs = by_day.get(ds, {})
+        series.append({
+            "ds": ds,
+            "hours": [hrs.get(h) or _empty_hour(h) for h in range(24)],
+        })
+    return {"days": days, "series": series}

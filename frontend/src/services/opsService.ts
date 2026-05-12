@@ -34,6 +34,43 @@ export async function fetchOpsStats(
   return resp.rows ?? []
 }
 
+// ─── 分时段（每日 × LA 小时）充值趋势 ────────────────────────
+export interface HourlyRevenueBucket {
+  h: number          // 0~23 LA hour
+  orders: number
+  payer_uv: number
+  total_usd: number
+  android_usd: number
+  ios_usd: number
+  sub_usd: number
+  iap_usd: number
+}
+
+export interface HourlyRevenueDay {
+  ds: string                       // YYYY-MM-DD (LA)
+  hours: HourlyRevenueBucket[]     // 长度 24，h 从 0 到 23
+}
+
+export interface HourlyRevenueResponse {
+  days: string[]
+  series: HourlyRevenueDay[]
+}
+
+/**
+ * 拉取 [start, end] 区间内每日 × 每小时的充值数据（LA 时区）
+ *
+ * 调后端 GET /api/ops/hourly-revenue（需 ops_dashboard 面板权限）
+ * 后端最大区间 31 天
+ */
+export async function fetchHourlyRevenue(
+  startDate: string,
+  endDate: string,
+): Promise<HourlyRevenueResponse> {
+  const params = new URLSearchParams({ start_date: startDate, end_date: endDate })
+  return apiFetch<HourlyRevenueResponse>(`/api/ops/hourly-revenue?${params}`)
+}
+
+
 /** 'YYYY-MM-DD' 偏移 N 天，返回 'YYYY-MM-DD'（按本地时区零点） */
 function shiftDate(s: string, days: number): string {
   const [y, m, d] = s.split('-').map(Number)

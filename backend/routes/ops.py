@@ -67,3 +67,26 @@ async def daily_stats(
 
     rows = ops_service.query_daily_ops(s, e, source=source)
     return {"rows": rows, "source": source}
+
+
+@router.get("/hourly-revenue")
+async def hourly_revenue(
+    start_date: str = Query(..., description="起始日期 YYYY-MM-DD（含），LA 时区"),
+    end_date: str = Query(..., description="结束日期 YYYY-MM-DD（含），LA 时区"),
+    _: User = Depends(_require_ops_panel),
+):
+    """LA 时区每日 × 每小时充值趋势（来源：PolarDB recharge_order 实时）
+
+    返回 {"days": [...], "series": [{"ds": "...", "hours": [{h, orders, ...}×24]}]}
+    """
+    s = _parse_date(start_date, "start_date")
+    e = _parse_date(end_date, "end_date")
+    if s > e:
+        raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
+
+    days = (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(s, "%Y-%m-%d")).days + 1
+    # hourly 视图比日级更密集（每行 24 倍），限制更紧
+    if days > 31:
+        raise HTTPException(status_code=400, detail="区间过大，最多 31 天")
+
+    return ops_service.query_hourly_revenue(s, e)

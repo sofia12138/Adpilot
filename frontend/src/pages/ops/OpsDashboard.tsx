@@ -10,6 +10,7 @@ import { RevenuePlatformChart } from '@/components/ops/RevenuePlatformChart'
 import { RevenueTypeChart } from '@/components/ops/RevenueTypeChart'
 import { PayerComboChart } from '@/components/ops/PayerComboChart'
 import { SpendRoiChart } from '@/components/ops/SpendRoiChart'
+import { HourlyRevenueSection } from '@/components/ops/HourlyRevenueSection'
 import { fmtUsd, calcDelta, calcNetRevenue } from '@/components/ops/formatters'
 import { presetToRange, periodLabel, isSingleDay, rangeDisplay } from '@/components/ops/rangeUtils'
 
@@ -444,6 +445,9 @@ export default function OpsDashboard() {
               <SpendRoiChart data={chartData} />
             </div>
           </div>
+
+          {/* ── 2.5) 分时段充值趋势（LA 小时，实时） ── */}
+          <HourlyRevenueSection />
 
           {/* ── 3) 用户增长趋势 ── */}
           <div className={chartCardCls}>

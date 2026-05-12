@@ -55,6 +55,63 @@ ORDER BY ds, os_type
 """
 
 
+# ─────────────────────────────────────────────────────────────
+#  分时段（LA 小时）聚合 SQL
+# ─────────────────────────────────────────────────────────────
+
+# 与日级口径完全对齐，仅多拆一个 LA 小时维度。
+# 注意：返回结果用 (ds, hour) 复合主键唯一标识，前端按 ds 分组画多日折线
+_HOURLY_AGG_SQL = """
+SELECT
+    DATE(CONVERT_TZ(created_at, '+08:00', 'America/Los_Angeles'))   AS ds,
+    HOUR(CONVERT_TZ(created_at, '+08:00', 'America/Los_Angeles'))   AS h,
+    COUNT(*)                                                         AS orders,
+    COUNT(DISTINCT user_id)                                          AS payer_uv,
+    SUM(pay_amount) / 100.0                                          AS total_usd,
+    SUM(CASE WHEN os_type = 1 THEN pay_amount ELSE 0 END) / 100.0    AS android_usd,
+    SUM(CASE WHEN os_type = 2 THEN pay_amount ELSE 0 END) / 100.0    AS ios_usd,
+    SUM(CASE WHEN is_subscribe = 1 THEN pay_amount ELSE 0 END) / 100.0           AS sub_usd,
+    SUM(CASE WHEN is_subscribe IN (0, -1) THEN pay_amount ELSE 0 END) / 100.0    AS iap_usd
+FROM recharge_order
+WHERE order_status = 1
+  AND app_id = 1
+  AND os_type IN (1, 2)
+  AND created_at >= %s
+  AND created_at <  %s
+GROUP BY ds, h
+HAVING ds BETWEEN %s AND %s
+ORDER BY ds, h
+"""
+
+
+def fetch_hourly_by_la_day(la_lo: str, la_hi: str) -> list[dict]:
+    """按 LA 日 × 小时聚合付费侧指标，用于"分时段充值趋势"面板。
+
+    参数：
+      la_lo / la_hi: LA 日窗口（含），格式 YYYY-MM-DD
+
+    返回：行级 dict 列表，键
+      - ds          (date) LA 日
+      - h           (int 0~23) LA 小时
+      - orders      (int)
+      - payer_uv    (int)
+      - total_usd / android_usd / ios_usd / sub_usd / iap_usd (float)
+
+    连接失败时返回空列表。
+    """
+    la_lo_dt = datetime.strptime(la_lo, "%Y-%m-%d")
+    la_hi_dt = datetime.strptime(la_hi, "%Y-%m-%d")
+    bj_lo = (la_lo_dt - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
+    bj_hi = (la_hi_dt + timedelta(days=2)).strftime("%Y-%m-%d 00:00:00")
+
+    with get_order_conn() as conn:
+        if conn is None:
+            return []
+        cur = conn.cursor()
+        cur.execute(_HOURLY_AGG_SQL, (bj_lo, bj_hi, la_lo, la_hi))
+        return list(cur.fetchall())
+
+
 def fetch_pay_side_by_la_day(la_lo: str, la_hi: str) -> list[dict]:
     """按 LA 日 × os_type 聚合付费侧指标。
 
