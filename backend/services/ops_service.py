@@ -11,10 +11,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from repositories import biz_attribution_ad_intraday_repository as intraday_repo
 from repositories import biz_daily_report_repository as norm_repo
+from repositories import biz_ops_daily_intraday_repository as ops_intraday_repo
 from repositories import biz_ops_daily_repository as repo
+from repositories import biz_ops_daily_shadow_repository as shadow_repo
+
+_LA_TZ = ZoneInfo("America/Los_Angeles")
 
 
 def _ds_to_str(ds) -> str:
@@ -80,12 +85,18 @@ def _merge_pay_row(out: dict, raw: dict, prefix: str) -> None:
     out[f"{prefix}payer_uv"]            = int(raw.get("payer_uv") or 0)
 
 
-def query_daily_ops(start_date: str, end_date: str) -> list[dict]:
+def query_daily_ops(start_date: str, end_date: str, *, source: str = "auto") -> list[dict]:
     """读取运营面板日报。
 
     返回升序日期数组，区间内每天一行。
     某天如果在库里没记录，会补全零行（图表 X 轴需要对齐）。
+
+    source 参数控制付费侧数据源（不影响用户侧 / 投放侧）：
+      - auto    今日/昨日 LA 走 biz_ops_daily_intraday，其余走 biz_ops_daily (dwd)
+      - dwd     全部走 biz_ops_daily (老行为)
+      - polardb 历史走 biz_ops_daily_polardb_shadow，今日/昨日仍走 intraday
     """
+    # 主源（dwd 路径）— 提供用户侧 (os_type=0)、付费侧 (os_type=1/2)、ad_spend
     raw_rows = repo.query_range(start_date, end_date)
 
     # 先按 (ds_str → empty_row) 建桩，保证每个 ds 都有一行
@@ -98,7 +109,12 @@ def query_daily_ops(start_date: str, end_date: str) -> list[dict]:
         by_ds[ds_str] = _empty_row(ds_str)
         cur += timedelta(days=1)
 
-    # 合并各行
+    # 决定付费侧哪些 ds 走 dwd（默认全部），哪些走 polardb 影子表
+    pay_overrides: dict[str, dict] = {}
+    if source in ("polardb", "auto"):
+        pay_overrides = _resolve_pay_overrides(start_date, end_date, source)
+
+    # 合并 dwd 主源各行（注意：付费侧后面可能被覆盖）
     for raw in raw_rows:
         ds_str = _ds_to_str(raw.get("ds"))
         if ds_str not in by_ds:
@@ -107,9 +123,24 @@ def query_daily_ops(start_date: str, end_date: str) -> list[dict]:
         if os_type == 0:
             _merge_user_row(by_ds[ds_str], raw)
         elif os_type == 1:  # Android
-            _merge_pay_row(by_ds[ds_str], raw, "android_")
+            # 仅当该 ds 不在 polardb 覆盖列表里时才用 dwd 付费侧
+            if ds_str not in pay_overrides:
+                _merge_pay_row(by_ds[ds_str], raw, "android_")
         elif os_type == 2:  # iOS
-            _merge_pay_row(by_ds[ds_str], raw, "ios_")
+            if ds_str not in pay_overrides:
+                _merge_pay_row(by_ds[ds_str], raw, "ios_")
+
+    # 应用 polardb / intraday 付费侧覆盖
+    for ds_str, ds_overrides in pay_overrides.items():
+        if ds_str not in by_ds:
+            continue
+        for os_type, raw in ds_overrides.items():
+            if not isinstance(os_type, int):
+                continue  # 跳过 "_label" 等元信息键
+            prefix = "android_" if os_type == 1 else "ios_"
+            _merge_pay_row(by_ds[ds_str], raw, prefix)
+        # 标记数据源，便于前端展示与排障
+        by_ds[ds_str]["revenue_source"] = ds_overrides.get("_label", "polardb")
 
     # ad_spend 数据源切换说明：
     #   主源：biz_campaign_daily_normalized — 直接来自 Meta/TikTok 平台 API，
@@ -127,6 +158,59 @@ def query_daily_ops(start_date: str, end_date: str) -> list[dict]:
     _fill_revenue_from_intraday(by_ds, start_date, end_date)
 
     return [by_ds[k] for k in sorted(by_ds.keys())]
+
+
+def _resolve_pay_overrides(start_date: str, end_date: str,
+                           source: str) -> dict[str, dict]:
+    """根据 source 决定哪些 ds 用 polardb 数据覆盖付费侧。
+
+    返回结构：
+        { ds_str: { 1: row_android, 2: row_ios, "_label": "intraday"|"polardb" } }
+
+    优先级（source=auto）：
+        1. 今日/昨日 LA → biz_ops_daily_intraday（实时层，最新）
+        2. 其余日期 → 不覆盖（保留 dwd 主源）
+
+    优先级（source=polardb）：
+        1. 今日/昨日 LA → biz_ops_daily_intraday
+        2. 其余日期 → biz_ops_daily_polardb_shadow
+    """
+    out: dict[str, dict] = {}
+    today_la = datetime.now(_LA_TZ).date()
+    yesterday_la = today_la - timedelta(days=1)
+    realtime_dates = {today_la.strftime("%Y-%m-%d"),
+                      yesterday_la.strftime("%Y-%m-%d")}
+
+    # ── 实时层（今日+昨日 LA）── 适用于 auto 和 polardb 两种模式
+    try:
+        intraday_rows = ops_intraday_repo.query_range(start_date, end_date)
+    except Exception:
+        intraday_rows = []
+    for r in intraday_rows:
+        ds_str = _ds_to_str(r.get("ds"))
+        if ds_str not in realtime_dates:
+            continue  # intraday 表只保留 2 天，但保险起见再过滤
+        os_type = int(r.get("os_type") or 0)
+        if os_type not in (1, 2):
+            continue
+        out.setdefault(ds_str, {"_label": "intraday"})[os_type] = r
+
+    # ── shadow 历史层（仅 source=polardb 启用）──
+    if source == "polardb":
+        try:
+            shadow_rows = shadow_repo.query_range(start_date, end_date)
+        except Exception:
+            shadow_rows = []
+        for r in shadow_rows:
+            ds_str = _ds_to_str(r.get("ds"))
+            if ds_str in realtime_dates:
+                continue  # 已被 intraday 覆盖，不重复
+            os_type = int(r.get("os_type") or 0)
+            if os_type not in (1, 2):
+                continue
+            out.setdefault(ds_str, {"_label": "polardb"})[os_type] = r
+
+    return out
 
 
 def _override_ad_spend_from_normalized(by_ds: dict[str, dict],

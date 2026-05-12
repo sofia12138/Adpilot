@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     biz_mysql_password: str = ""
     biz_mysql_database: str = ""
 
+    # 订单库 ORDER（只读，业务订单原始表 = 运营面板付费侧真值源）
+    # 用于把付费侧从 MaxCompute (T+1) 直连到业务库（实时 + 真值）
+    order_mysql_host: str = ""
+    order_mysql_port: int = 3306
+    order_mysql_user: str = ""
+    order_mysql_password: str = ""
+    order_mysql_database: str = ""
+
     # 归因数仓 MaxCompute（用于拉取 metis_dw.ads_ad_delivery_di 等 ADS 层）
     odps_access_key_id: str = ""
     odps_access_key_secret: str = ""

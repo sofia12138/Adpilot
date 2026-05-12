@@ -29,8 +29,10 @@ _POOL_SIZE = 5
 _prd_pool: list[pymysql.Connection] = []
 _app_pool: list[pymysql.Connection] = []
 _biz_pool: list[pymysql.Connection] = []
+_order_pool: list[pymysql.Connection] = []
 
 _prd_available: bool | None = None
+_order_available: bool | None = None
 
 
 # ── 安全校验 ──────────────────────────────────────────────
@@ -121,6 +123,25 @@ def _create_biz_conn() -> pymysql.Connection:
     )
 
 
+def _create_order_conn() -> pymysql.Connection:
+    """创建订单库连接（只读，PolarDB 业务原始订单表 matrix_order.*）"""
+    settings = get_settings()
+    if not settings.order_mysql_database:
+        raise DatabaseUnavailableError("ORDER_MYSQL_DATABASE 未配置")
+    return pymysql.connect(
+        host=settings.order_mysql_host,
+        port=settings.order_mysql_port or 3306,
+        user=settings.order_mysql_user,
+        password=settings.order_mysql_password,
+        database=settings.order_mysql_database,
+        charset="utf8mb4",
+        connect_timeout=10,
+        read_timeout=30,
+        autocommit=True,
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+
+
 # ── 连接池管理（通用） ────────────────────────────────────
 
 def _acquire(pool: list[pymysql.Connection],
@@ -201,6 +222,29 @@ def get_biz_conn():
         yield conn
     finally:
         _release(_biz_pool, conn)
+
+
+@contextmanager
+def get_order_conn():
+    """订单库连接（只读，PolarDB matrix_order）。连接失败 → yield None。
+
+    与 PRD 一致采用「静默降级」：上游业务库白名单/网络问题不应让运营面板整体崩溃，
+    让上层自行决定是否回退到 dwd 兜底（参见 ops_service）。
+    """
+    global _order_available
+    try:
+        conn = _acquire(_order_pool, _create_order_conn, "ORDER")
+    except Exception as e:
+        if _order_available is not False:
+            logger.warning(f"ORDER 订单库连接失败（已静默跳过）: {e}")
+            _order_available = False
+        yield None
+        return
+    _order_available = True
+    try:
+        yield conn
+    finally:
+        _release(_order_pool, conn)
 
 
 # 兼容旧代码：get_conn = get_prd_conn
@@ -1308,6 +1352,53 @@ _BIZ_TABLES_SQL = [
         INDEX idx_created (created_at DESC)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     COMMENT='TikTok 素材 API 上传记录'
+    """,
+    """
+    -- 运营面板付费侧 PolarDB 影子表（与 biz_ops_daily 同 schema，仅含 os_type=1/2 行）
+    -- 用途：双轨对账期，由 sync_ops_polardb_daily 写入；前端可通过 ?source=polardb 查询
+    -- T+1 全量回填 30 天，与 biz_ops_daily 的 dwd 路径对账，确认偏差稳定后切主源
+    CREATE TABLE IF NOT EXISTS biz_ops_daily_polardb_shadow (
+        id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+        ds                       DATE          NOT NULL COMMENT '统计日 LA',
+        os_type                  TINYINT       NOT NULL COMMENT '1=Android / 2=iOS（不含 0 用户侧）',
+        subscribe_revenue_usd    DECIMAL(14,4) NOT NULL DEFAULT 0,
+        onetime_revenue_usd      DECIMAL(14,4) NOT NULL DEFAULT 0,
+        first_sub_orders         BIGINT        NOT NULL DEFAULT 0,
+        repeat_sub_orders        BIGINT        NOT NULL DEFAULT 0,
+        first_iap_orders         BIGINT        NOT NULL DEFAULT 0,
+        repeat_iap_orders        BIGINT        NOT NULL DEFAULT 0,
+        payer_uv                 BIGINT        NOT NULL DEFAULT 0,
+        synced_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_ds_os (ds, os_type),
+        INDEX idx_ds (ds)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='运营面板付费侧 PolarDB 影子表（双轨对账期专用，与 biz_ops_daily 同口径）'
+    """,
+    """
+    -- 运营面板实时层：从 matrix_order.recharge_order 30 分钟刷新今日+昨日 LA 数据
+    -- 用途：API 智能路由 — 今日/昨日 LA 读这张表，其余日期读 biz_ops_daily
+    -- 由 sync_ops_polardb_intraday 任务写入；仅含 os_type=1/2 付费侧
+    CREATE TABLE IF NOT EXISTS biz_ops_daily_intraday (
+        id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+        ds                       DATE          NOT NULL COMMENT '统计日 LA（仅今日+昨日）',
+        os_type                  TINYINT       NOT NULL COMMENT '1=Android / 2=iOS',
+        subscribe_revenue_usd    DECIMAL(14,4) NOT NULL DEFAULT 0,
+        onetime_revenue_usd      DECIMAL(14,4) NOT NULL DEFAULT 0,
+        first_sub_orders         BIGINT        NOT NULL DEFAULT 0,
+        repeat_sub_orders        BIGINT        NOT NULL DEFAULT 0,
+        first_iap_orders         BIGINT        NOT NULL DEFAULT 0,
+        repeat_iap_orders        BIGINT        NOT NULL DEFAULT 0,
+        payer_uv                 BIGINT        NOT NULL DEFAULT 0,
+        upstream_max_id          BIGINT        NOT NULL DEFAULT 0 COMMENT '上游 recharge_order.id 最大值（版本号）',
+        synced_at                DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at               DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_ds_os (ds, os_type),
+        INDEX idx_ds (ds)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='运营面板付费侧实时层（仅含今日+昨日 LA，30min 覆盖刷新，来源 matrix_order.recharge_order）'
     """,
     """
     -- 运营数据面板日报：从 MaxCompute metis_dw 同步
