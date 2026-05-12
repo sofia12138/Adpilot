@@ -73,8 +73,8 @@ export function HourlyRevenueSection() {
   }, [startDate, endDate, validateError, refreshKey])
 
   const summary = useMemo(
-    () => computeSummary(data, metric, windowDays),
-    [data, metric, windowDays],
+    () => computeSummary(data, metric),
+    [data, metric],
   )
 
   const isSingleDay = windowDays === 1
@@ -289,7 +289,6 @@ interface Summary {
 function computeSummary(
   data: HourlyRevenueResponse | null,
   metric: MetricOption,
-  windowDays: number,
 ): Summary {
   const empty: Summary = {
     focusTotal: 0, focusHourLabel: '—',

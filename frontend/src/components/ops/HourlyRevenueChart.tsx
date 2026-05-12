@@ -90,9 +90,6 @@ export function HourlyRevenueChart({ data, metric = 'total_usd' }: Props) {
           formatter={(val) => fmtDay(String(val))}
         />
         {orderedDays.map((ds, idx) => {
-          const isToday = idx === orderedDays.length - 1
-            ? false  // 倒序：今日 在第 0 位
-            : idx === 0
           // 倒序时 idx=0 才是最新一天
           const isLatest = idx === 0
           const color = PALETTE[idx % PALETTE.length]
