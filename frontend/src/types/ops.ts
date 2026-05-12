@@ -20,6 +20,16 @@
 export interface DailyOpsRow {
   date: string
 
+  /**
+   * 付费侧数据来源标签：
+   *   - 'platform'          来自 biz_ops_daily（MaxCompute dwd，老路径，默认）
+   *   - 'intraday'          来自 biz_ops_daily_intraday（PolarDB 30min 实时层，今日/昨日 LA）
+   *   - 'polardb'           来自 biz_ops_daily_polardb_shadow（PolarDB T+1，仅 source=polardb 模式）
+   *   - 'intraday_fallback' 当日 MC 全量未到，由 CK 归因兜底（已有，偏低，会提示用户）
+   * 前端可选展示，便于排障时一眼看出数据走的哪条链路。
+   */
+  revenue_source?: 'platform' | 'intraday' | 'polardb' | 'intraday_fallback'
+
   // ── 用户侧（全量，无 OS 拆分） ────────────────────────────
   /** 新注册账号 UV：dim_user_df.register_time_utc 转 LA = ds */
   new_register_uv: number
