@@ -184,10 +184,13 @@ async def _sync_ops_polardb_daily_job():
 
 
 async def _sync_ops_polardb_intraday_job():
-    """Job 8：运营面板付费侧 PolarDB 实时同步（每 30 分钟，今日+昨日 LA）
+    """Job 8：运营面板付费侧 PolarDB 实时同步（每 10 分钟，今日+昨日 LA）
 
     数据流：matrix_order.recharge_order (PolarDB) → biz_ops_daily_intraday
     口径与 Job 7 完全一致，仅窗口和目标表不同。
+
+    频率说明：聚合的 recharge_order 数据量很小（~1300 行），单次查询 200ms 内，
+    比 dwd 主路径轻 10 倍以上，可以高频跑而不增加显著负载。
     """
     import asyncio
     settings = get_settings()
@@ -308,16 +311,17 @@ async def lifespan(application: FastAPI):
         next_run_time=now + timedelta(minutes=4),  # 错开 Job 5 (minutes=2)
     )
 
-    # Job 8：运营面板付费侧 PolarDB 实时同步（每 30 分钟，今日+昨日 LA → 实时层）
+    # Job 8：运营面板付费侧 PolarDB 实时同步（每 10 分钟，今日+昨日 LA → 实时层）
     # 拉 matrix_order.recharge_order → biz_ops_daily_intraday
     # API 智能路由（routes/ops.py）：今日/昨日 → 这张表；历史 → biz_ops_daily
+    # 频率：10 分钟（聚合 ~1300 行，单次 ~200ms，可以高频跑）
     _scheduler.add_job(
         _sync_ops_polardb_intraday_job,
         trigger="interval",
-        minutes=30,
+        minutes=10,
         id="sync_ops_polardb_intraday",
         replace_existing=True,
-        next_run_time=now + timedelta(minutes=8),  # 错开 Job 6 (minutes=10)
+        next_run_time=now + timedelta(minutes=2),  # 启动后 2 分钟立刻跑首次
     )
 
     # Job 4：CK D0 实时归因同步（默认 disabled；ENABLE_CK_INTRADAY_SYNC=true 开启）
@@ -335,13 +339,13 @@ async def lifespan(application: FastAPI):
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
             "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟 | "
-            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 30 分钟 | CK 实时每 30 分钟）"
+            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟 | CK 实时每 30 分钟）"
         )
     else:
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
             "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟 | "
-            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 30 分钟）"
+            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟）"
             "—— CK 实时同步未启用 (ENABLE_CK_INTRADAY_SYNC=false)"
         )
 
