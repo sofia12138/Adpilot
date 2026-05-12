@@ -31,6 +31,9 @@ scripts/
 _remote.py
 _deploy_step.py
 
+# 本地一次性排查脚本（前缀 _probe_ 的 ad-hoc Python 探针）
+backend/_probe_*.py
+
 # 日志
 *.log
 
