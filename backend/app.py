@@ -1,5 +1,6 @@
 """AdPilot — 广告投放管理系统 FastAPI 入口"""
 
+import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -28,6 +29,62 @@ from meta_ads.api.client import MetaApiError
 # 之所以错开而非合并：避免同时向平台 API 发起大量请求，降低触发限流风险。
 
 _scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
+
+# ─── Scheduler leader 选举 ───────────────────────────────────
+# uvicorn --workers N 模式下，每个 worker 都会跑一遍 lifespan。
+# 若不选举，N 个 worker 各自启动一份 APScheduler，所有 job 会被并行触发 N 次：
+#   - 每 30min 的 CK D0 同步会跑 N 次（重复 DMS 调用 + 重复 UPSERT）
+#   - 每 20min 的全量同步可能同时并发对平台 API，更易触发限流
+#
+# 方案：用 fcntl.flock 抢一个文件锁，只有抢到锁的 worker 注册并启动 scheduler。
+#   - 锁文件：$ADPILOT_SCHEDULER_LOCK 或 /tmp/adpilot-scheduler.lock（POSIX）
+#   - 抢到的 worker 持有 fd 直到进程退出 → kernel 自动释放
+#   - 非 POSIX 平台（Windows 开发环境）回退到"总是抢到"，依赖 dev 单 worker
+_scheduler_lock_fd = None
+
+
+def _scheduler_lock_path() -> str:
+    return os.environ.get("ADPILOT_SCHEDULER_LOCK", "/tmp/adpilot-scheduler.lock")
+
+
+def _acquire_scheduler_leader_lock() -> bool:
+    """非阻塞抢调度器 leader 锁。抢到 → True；其他 worker → False。"""
+    global _scheduler_lock_fd
+    if sys.platform == "win32":
+        return True  # Windows 没 fcntl，依赖单 worker 部署
+    import fcntl
+    lock_path = _scheduler_lock_path()
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fd.close()
+        return False
+    try:
+        fd.truncate(0)
+        fd.write(str(os.getpid()))
+        fd.flush()
+    except Exception:
+        pass
+    _scheduler_lock_fd = fd  # 保留 fd，进程退出前不要 GC
+    return True
+
+
+def _release_scheduler_leader_lock() -> None:
+    """显式释放 leader 锁。即使不显式释放，进程退出 kernel 也会回收。"""
+    global _scheduler_lock_fd
+    if _scheduler_lock_fd is None or sys.platform == "win32":
+        return
+    import fcntl
+    try:
+        fcntl.flock(_scheduler_lock_fd.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        _scheduler_lock_fd.close()
+    except Exception:
+        pass
+    _scheduler_lock_fd = None
 
 
 async def _sync_all_job():
@@ -246,6 +303,23 @@ async def lifespan(application: FastAPI):
 
     now = datetime.now()
 
+    # ── Scheduler leader 选举 ──
+    # uvicorn --workers N 模式下只有第一个抢到锁的 worker 真正启动 APScheduler，
+    # 其余 worker 跳过整段 job 注册，避免每个 job 被并行触发 N 次。
+    is_scheduler_leader = _acquire_scheduler_leader_lock()
+    if not is_scheduler_leader:
+        logger.info(
+            f"scheduler-follower：worker pid={os.getpid()} 未拿到调度器 leader 锁，"
+            "跳过 job 注册（仅作为 HTTP worker 运行）"
+        )
+        logger.info("应用启动完成")
+        yield
+        return
+
+    logger.info(
+        f"scheduler-leader：worker pid={os.getpid()} 拿到调度器 leader 锁，开始注册所有 job"
+    )
+
     # Job 1：全量同步（每 20 分钟，启动后 20 分钟首次）
     _scheduler.add_job(
         _sync_all_job,
@@ -355,6 +429,7 @@ async def lifespan(application: FastAPI):
     yield
 
     _scheduler.shutdown(wait=False)
+    _release_scheduler_leader_lock()
     logger.info("定时同步调度器已停止")
 
 
