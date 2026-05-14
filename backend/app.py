@@ -264,6 +264,38 @@ async def _sync_ops_polardb_intraday_job():
         logger.error(f"PolarDB 运营实时同步失败: {e}")
 
 
+async def _sync_user_payment_job():
+    """Job 9：用户付费面板日同步（每天 1 次，默认回填 90 天活跃用户）
+
+    数据流：
+        PolarDB matrix_order.recharge_order  ─┐
+        MaxCompute metis_dw.dim_user_df      ─┴─→ adpilot_biz.biz_user_payment_{summary,order}
+
+    无 PolarDB 时跳过；无 DMS AccessKey 时仍可运行（dim_user_df enrich 走空表，
+    region/oauth_platform/register_time_utc 字段会留空，由 service 层判定不到游客标签）。
+    """
+    import asyncio
+    settings = get_settings()
+    if not settings.order_mysql_database:
+        logger.info("用户付费面板同步：ORDER_MYSQL_DATABASE 未配置，跳过本次")
+        return
+
+    skip_dim_user = not (settings.dms_access_key_id or settings.odps_access_key_id)
+    if skip_dim_user:
+        logger.warning(
+            "用户付费面板同步：缺少 AccessKey（DMS_/ODPS_*），仅写订单 + 聚合，"
+            "跳过 MaxCompute dim_user_df enrich"
+        )
+
+    from tasks.sync_user_payment import run as sync_user_payment_run
+    logger.info("用户付费面板同步开始（默认 90 天回填窗口）")
+    try:
+        result = await asyncio.to_thread(sync_user_payment_run, skip_dim_user=skip_dim_user)
+        logger.info(f"用户付费面板同步完成: {result}")
+    except Exception as e:
+        logger.error(f"用户付费面板同步失败: {e}")
+
+
 async def _sync_attribution_intraday_job():
     """Job 4：CK D0 实时归因同步 (默认窗口=今天+昨天 LA)
 
@@ -398,6 +430,17 @@ async def lifespan(application: FastAPI):
         next_run_time=now + timedelta(minutes=2),  # 启动后 2 分钟立刻跑首次
     )
 
+    # Job 9：用户付费面板日同步（每天 LA 03:30 ≈ 北京 18:30；夏令时 17:30 / 18:30 / 19:30 都可接受）
+    # 拉 PolarDB recharge_order + MaxCompute dim_user_df → biz_user_payment_{summary, order}
+    # 在 sync_ops_daily 之后跑，让 user 侧 dim 表有可能已经刷到最新分区
+    _scheduler.add_job(
+        _sync_user_payment_job,
+        trigger="cron",
+        hour=18, minute=30,  # Asia/Shanghai 18:30 ≈ LA 03:30 / 02:30（看夏令时）
+        id="sync_user_payment",
+        replace_existing=True,
+    )
+
     # Job 4：CK D0 实时归因同步（默认 disabled；ENABLE_CK_INTRADAY_SYNC=true 开启）
     # 启用后每 30 分钟拉 metis.dwd_*_rt 当天 + 昨天 LA 数据，覆盖到 biz_attribution_ad_intraday
     _settings = get_settings()
@@ -413,13 +456,15 @@ async def lifespan(application: FastAPI):
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
             "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟 | "
-            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟 | CK 实时每 30 分钟）"
+            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟 | "
+            "用户付费每日 18:30 | CK 实时每 30 分钟）"
         )
     else:
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
             "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟 | "
-            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟）"
+            "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟 | "
+            "用户付费每日 18:30）"
             "—— CK 实时同步未启用 (ENABLE_CK_INTRADAY_SYNC=false)"
         )
 
@@ -495,6 +540,7 @@ def _register_routers(application: FastAPI):
     from routes.tiktok_materials import router as tiktok_materials_router
     from routes.attribution import router as attribution_router
     from routes.ops import router as ops_router
+    from routes.user_payment import router as user_payment_router
 
     for r in [
         auth_router, users_router, campaign_router, adgroup_router,
@@ -506,6 +552,7 @@ def _register_routers(application: FastAPI):
         designer_performance_router, optimizer_performance_router,
         optimizer_directory_router, meta_assets_router, ad_assets_router,
         tiktok_materials_router, attribution_router, ops_router,
+        user_payment_router,
     ]:
         application.include_router(r, prefix="/api")
 

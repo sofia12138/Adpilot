@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Loader2, AlertCircle, Calendar, Info } from 'lucide-react'
+import { Loader2, AlertCircle, Info } from 'lucide-react'
 import { PageHeader } from '@/components/common/PageHeader'
-import { cn } from '@/utils/cn'
 import { useOpsStats } from '@/hooks/useOpsStats'
 import type { DailyOpsRow, DatePreset, DateRange } from '@/types/ops'
 import { KpiCard } from '@/components/ops/KpiCard'
@@ -13,71 +12,12 @@ import { SpendRoiChart } from '@/components/ops/SpendRoiChart'
 import { HourlyRevenueSection } from '@/components/ops/HourlyRevenueSection'
 import { fmtUsd, calcDelta, calcNetRevenue } from '@/components/ops/formatters'
 import { presetToRange, periodLabel, isSingleDay, rangeDisplay } from '@/components/ops/rangeUtils'
+import { RangeSwitch } from '@/components/ops/RangeSwitch'
+import { OpsTabs } from './OpsTabs'
 
 // ─── 通用样式 ─────────────────────────────────────
 const chartCardCls = 'bg-card border border-card-border rounded-xl p-4'
 const chartTitleCls = 'text-sm font-semibold text-gray-700 mb-3'
-
-// ─── 时间范围按钮组 ───────────────────────────────
-const PRESET_OPTIONS: { value: DatePreset; label: string }[] = [
-  { value: 'yesterday', label: '昨天' },
-  { value: 'today',     label: '今天' },
-  { value: 'last7',     label: '近7天' },
-  { value: 'last14',    label: '近14天' },
-  { value: 'last30',    label: '近30天' },
-  { value: 'custom',    label: '自定义' },
-]
-
-interface RangeSwitchProps {
-  range: DateRange
-  customDraft: { start: string; end: string }
-  onPresetChange: (p: DatePreset) => void
-  onCustomChange: (next: { start: string; end: string }) => void
-}
-
-function RangeSwitch({ range, customDraft, onPresetChange, onCustomChange }: RangeSwitchProps) {
-  return (
-    <div className="flex flex-col items-end gap-2">
-      <div className="inline-flex bg-muted rounded-lg p-0.5 text-xs">
-        {PRESET_OPTIONS.map(opt => (
-          <button
-            key={opt.value}
-            onClick={() => onPresetChange(opt.value)}
-            className={cn(
-              'px-3 py-1.5 rounded-md transition-colors flex items-center gap-1',
-              range.preset === opt.value
-                ? 'bg-white text-gray-900 shadow-sm font-medium'
-                : 'text-muted-foreground hover:text-gray-700',
-            )}
-          >
-            {opt.value === 'custom' && <Calendar className="w-3 h-3" />}
-            {opt.label}
-          </button>
-        ))}
-      </div>
-
-      {range.preset === 'custom' && (
-        <div className="inline-flex items-center gap-2 bg-card border border-card-border rounded-lg px-3 py-1.5 text-xs">
-          <input
-            type="date"
-            value={customDraft.start}
-            max={customDraft.end || undefined}
-            onChange={e => onCustomChange({ ...customDraft, start: e.target.value })}
-            className="bg-transparent outline-none text-gray-700"
-          />
-          <span className="text-muted-foreground">至</span>
-          <input
-            type="date"
-            value={customDraft.end}
-            min={customDraft.start || undefined}
-            onChange={e => onCustomChange({ ...customDraft, end: e.target.value })}
-            className="bg-transparent outline-none text-gray-700"
-          />
-        </div>
-      )}
-    </div>
-  )
-}
 
 // ─── KPI 计算 ────────────────────────────────────
 interface Kpis {
@@ -330,6 +270,8 @@ export default function OpsDashboard() {
           />
         }
       />
+
+      <OpsTabs />
 
       {/* 数据口径 + 当前区间 */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100 text-xs text-blue-700">

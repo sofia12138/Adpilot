@@ -6,6 +6,7 @@ import LoginPage from '@/pages/LoginPage'
 import ForbiddenPage from '@/pages/ForbiddenPage'
 import DashboardPage from '@/pages/DashboardPage'
 import OpsDashboard from '@/pages/ops/OpsDashboard'
+import UserPaymentPanel from '@/pages/ops/UserPaymentPanel'
 import AdsPage from '@/pages/AdsPage'
 import TikTokConsolePage from '@/pages/TikTokConsolePage'
 import MetaConsolePage from '@/pages/MetaConsolePage'
@@ -52,6 +53,7 @@ export const router = createBrowserRouter([
       { path: 'forbidden', element: <ForbiddenPage /> },
       { path: 'dashboard',          element: <G panelKey="dashboard"><DashboardPage /></G> },
       { path: 'dashboard/ops',      element: <G panelKey="ops_dashboard"><OpsDashboard /></G> },
+      { path: 'dashboard/ops/users', element: <G panelKey="ops_dashboard"><UserPaymentPanel /></G> },
       { path: 'ads',                element: <G panelKey="ads_data"><AdsPage /></G> },
       { path: 'console/tiktok',     element: <G panelKey="tiktok_console"><TikTokConsolePage /></G> },
       { path: 'console/meta',       element: <G panelKey="meta_console"><MetaConsolePage /></G> },

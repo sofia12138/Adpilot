@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import Optional
 
@@ -22,7 +23,9 @@ from fastapi import APIRouter, HTTPException, Query
 
 from config import get_settings
 from repositories import drama_repository
-from tasks import sync_drama
+from tasks import sync_drama, sync_optimizer
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/drama", tags=["剧级分析"])
 
@@ -68,6 +71,14 @@ async def drama_summary(
         None,
         description="按 localized_drama_name 模糊搜索（不匹配 remark_raw）"
     ),
+    optimizer: Optional[str] = Query(
+        None,
+        description=(
+            "按优化师 normalized 名筛选；"
+            "传 '未识别' 表示该 campaign 未匹配到任何已知优化师。"
+            "数据源为 legacy 时该参数会被忽略并在响应里返回 _warning。"
+        ),
+    ),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(50, ge=1, le=200, description="每页条数"),
     source: str = Query("auto", description="数据源: auto/attribution/legacy"),
@@ -94,6 +105,7 @@ async def drama_summary(
             language_code=language_code,
             page=page,
             page_size=page_size,
+            optimizer=optimizer,
         )
     elif src == "attribution":
         result = await asyncio.to_thread(
@@ -107,6 +119,7 @@ async def drama_summary(
             language_code=language_code,
             page=page,
             page_size=page_size,
+            optimizer=optimizer,
         )
     else:
         result = await asyncio.to_thread(
@@ -121,6 +134,8 @@ async def drama_summary(
             page=page,
             page_size=page_size,
         )
+        if optimizer:
+            result["_warning"] = "legacy 数据源不支持优化师筛选，optimizer 参数已被忽略"
     result["_source"] = src
     return result
 
@@ -139,6 +154,10 @@ async def locale_breakdown(
     platform: Optional[str] = Query(None, description="媒体平台: tiktok / meta"),
     channel: Optional[str] = Query(None, description="渠道标识"),
     country: Optional[str] = Query(None, description="国家/地区代码"),
+    optimizer: Optional[str] = Query(
+        None,
+        description="按优化师 normalized 名筛选；传 '未识别' 表示未匹配。",
+    ),
 ):
     """
     按 language_code 聚合，返回某部剧各语言版本的投放明细。
@@ -160,6 +179,7 @@ async def locale_breakdown(
             platform=platform,
             channel=channel,
             country=country,
+            optimizer=optimizer,
         )
     elif src == "attribution":
         rows = await asyncio.to_thread(
@@ -171,6 +191,7 @@ async def locale_breakdown(
             platform=platform,
             channel=channel,
             country=country,
+            optimizer=optimizer,
         )
     else:
         rows = await asyncio.to_thread(
@@ -183,7 +204,10 @@ async def locale_breakdown(
             channel=channel,
             country=country,
         )
-    return {"rows": rows, "_source": src}
+    resp: dict = {"rows": rows, "_source": src}
+    if src not in ("blend", "attribution") and optimizer:
+        resp["_warning"] = "legacy 数据源不支持优化师筛选，optimizer 参数已被忽略"
+    return resp
 
 
 # ─────────────────────────────────────────────────────────────
@@ -200,6 +224,10 @@ async def drama_trend(
     platform: Optional[str] = Query(None, description="媒体平台: tiktok / meta"),
     channel: Optional[str] = Query(None, description="渠道标识"),
     country: Optional[str] = Query(None, description="国家/地区代码"),
+    optimizer: Optional[str] = Query(
+        None,
+        description="按优化师 normalized 名筛选；传 '未识别' 表示未匹配。",
+    ),
 ):
     """
     按天聚合趋势数据。
@@ -218,6 +246,7 @@ async def drama_trend(
             platform=platform,
             channel=channel,
             country=country,
+            optimizer=optimizer,
         )
     elif src == "attribution":
         rows = await asyncio.to_thread(
@@ -229,6 +258,7 @@ async def drama_trend(
             platform=platform,
             channel=channel,
             country=country,
+            optimizer=optimizer,
         )
     else:
         rows = await asyncio.to_thread(
@@ -241,7 +271,10 @@ async def drama_trend(
             channel=channel,
             country=country,
         )
-    return {"rows": rows, "_source": src}
+    resp: dict = {"rows": rows, "_source": src}
+    if src not in ("blend", "attribution") and optimizer:
+        resp["_warning"] = "legacy 数据源不支持优化师筛选，optimizer 参数已被忽略"
+    return resp
 
 
 # ─────────────────────────────────────────────────────────────
@@ -254,10 +287,29 @@ async def trigger_drama_sync(
     end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
 ):
     """
-    从 biz_campaign_daily_normalized 扫描数据，解析活动名称，
-    写入 ad_drama_mapping 和 fact_drama_daily。
+    1. 从 biz_campaign_daily_normalized 扫描数据，解析活动名称 → ad_drama_mapping + fact_drama_daily
+    2. 顺带刷新 campaign_optimizer_mapping + fact_optimizer_daily（保证剧集面板优化师下拉新鲜）
+
+    任一步骤失败会单独捕获并在响应里返回，不影响另一步。
     """
     _validate_dates(start_date, end_date)
 
-    result = await asyncio.to_thread(sync_drama.run, start_date, end_date)
-    return {"status": "ok", **result}
+    drama_result = await asyncio.to_thread(sync_drama.run, start_date, end_date)
+
+    optimizer_result: dict
+    try:
+        optimizer_result = await asyncio.to_thread(
+            sync_optimizer.run, start_date, end_date
+        )
+    except Exception as exc:  # 不影响剧级同步本身
+        logger.exception("sync_optimizer 在剧级同步钩子里失败: %s", exc)
+        optimizer_result = {
+            "status": "failed",
+            "error": str(exc),
+        }
+
+    return {
+        "status": "ok",
+        **drama_result,
+        "optimizer_sync": optimizer_result,
+    }

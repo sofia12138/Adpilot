@@ -27,13 +27,23 @@ import {
   Link2,
   Globe,
   Upload,
+  Wallet,
 } from 'lucide-react'
 import type { MenuItem } from '@/types/menu'
 
 export const menuConfig: MenuItem[] = [
   { id: 'dashboard', label: '首页概览', icon: LayoutDashboard, path: '/dashboard', panelKey: 'dashboard' },
   // 运营数据 — 仅 super_admin 默认拥有 ops_dashboard panel；其他角色 hasPanel=false 自动不渲染
-  { id: 'ops-dashboard', label: '运营数据', icon: BarChart2, path: '/dashboard/ops', panelKey: 'ops_dashboard' },
+  {
+    id: 'ops-dashboard',
+    label: '运营数据',
+    icon: BarChart2,
+    panelKey: 'ops_dashboard',
+    children: [
+      { id: 'ops-overview', label: '运营总览', icon: BarChart2, path: '/dashboard/ops', panelKey: 'ops_dashboard' },
+      { id: 'ops-users',    label: '用户付费', icon: Wallet,    path: '/dashboard/ops/users', panelKey: 'ops_dashboard' },
+    ],
+  },
   {
     id: 'ads-mgmt',
     label: '投放管理',

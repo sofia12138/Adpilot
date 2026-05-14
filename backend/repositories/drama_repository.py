@@ -228,12 +228,17 @@ def query_drama_summary(
     language_code: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    optimizer: Optional[str] = None,
 ) -> dict:
     """
     按 content_key 聚合，返回剧级总览数据。
     keyword 匹配 localized_drama_name（不匹配 remark_raw）。
     remark_raw 不参与任何分组或筛选。
+
+    注意：legacy 路径（fact_drama_daily）不带优化师维度，optimizer 参数会被忽略，
+    由 routes 层在响应中加 _warning 提示。
     """
+    _ = optimizer  # legacy fact 表无该字段，显式忽略，避免误用
     conditions = ["stat_date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
 
@@ -331,11 +336,15 @@ def query_locale_breakdown(
     platform: Optional[str] = None,
     channel: Optional[str] = None,
     country: Optional[str] = None,
+    optimizer: Optional[str] = None,
 ) -> list[dict]:
     """
     按 language_code 聚合，返回某剧的语言版本明细。
     content_key 或 drama_id 至少提供一个。
+
+    注意：legacy 路径（fact_drama_daily）不带优化师维度，optimizer 参数会被忽略。
     """
+    _ = optimizer
     conditions = ["stat_date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
 
@@ -410,11 +419,15 @@ def query_drama_trend(
     platform: Optional[str] = None,
     channel: Optional[str] = None,
     country: Optional[str] = None,
+    optimizer: Optional[str] = None,
 ) -> list[dict]:
     """
     按天聚合趋势数据。
     可按 content_key 和可选 language_code 筛选。
+
+    注意：legacy 路径（fact_drama_daily）不带优化师维度，optimizer 参数会被忽略。
     """
+    _ = optimizer
     conditions = ["stat_date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
 
@@ -495,11 +508,15 @@ def query_drama_summary_attribution(
     language_code: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    optimizer: Optional[str] = None,
 ) -> dict:
     """剧级总览（attribution 数仓真值）。
 
     JOIN 路径：biz_attribution_ad_daily.campaign_id → ad_drama_mapping.campaign_id
     业务结果（registration / total_recharge_amount）来自 attribution 数仓。
+
+    optimizer：按 campaign_optimizer_mapping.optimizer_name_normalized 过滤。
+    未匹配的 campaign 在 mapping 表里仍写入 '未识别'，故传 '未识别' 可命中。
     """
     conditions = ["a.ds_account_local BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
@@ -523,6 +540,9 @@ def query_drama_summary_attribution(
     if keyword:
         conditions.append("m.localized_drama_name LIKE %s")
         params.append(f"%{keyword}%")
+    if optimizer:
+        conditions.append("COALESCE(o.optimizer_name_normalized, '未识别') = %s")
+        params.append(optimizer)
 
     where = " AND ".join(conditions)
 
@@ -532,10 +552,20 @@ def query_drama_summary_attribution(
        AND CASE WHEN m.account_id LIKE 'act\\_%%' THEN SUBSTRING(m.account_id, 5) ELSE m.account_id END = a.account_id
     """
 
+    # campaign_optimizer_mapping 是 campaign 粒度且与 ad_drama_mapping 同样使用
+    # 'meta'/'tiktok' + 'act_xxx' 命名约定（都来自 normalized 表），直接拿 m.* 三元组对齐
+    optimizer_join = """
+        LEFT JOIN campaign_optimizer_mapping o
+          ON o.platform    = m.platform
+         AND o.account_id  = m.account_id
+         AND o.campaign_id = m.campaign_id
+    """
+
     count_sql = f"""
         SELECT COUNT(DISTINCT m.content_key) AS total
         FROM biz_attribution_ad_daily a
         JOIN ad_drama_mapping m {join_on}
+        {optimizer_join}
         WHERE {where}
     """
     data_sql = f"""
@@ -553,6 +583,7 @@ def query_drama_summary_attribution(
             COUNT(DISTINCT m.language_code)        AS language_count
         FROM biz_attribution_ad_daily a
         JOIN ad_drama_mapping m {join_on}
+        {optimizer_join}
         WHERE {where}
         GROUP BY m.content_key
         ORDER BY spend DESC
@@ -603,6 +634,7 @@ def query_locale_breakdown_attribution(
     platform: Optional[str] = None,
     channel: Optional[str] = None,
     country: Optional[str] = None,
+    optimizer: Optional[str] = None,
 ) -> list[dict]:
     """语言版本明细（attribution 数仓真值）"""
     conditions = ["a.ds_account_local BETWEEN %s AND %s"]
@@ -628,6 +660,9 @@ def query_locale_breakdown_attribution(
     if country:
         conditions.append("m.country = %s")
         params.append(country)
+    if optimizer:
+        conditions.append("COALESCE(o.optimizer_name_normalized, '未识别') = %s")
+        params.append(optimizer)
 
     where = " AND ".join(conditions)
 
@@ -645,6 +680,10 @@ def query_locale_breakdown_attribution(
           ON m.campaign_id = a.campaign_id
          AND CASE WHEN m.platform = 'meta' THEN 'facebook' ELSE m.platform END = a.platform
          AND CASE WHEN m.account_id LIKE 'act\\_%%' THEN SUBSTRING(m.account_id, 5) ELSE m.account_id END = a.account_id
+        LEFT JOIN campaign_optimizer_mapping o
+          ON o.platform    = m.platform
+         AND o.account_id  = m.account_id
+         AND o.campaign_id = m.campaign_id
         WHERE {where}
         GROUP BY m.language_code
         ORDER BY spend DESC
@@ -681,6 +720,7 @@ def query_drama_trend_attribution(
     platform: Optional[str] = None,
     channel: Optional[str] = None,
     country: Optional[str] = None,
+    optimizer: Optional[str] = None,
 ) -> list[dict]:
     """按天趋势（attribution 数仓真值）"""
     conditions = ["a.ds_account_local BETWEEN %s AND %s"]
@@ -705,6 +745,9 @@ def query_drama_trend_attribution(
     if country:
         conditions.append("m.country = %s")
         params.append(country)
+    if optimizer:
+        conditions.append("COALESCE(o.optimizer_name_normalized, '未识别') = %s")
+        params.append(optimizer)
 
     where = " AND ".join(conditions)
 
@@ -721,6 +764,10 @@ def query_drama_trend_attribution(
           ON m.campaign_id = a.campaign_id
          AND CASE WHEN m.platform = 'meta' THEN 'facebook' ELSE m.platform END = a.platform
          AND CASE WHEN m.account_id LIKE 'act\\_%%' THEN SUBSTRING(m.account_id, 5) ELSE m.account_id END = a.account_id
+        LEFT JOIN campaign_optimizer_mapping o
+          ON o.platform    = m.platform
+         AND o.account_id  = m.account_id
+         AND o.campaign_id = m.campaign_id
         WHERE {where}
         GROUP BY a.ds_account_local
         ORDER BY a.ds_account_local ASC
@@ -769,6 +816,7 @@ def query_drama_summary_blend(
     language_code: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
+    optimizer: Optional[str] = None,
 ) -> dict:
     """剧级总览（blend：normalized 全量 spend + attribution 真值 reg/rev）"""
     from services.biz_blend_service import _attr_subquery
@@ -794,6 +842,9 @@ def query_drama_summary_blend(
     if keyword:
         n_clauses.append("m.localized_drama_name LIKE %s")
         n_params.append(f"%{keyword}%")
+    if optimizer:
+        n_clauses.append("COALESCE(o.optimizer_name_normalized, '未识别') = %s")
+        n_params.append(optimizer)
 
     n_where = " AND ".join(n_clauses)
 
@@ -805,6 +856,10 @@ def query_drama_summary_blend(
           ON m.platform    = n.platform
          AND m.account_id  = n.account_id
          AND m.campaign_id = n.campaign_id
+        LEFT JOIN campaign_optimizer_mapping o
+          ON o.platform    = n.platform
+         AND o.account_id  = n.account_id
+         AND o.campaign_id = n.campaign_id
         LEFT JOIN ({attr_sql}) a
             ON a.d      = n.stat_date
            AND a.plat   = n.platform
@@ -877,6 +932,7 @@ def query_locale_breakdown_blend(
     platform: Optional[str] = None,
     channel: Optional[str] = None,
     country: Optional[str] = None,
+    optimizer: Optional[str] = None,
 ) -> list[dict]:
     """语言版本明细（blend）"""
     from services.biz_blend_service import _attr_subquery
@@ -903,6 +959,9 @@ def query_locale_breakdown_blend(
     if country:
         n_clauses.append("m.country = %s")
         n_params.append(country)
+    if optimizer:
+        n_clauses.append("COALESCE(o.optimizer_name_normalized, '未识别') = %s")
+        n_params.append(optimizer)
 
     n_where = " AND ".join(n_clauses)
     attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, None)
@@ -921,6 +980,10 @@ def query_locale_breakdown_blend(
           ON m.platform    = n.platform
          AND m.account_id  = n.account_id
          AND m.campaign_id = n.campaign_id
+        LEFT JOIN campaign_optimizer_mapping o
+          ON o.platform    = n.platform
+         AND o.account_id  = n.account_id
+         AND o.campaign_id = n.campaign_id
         LEFT JOIN ({attr_sql}) a
             ON a.d      = n.stat_date
            AND a.plat   = n.platform
@@ -962,6 +1025,7 @@ def query_drama_trend_blend(
     platform: Optional[str] = None,
     channel: Optional[str] = None,
     country: Optional[str] = None,
+    optimizer: Optional[str] = None,
 ) -> list[dict]:
     """按天趋势（blend）"""
     from services.biz_blend_service import _attr_subquery
@@ -987,6 +1051,9 @@ def query_drama_trend_blend(
     if country:
         n_clauses.append("m.country = %s")
         n_params.append(country)
+    if optimizer:
+        n_clauses.append("COALESCE(o.optimizer_name_normalized, '未识别') = %s")
+        n_params.append(optimizer)
 
     n_where = " AND ".join(n_clauses)
     attr_sql, attr_args = _attr_subquery("campaign", start_date, end_date, platform, None)
@@ -1004,6 +1071,10 @@ def query_drama_trend_blend(
           ON m.platform    = n.platform
          AND m.account_id  = n.account_id
          AND m.campaign_id = n.campaign_id
+        LEFT JOIN campaign_optimizer_mapping o
+          ON o.platform    = n.platform
+         AND o.account_id  = n.account_id
+         AND o.campaign_id = n.campaign_id
         LEFT JOIN ({attr_sql}) a
             ON a.d      = n.stat_date
            AND a.plat   = n.platform

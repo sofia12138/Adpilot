@@ -282,6 +282,103 @@ def get_channel_advertiser_map() -> dict[int, str]:
     return _ca_map_cache
 
 
+# ─── channel_id → 渠道元信息字典（给用户付费面板用）──────────────
+# 输出格式：{ "78": {"ad_platform": 0, "advertiser_id": null, "label": "投放 #78"} }
+# - ad_platform 取 channel_day_report 最近 30 天里出现最多的那个
+# - advertiser_id 仅当 ad_platform=1 (TikTok) 时通过 tiktok_media_campaign_day 关联取到
+# - label 是后端预渲染的可读名称，前端可直接显示
+_channel_dict_cache: dict[str, dict] = {}
+_channel_dict_ts: float = 0
+_CHANNEL_DICT_TTL = 600  # 10 分钟
+
+_AD_PLATFORM_LABEL = {0: "其它", 1: "TikTok", 2: "Meta"}
+
+
+def _build_channel_label(channel_id: str, ad_platform: int | None, advertiser_id: str | None) -> str:
+    """统一规则把 channel_id 转成可读标签。
+
+    简化版：只显示平台名（具体 channel_id / advertiser_id / campaign 在 tooltip）。
+    - channel_id='' / '0'  → 自然量
+    - ad_platform=1        → TikTok
+    - ad_platform=2        → Meta
+    - ad_platform=0        → 其它
+    """
+    cid = (channel_id or "").strip()
+    if cid in ("", "0"):
+        return "自然量"
+    if ad_platform == 1:
+        return "TikTok"
+    if ad_platform == 2:
+        return "Meta"
+    if ad_platform == 0:
+        return "其它"
+    return "渠道"
+
+
+def get_channel_dict() -> dict[str, dict]:
+    """返回 channel_id_str → {ad_platform, advertiser_id, label} 字典。
+
+    数据来源：
+      - 主：channel_user 表（用户级归因，反映真实平台），按 channel_id 取 majority ad_platform
+      - 补：channel_advertiser_map() 给 TikTok 渠道补 advertiser_id
+
+    缓存 10 分钟。供用户付费面板渲染"首单渠道"列使用。
+    """
+    global _channel_dict_cache, _channel_dict_ts
+    now = time.time()
+    if _channel_dict_cache and (now - _channel_dict_ts) < _CHANNEL_DICT_TTL:
+        return _channel_dict_cache
+
+    out: dict[str, dict] = {}
+    try:
+        with get_prd_conn() as conn:
+            if conn is None:
+                return _channel_dict_cache or {}
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT channel_id, ad_platform, COUNT(*) AS user_cnt
+                FROM channel_user
+                GROUP BY channel_id, ad_platform
+            """)
+            rows = list(cur.fetchall())
+
+        # 同一 channel_id 可能有多种 ad_platform → 取 user_cnt 最多的那个
+        best_per_cid: dict[str, dict] = {}
+        for r in rows:
+            cid_str = str(r["channel_id"])
+            ap = r["ad_platform"]
+            cnt = r["user_cnt"] or 0
+            if cid_str not in best_per_cid or cnt > best_per_cid[cid_str]["cnt"]:
+                best_per_cid[cid_str] = {"ad_platform": ap, "cnt": cnt}
+
+        # advertiser_id：从 channel_advertiser_map 补（仅 TikTok 渠道有）
+        ca_map = get_channel_advertiser_map()  # {channel_id: advertiser_id}
+
+        for cid_str, info in best_per_cid.items():
+            ap = info["ad_platform"]
+            try:
+                cid_int = int(cid_str)
+            except (TypeError, ValueError):
+                cid_int = None
+            adv = ca_map.get(cid_int) if cid_int is not None else None
+            out[cid_str] = {
+                "ad_platform": ap,
+                "advertiser_id": adv,
+                "label": _build_channel_label(cid_str, ap, adv),
+            }
+    except Exception as e:
+        logger.warning(f"get_channel_dict 查询失败，沿用旧缓存: {e}")
+        return _channel_dict_cache or {}
+
+    # 补两个特殊值，让前端拿空字典也能正常 fallback
+    out.setdefault("0", {"ad_platform": 0, "advertiser_id": None, "label": "自然量"})
+    out.setdefault("", {"ad_platform": 0, "advertiser_id": None, "label": "自然量"})
+
+    _channel_dict_cache = out
+    _channel_dict_ts = now
+    return out
+
+
 def query_channel_report(
     start_date: str,
     end_date: str,
@@ -1439,6 +1536,145 @@ _BIZ_TABLES_SQL = [
         INDEX idx_ds (ds)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     COMMENT='运营数据面板日报：os_type=0 全量用户侧 + os_type=1/2 双端付费侧'
+    """,
+    """
+    -- 用户付费面板 · 用户聚合表（运营数据面板 → 用户付费 子面板）
+    -- 由 tasks/sync_user_payment.py T+1 LA 03:30 每日全量覆写最近 90 天活跃用户
+    -- 数据源：PolarDB matrix_order.recharge_order 聚合 + MaxCompute dim_user_df enrich
+    CREATE TABLE IF NOT EXISTS biz_user_payment_summary (
+        user_id                BIGINT      NOT NULL COMMENT '用户ID (matrix_user.account.id)',
+        region                 VARCHAR(8)  DEFAULT NULL COMMENT '注册区域 (US/JP/...)',
+        oauth_platform         TINYINT     DEFAULT NULL COMMENT '-1 游客 / 1 google / 2 facebook / 3 apple',
+        register_time_utc      DATETIME    DEFAULT NULL COMMENT '注册时间 UTC',
+        lang                   VARCHAR(16) DEFAULT NULL,
+
+        first_channel_id       VARCHAR(64) NOT NULL DEFAULT '' COMMENT '首单渠道',
+        first_os_type          TINYINT     NOT NULL DEFAULT 0 COMMENT '1=Android / 2=iOS',
+        first_pay_type         TINYINT     NOT NULL DEFAULT 0 COMMENT '1=ApplePay / 2=GooglePay',
+
+        total_orders           INT         NOT NULL DEFAULT 0,
+        paid_orders            INT         NOT NULL DEFAULT 0,
+        refund_orders          INT         NOT NULL DEFAULT 0,
+
+        -- 拆 OS
+        paid_orders_ios        INT         NOT NULL DEFAULT 0,
+        paid_orders_android    INT         NOT NULL DEFAULT 0,
+        total_gmv_cents_ios    BIGINT      NOT NULL DEFAULT 0 COMMENT 'iOS 累计已成功支付金额（美分）',
+        total_gmv_cents_android BIGINT     NOT NULL DEFAULT 0 COMMENT 'Android 累计已成功支付金额（美分）',
+
+        -- 拆类型
+        paid_orders_subscribe  INT         NOT NULL DEFAULT 0,
+        paid_orders_inapp      INT         NOT NULL DEFAULT 0,
+        total_gmv_cents_subscribe BIGINT   NOT NULL DEFAULT 0,
+        total_gmv_cents_inapp     BIGINT   NOT NULL DEFAULT 0,
+
+        -- 全口径
+        total_gmv_cents        BIGINT      NOT NULL DEFAULT 0 COMMENT '累计已成功支付金额（美分）',
+        attempted_gmv_cents    BIGINT      NOT NULL DEFAULT 0 COMMENT '累计尝试金额（含未成单，美分）',
+        refund_amount_cents    BIGINT      NOT NULL DEFAULT 0,
+
+        first_pay_time_utc     DATETIME    DEFAULT NULL COMMENT '首次成功支付时间 UTC',
+        last_action_time_utc   DATETIME    DEFAULT NULL COMMENT '最后一次下单时间 UTC',
+
+        -- 异常标签 JSON 数组，如 ["suspect_brush","payment_loop"]
+        anomaly_tags           JSON        DEFAULT NULL,
+
+        snapshot_ds            DATE        NOT NULL COMMENT '快照 LA 日',
+
+        synced_at              DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at             DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at             DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        PRIMARY KEY (user_id),
+        KEY idx_snapshot (snapshot_ds),
+        KEY idx_region (region),
+        KEY idx_first_channel (first_channel_id),
+        KEY idx_total_orders (total_orders),
+        KEY idx_paid_orders (paid_orders)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='用户付费面板 · 用户聚合表（90 天滚动 T+1）'
+    """,
+    """
+    -- 用户付费面板 · 订单明细表
+    -- 由 tasks/sync_user_payment.py 写入最近 90 天的 recharge_order，按 LA 日 ds 分区
+    -- 字段镜像 PolarDB matrix_order.recharge_order 关键列，时间字段已转 LA
+    CREATE TABLE IF NOT EXISTS biz_user_payment_order (
+        la_ds                  DATE        NOT NULL COMMENT '订单创建 LA 日',
+        order_id               BIGINT      NOT NULL COMMENT 'recharge_order.id',
+        order_no               VARCHAR(40) NOT NULL DEFAULT '',
+        user_id                BIGINT      NOT NULL,
+
+        created_at_la          DATETIME    NOT NULL,
+        pay_time_la            DATETIME    DEFAULT NULL,
+
+        order_status           TINYINT     NOT NULL DEFAULT 0 COMMENT '0 待支付 / 1 已支付 / 2 全退 / 3 部退 / 4 用户取消 / 5 发起支付失败 / 6 超时',
+        os_type                TINYINT     NOT NULL DEFAULT 0,
+        pay_type               TINYINT     NOT NULL DEFAULT 0,
+        pay_amount_cents       BIGINT      NOT NULL DEFAULT 0,
+        refund_amount_cents    BIGINT      NOT NULL DEFAULT 0,
+        product_id             VARCHAR(64) NOT NULL DEFAULT '',
+        is_subscribe           TINYINT     NOT NULL DEFAULT -1 COMMENT '-1 未知 / 0 否 / 1 是',
+        stall_group            TINYINT     NOT NULL DEFAULT 0 COMMENT '1 首充 / 2 复充 / 3 挽留',
+        channel_id             VARCHAR(64) NOT NULL DEFAULT '',
+        drama_id               BIGINT      NOT NULL DEFAULT 0,
+        episode_id             BIGINT      NOT NULL DEFAULT 0,
+
+        synced_at              DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+        PRIMARY KEY (la_ds, order_id),
+        KEY idx_user (user_id),
+        KEY idx_status (la_ds, order_status),
+        KEY idx_channel (la_ds, channel_id),
+        KEY idx_created (created_at_la)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='用户付费面板 · 订单明细表（最近 90 天 T+1 镜像）'
+    """,
+    """
+    -- 用户付费面板 · 异常用户白名单
+    -- 通过审批流写入；运营数据面板 "clean" 口径会剔除这些 user_id
+    CREATE TABLE IF NOT EXISTS biz_user_anomaly_whitelist (
+        user_id      BIGINT       NOT NULL,
+        tag          VARCHAR(32)  NOT NULL DEFAULT 'whitelist'
+                     COMMENT 'whitelist / blacklist / internal_test',
+        reason       VARCHAR(500) NOT NULL DEFAULT '',
+        marked_by    VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '最终生效的审批人 username',
+        marked_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        application_id BIGINT     DEFAULT NULL COMMENT '关联 biz_user_anomaly_application.id',
+        PRIMARY KEY (user_id),
+        KEY idx_tag (tag)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='用户付费面板 · 异常用户白名单（仅经审批通过的工单可写入）'
+    """,
+    """
+    -- 用户付费面板 · 白名单申请工单（审批流）
+    -- 任意 super_admin 可申请；另一个 super_admin（!= 申请人）审批通过后才能写入白名单
+    CREATE TABLE IF NOT EXISTS biz_user_anomaly_application (
+        id              BIGINT       NOT NULL AUTO_INCREMENT,
+        target_user_id  BIGINT       NOT NULL COMMENT '要标记的 matrix_user.account.id',
+        requested_tag   VARCHAR(32)  NOT NULL DEFAULT 'whitelist'
+                        COMMENT 'whitelist / blacklist / internal_test',
+        action          VARCHAR(16)  NOT NULL DEFAULT 'add'
+                        COMMENT 'add（加白名单） / remove（移除白名单）',
+        reason          VARCHAR(500) NOT NULL DEFAULT '',
+        status          VARCHAR(16)  NOT NULL DEFAULT 'pending'
+                        COMMENT 'pending / approved / rejected / withdrawn',
+
+        applicant_user  VARCHAR(64)  NOT NULL COMMENT '申请人 username',
+        applied_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+        reviewer_user   VARCHAR(64)  DEFAULT NULL COMMENT '审批人 username（必须 != applicant_user）',
+        review_note     VARCHAR(500) NOT NULL DEFAULT '',
+        reviewed_at     DATETIME     DEFAULT NULL,
+
+        created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+        PRIMARY KEY (id),
+        KEY idx_status (status, applied_at),
+        KEY idx_target (target_user_id),
+        KEY idx_applicant (applicant_user)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='用户付费面板 · 白名单申请工单（审批流）'
     """,
 ]
 
