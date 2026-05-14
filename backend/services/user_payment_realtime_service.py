@@ -22,7 +22,9 @@ from threading import Lock
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
+from config import get_settings
 from db import get_order_conn
+from integrations.dms_client import DmsError, get_default_client
 from repositories import biz_user_payment_repository as biz_repo
 from repositories import user_anomaly_application_repository as app_repo
 from repositories import user_anomaly_whitelist_repository as whitelist_repo
@@ -95,6 +97,56 @@ def _fetch_polardb(la_ds: str) -> list[dict]:
         cur = conn.cursor()
         cur.execute(sql, (la_ds, _MAX_ROWS))
         return list(cur.fetchall())
+
+
+_DIM_USER_REGISTER_SQL = """
+SELECT user_id, register_time_utc
+FROM metis_dw.dim_user_df
+WHERE ds = (SELECT MAX(ds) FROM metis_dw.dim_user_df)
+  AND user_id IN ({user_list})
+"""
+
+
+def _fetch_register_from_mc(user_ids: list[int]) -> dict[int, Any]:
+    """从 MaxCompute dim_user_df 批量查 user_id → register_time_utc。
+
+    用作 biz_user_payment_summary 之外的兜底：实时面板里今日新付费用户多半
+    不在 T+1 summary 表里，但只要不是"今天才注册"，dim_user_df（昨日 ds）
+    一般都能命中。
+    返回 {user_id: datetime|None}；查询失败时返回 {} 并记 warning，不影响主流程。
+    """
+    if not user_ids:
+        return {}
+    try:
+        settings = get_settings()
+        client = get_default_client()
+    except Exception as e:  # 配置/认证不全就跳过
+        logger.warning("today register_time MC 客户端不可用，跳过: %s", e)
+        return {}
+
+    out: dict[int, Any] = {}
+    batch_size = 1000
+    for i in range(0, len(user_ids), batch_size):
+        batch = user_ids[i:i + batch_size]
+        sql = _DIM_USER_REGISTER_SQL.format(user_list=", ".join(str(int(u)) for u in batch))
+        try:
+            result = client.execute(sql, settings.dms_mc_db_id)
+        except DmsError as e:
+            logger.warning("today register_time MC 查询失败（忽略）: %s", e)
+            return out
+        except Exception as e:
+            logger.warning("today register_time MC 查询异常（忽略）: %s", e)
+            return out
+        for row in result.rows:
+            try:
+                uid = int(row.get("user_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not uid:
+                continue
+            out[uid] = row.get("register_time_utc") or None
+    logger.info("today register_time MC enrich 命中 %d / %d", len([v for v in out.values() if v]), len(user_ids))
+    return out
 
 
 def _compute_today_tags(row: dict) -> list[str]:
@@ -186,16 +238,31 @@ def list_today(la_ds: Optional[str] = None, *, force_refresh: bool = False) -> d
     pending_set = set(app_repo.list_pending_target_user_ids())
     whitelist_set = set(whitelist_repo.list_whitelisted_user_ids())
 
-    # 注册时间反查：从 T+1 维表 biz_user_payment_summary 拿（历史付费用户全覆盖）；
-    # 今日新注册的纯新用户暂时落空（前端展示 "—"），等明日 T+1 同步后补齐。
+    # 注册时间反查：
+    # 1) 先从 T+1 维表 biz_user_payment_summary 拿（已带 register_time_utc 的历史付费用户）；
+    # 2) 没命中的（含今日才付费的新用户）再走 MaxCompute dim_user_df 兜底；
+    # 3) 今天才注册的纯新用户仍可能落空，前端展示 "—"，明日 T+1 同步后补齐。
     user_ids = [int(r.get("user_id") or 0) for r in rows if r.get("user_id")]
     register_map: dict[int, Any] = {}
     if user_ids:
         try:
             meta = biz_repo.fetch_summary_meta_by_users(user_ids)
-            register_map = {uid: m.get("register_time_utc") for uid, m in meta.items()}
+            for uid, m in meta.items():
+                rt = m.get("register_time_utc")
+                if rt:
+                    register_map[uid] = rt
         except Exception as e:
-            logger.warning("today register_time_utc enrich 失败，忽略: %s", e)
+            logger.warning("today register_time_utc summary enrich 失败，忽略: %s", e)
+
+        missing = [uid for uid in user_ids if uid not in register_map]
+        if missing:
+            try:
+                mc_map = _fetch_register_from_mc(missing)
+                for uid, rt in mc_map.items():
+                    if rt:
+                        register_map[uid] = rt
+            except Exception as e:
+                logger.warning("today register_time_utc MC enrich 失败，忽略: %s", e)
 
     items = [
         _format_row(
