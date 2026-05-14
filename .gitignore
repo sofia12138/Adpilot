@@ -34,6 +34,9 @@ _deploy_step.py
 # 本地一次性排查脚本（前缀 _probe_ 的 ad-hoc Python 探针）
 backend/_probe_*.py
 
+# 本地一次性运营复盘文档（前缀 _ops_doc_ 的 ad-hoc Markdown）
+backend/_ops_doc_*.md
+
 # 日志
 *.log
 
