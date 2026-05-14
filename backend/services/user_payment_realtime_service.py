@@ -107,6 +107,53 @@ WHERE ds = (SELECT MAX(ds) FROM metis_dw.dim_user_df)
 """
 
 
+def _fetch_register_from_channel_user(user_ids: list[int]) -> dict[int, Any]:
+    """从 PolarDB matrix_advertise.channel_user 实时反查 user_id → create_time。
+
+    适用场景：今日刚注册（通过广告渠道）的用户在 dim_user_df / biz_user_payment_summary
+    还没拉到时，这里能秒级拿到注册时间。
+
+    口径核对（探测验证，2026-05）：
+    - channel_user.create_time 与 dim_user_df.register_time_utc 完全一致（同 UTC 时区，差 0s）
+    - 一个 user_id 只有一条记录（自然量用户不在表内）
+
+    返回 {user_id: datetime|None}；查询失败时返回 {} 并记 warning，不影响主流程。
+    """
+    if not user_ids:
+        return {}
+    out: dict[int, Any] = {}
+    batch_size = 1000
+    try:
+        with get_order_conn() as conn:
+            if conn is None:
+                return {}
+            cur = conn.cursor()
+            for i in range(0, len(user_ids), batch_size):
+                batch = user_ids[i:i + batch_size]
+                placeholders = ", ".join(["%s"] * len(batch))
+                cur.execute(
+                    "SELECT user_id, create_time "
+                    f"FROM matrix_advertise.channel_user WHERE user_id IN ({placeholders})",
+                    tuple(int(u) for u in batch),
+                )
+                for row in cur.fetchall():
+                    try:
+                        uid = int(row.get("user_id") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if not uid:
+                        continue
+                    out[uid] = row.get("create_time") or None
+    except Exception as e:
+        logger.warning("today register_time channel_user enrich 失败（忽略）: %s", e)
+        return out
+    logger.info(
+        "today register_time channel_user 命中 %d / %d",
+        len([v for v in out.values() if v]), len(user_ids),
+    )
+    return out
+
+
 def _fetch_register_from_mc(user_ids: list[int]) -> dict[int, Any]:
     """从 MaxCompute dim_user_df 批量查 user_id → register_time_utc。
 
@@ -238,13 +285,15 @@ def list_today(la_ds: Optional[str] = None, *, force_refresh: bool = False) -> d
     pending_set = set(app_repo.list_pending_target_user_ids())
     whitelist_set = set(whitelist_repo.list_whitelisted_user_ids())
 
-    # 注册时间反查：
-    # 1) 先从 T+1 维表 biz_user_payment_summary 拿（已带 register_time_utc 的历史付费用户）；
-    # 2) 没命中的（含今日才付费的新用户）再走 MaxCompute dim_user_df 兜底；
-    # 3) 今天才注册的纯新用户仍可能落空，前端展示 "—"，明日 T+1 同步后补齐。
+    # 注册时间反查（三级 fallback，全部 UTC 时区已对齐）：
+    # 1) PolarDB biz_user_payment_summary：T+1 历史付费用户（最快，本机查询）
+    # 2) PolarDB matrix_advertise.channel_user：实时表（秒级新鲜），覆盖广告渠道注册的今日新用户
+    # 3) MaxCompute metis_dw.dim_user_df：T+1 全量用户兜底（含自然量历史用户）
+    # 今天才注册的"自然量"用户仍可能落空，前端展示 "—"，明日 T+1 同步后补齐。
     user_ids = [int(r.get("user_id") or 0) for r in rows if r.get("user_id")]
     register_map: dict[int, Any] = {}
     if user_ids:
+        # step 1
         try:
             meta = biz_repo.fetch_summary_meta_by_users(user_ids)
             for uid, m in meta.items():
@@ -254,6 +303,18 @@ def list_today(la_ds: Optional[str] = None, *, force_refresh: bool = False) -> d
         except Exception as e:
             logger.warning("today register_time_utc summary enrich 失败，忽略: %s", e)
 
+        # step 2 — 实时兜底（适合今日新用户）
+        missing = [uid for uid in user_ids if uid not in register_map]
+        if missing:
+            try:
+                cu_map = _fetch_register_from_channel_user(missing)
+                for uid, rt in cu_map.items():
+                    if rt:
+                        register_map[uid] = rt
+            except Exception as e:
+                logger.warning("today register_time_utc channel_user enrich 失败，忽略: %s", e)
+
+        # step 3 — T+1 兜底（适合自然量历史用户）
         missing = [uid for uid in user_ids if uid not in register_map]
         if missing:
             try:
