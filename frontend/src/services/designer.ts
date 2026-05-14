@@ -22,6 +22,10 @@ export interface DesignerMaterialItem {
   ad_name: string
   platform: string
   campaign_name: string
+  /** 剧维度（来自 ad_drama_mapping） */
+  localized_drama_name?: string
+  language_code?: string
+  content_key?: string
   spend: number
   impressions: number
   clicks: number
@@ -37,6 +41,10 @@ export interface DesignerSummaryParams {
   endDate: string
   platform?: string
   keyword?: string
+  /** 剧筛选三件套（任意组合） */
+  contentKey?: string
+  dramaKeyword?: string
+  languageCode?: string
 }
 
 export interface DesignerMaterialsParams {
@@ -44,6 +52,21 @@ export interface DesignerMaterialsParams {
   endDate: string
   designerName: string
   platform?: string
+  contentKey?: string
+  dramaKeyword?: string
+  languageCode?: string
+}
+
+export interface DesignerDramaOption {
+  content_key: string
+  localized_drama_name: string
+  language_code: string
+  total_spend: number
+}
+
+export interface DesignerDramaOptionsData {
+  dramas: DesignerDramaOption[]
+  languages: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -69,10 +92,13 @@ export async function fetchDesignerSummary(
 ): Promise<DesignerSummaryItem[]> {
   const r = await apiFetch<ApiResp<DesignerSummaryItem[]>>(
     `/api/designer-performance/summary${qs({
-      start_date: params.startDate,
-      end_date:   params.endDate,
-      platform:   params.platform,
-      keyword:    params.keyword,
+      start_date:    params.startDate,
+      end_date:      params.endDate,
+      platform:      params.platform,
+      keyword:       params.keyword,
+      content_key:   params.contentKey,
+      drama_keyword: params.dramaKeyword,
+      language_code: params.languageCode,
     })}`,
   )
   return r.data
@@ -87,6 +113,24 @@ export async function fetchDesignerMaterials(
       end_date:      params.endDate,
       designer_name: params.designerName,
       platform:      params.platform,
+      content_key:   params.contentKey,
+      drama_keyword: params.dramaKeyword,
+      language_code: params.languageCode,
+    })}`,
+  )
+  return r.data
+}
+
+export async function fetchDesignerDramaOptions(params: {
+  startDate: string
+  endDate: string
+  platform?: string
+}): Promise<DesignerDramaOptionsData> {
+  const r = await apiFetch<ApiResp<DesignerDramaOptionsData>>(
+    `/api/designer-performance/drama-options${qs({
+      start_date: params.startDate,
+      end_date:   params.endDate,
+      platform:   params.platform,
     })}`,
   )
   return r.data

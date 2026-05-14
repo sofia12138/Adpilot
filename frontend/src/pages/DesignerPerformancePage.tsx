@@ -9,6 +9,7 @@ import { GlobalSyncBar } from '@/components/common/GlobalSyncBar'
 import {
   fetchDesignerSummary,
   fetchDesignerMaterials,
+  fetchDesignerDramaOptions,
   type DesignerSummaryItem,
   type DesignerMaterialItem,
 } from '@/services/designer'
@@ -52,6 +53,7 @@ function MaterialDetailTable({ items }: { items: DesignerMaterialItem[] }) {
         <thead>
           <tr className="border-b border-gray-100 bg-gray-50/60">
             <th className="px-4 py-2.5 text-left font-medium text-gray-400 whitespace-nowrap" style={{ width: '280px', maxWidth: '280px' }}>素材名称</th>
+            <th className="px-4 py-2.5 text-left font-medium text-gray-400 whitespace-nowrap">剧名</th>
             <th className="px-4 py-2.5 text-left font-medium text-gray-400 whitespace-nowrap">剧集/活动</th>
             <th className="px-4 py-2.5 text-left font-medium text-gray-400 whitespace-nowrap">平台</th>
             <th className="px-4 py-2.5 text-right font-medium text-gray-400 whitespace-nowrap tabular-nums">消耗</th>
@@ -71,6 +73,23 @@ function MaterialDetailTable({ items }: { items: DesignerMaterialItem[] }) {
                 >
                   {m.ad_name || m.ad_id || '--'}
                 </span>
+              </td>
+              <td className="px-4 py-2.5">
+                {m.localized_drama_name ? (
+                  <div className="flex flex-col gap-0.5 max-w-[160px]">
+                    <span
+                      className="text-xs text-gray-700 truncate"
+                      title={m.localized_drama_name}
+                    >
+                      {m.localized_drama_name}
+                    </span>
+                    {m.language_code && (
+                      <span className="text-[10px] text-gray-400">{m.language_code}</span>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-gray-300 text-xs">--</span>
+                )}
               </td>
               <td className="px-4 py-2.5">
                 <span
@@ -103,18 +122,31 @@ interface DesignerRowProps {
   startDate: string
   endDate: string
   platform: string
+  contentKey: string
+  dramaKeyword: string
+  languageCode: string
 }
 
-function DesignerRow({ row, startDate, endDate, platform }: DesignerRowProps) {
+function DesignerRow({
+  row, startDate, endDate, platform,
+  contentKey, dramaKeyword, languageCode,
+}: DesignerRowProps) {
   const [expanded, setExpanded] = useState(false)
 
   const { data: materials, isLoading: matLoading } = useQuery({
-    queryKey: ['designer-materials', row.designer_name, startDate, endDate, platform],
+    queryKey: [
+      'designer-materials', row.designer_name,
+      startDate, endDate, platform,
+      contentKey, dramaKeyword, languageCode,
+    ],
     queryFn: () => fetchDesignerMaterials({
       startDate,
       endDate,
       designerName: row.designer_name,
       platform: platform || undefined,
+      contentKey: contentKey || undefined,
+      dramaKeyword: dramaKeyword || undefined,
+      languageCode: languageCode || undefined,
     }),
     enabled: expanded,
     staleTime: 60_000,
@@ -164,6 +196,7 @@ function DesignerRow({ row, startDate, endDate, platform }: DesignerRowProps) {
           </td>
         </tr>
       )}
+
     </>
   )
 }
@@ -178,13 +211,37 @@ export default function DesignerPerformancePage() {
   const [keyword, setKeyword] = useState('')
   const [keywordInput, setKeywordInput] = useState('')
 
-  const { data, isLoading, isError } = useQuery({
-    queryKey: ['designer-performance', 'summary', dateRange.startDate, dateRange.endDate, platform, keyword],
-    queryFn: () => fetchDesignerSummary({
+  // 剧筛选
+  const [contentKey, setContentKey] = useState('')
+  const [languageCode, setLanguageCode] = useState('')
+  const [dramaKwInput, setDramaKwInput] = useState('')
+  const [dramaKeyword, setDramaKeyword] = useState('')
+
+  // 剧筛选下拉选项（按日期 + 平台动态获取）
+  const { data: dramaOpts } = useQuery({
+    queryKey: ['designer-drama-options', dateRange.startDate, dateRange.endDate, platform],
+    queryFn: () => fetchDesignerDramaOptions({
       startDate: dateRange.startDate,
-      endDate: dateRange.endDate,
-      platform: platform || undefined,
-      keyword: keyword || undefined,
+      endDate:   dateRange.endDate,
+      platform:  platform || undefined,
+    }),
+    staleTime: 60_000,
+  })
+
+  const { data, isLoading, isError } = useQuery({
+    queryKey: [
+      'designer-performance', 'summary',
+      dateRange.startDate, dateRange.endDate, platform, keyword,
+      contentKey, dramaKeyword, languageCode,
+    ],
+    queryFn: () => fetchDesignerSummary({
+      startDate:    dateRange.startDate,
+      endDate:      dateRange.endDate,
+      platform:     platform || undefined,
+      keyword:      keyword || undefined,
+      contentKey:   contentKey || undefined,
+      dramaKeyword: dramaKeyword || undefined,
+      languageCode: languageCode || undefined,
     }),
     staleTime: 30_000,
   })
@@ -208,6 +265,24 @@ export default function DesignerPerformancePage() {
     setKeyword('')
   }, [])
 
+  const handleSearchDrama = useCallback(() => {
+    setDramaKeyword(dramaKwInput.trim())
+  }, [dramaKwInput])
+
+  const handleClearDramaKw = useCallback(() => {
+    setDramaKwInput('')
+    setDramaKeyword('')
+  }, [])
+
+  const handleResetDramaFilters = useCallback(() => {
+    setContentKey('')
+    setLanguageCode('')
+    setDramaKwInput('')
+    setDramaKeyword('')
+  }, [])
+
+  const hasDramaFilter = !!(contentKey || dramaKeyword || languageCode)
+
   return (
     <div className="max-w-7xl mx-auto">
       <PageHeader title="设计师人效报表" description="按设计师维度汇总素材投放表现，点击设计师行可展开素材明细" />
@@ -228,6 +303,74 @@ export default function DesignerPerformancePage() {
             <option value="tiktok">TikTok</option>
             <option value="meta">Meta</option>
           </select>
+
+          {/* 剧（content_key 精确匹配） */}
+          <select
+            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100 max-w-[260px]"
+            value={contentKey}
+            onChange={e => setContentKey(e.target.value)}
+            title={dramaOpts?.dramas.length ? `共 ${dramaOpts.dramas.length} 部剧（按消耗排序）` : ''}
+          >
+            <option value="">全部剧（{dramaOpts?.dramas.length ?? 0}）</option>
+            {(dramaOpts?.dramas ?? []).map(d => (
+              <option key={d.content_key} value={d.content_key}>
+                {d.localized_drama_name || d.content_key}
+                {d.language_code ? ` · ${d.language_code}` : ''}
+              </option>
+            ))}
+          </select>
+
+          {/* 语言 */}
+          <select
+            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            value={languageCode}
+            onChange={e => setLanguageCode(e.target.value)}
+          >
+            <option value="">全部语言</option>
+            {(dramaOpts?.languages ?? []).map(l => (
+              <option key={l} value={l}>{l}</option>
+            ))}
+          </select>
+
+          {/* 剧名关键词搜索 */}
+          <div className="flex items-center gap-1.5">
+            <div className="relative flex items-center">
+              <Search className="absolute left-2.5 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+              <input
+                type="text"
+                placeholder="搜索剧名..."
+                className="text-sm border border-gray-200 rounded-lg pl-8 pr-8 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100 w-44"
+                value={dramaKwInput}
+                onChange={e => setDramaKwInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleSearchDrama()}
+              />
+              {dramaKwInput && (
+                <button
+                  className="absolute right-2 text-gray-300 hover:text-gray-500"
+                  onClick={handleClearDramaKw}
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+            <button
+              className="text-sm px-3 py-1.5 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+              onClick={handleSearchDrama}
+            >
+              搜索剧
+            </button>
+          </div>
+
+          {hasDramaFilter && (
+            <button
+              className="text-xs px-2 py-1 text-gray-400 hover:text-gray-700 hover:bg-gray-50 rounded transition-colors"
+              onClick={handleResetDramaFilters}
+            >
+              清除剧筛选
+            </button>
+          )}
+
+          <span className="text-gray-200 select-none">|</span>
 
           {/* 设计师关键词搜索 */}
           <div className="flex items-center gap-1.5">
@@ -291,7 +434,12 @@ export default function DesignerPerformancePage() {
           {/* 主表格 */}
           <SectionCard
             title="设计师人效汇总"
-            extra={<span className="text-xs text-gray-400">共 {rows.length} 位设计师 · 点击行展开素材明细</span>}
+            extra={
+              <span className="text-xs text-gray-400">
+                共 {rows.length} 位设计师 · 点击行展开素材明细
+                {hasDramaFilter && ' · 已应用剧筛选'}
+              </span>
+            }
             noPadding
           >
             {rows.length === 0 ? (
@@ -322,6 +470,9 @@ export default function DesignerPerformancePage() {
                         startDate={dateRange.startDate}
                         endDate={dateRange.endDate}
                         platform={platform}
+                        contentKey={contentKey}
+                        dramaKeyword={dramaKeyword}
+                        languageCode={languageCode}
                       />
                     ))}
                   </tbody>

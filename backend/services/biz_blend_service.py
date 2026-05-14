@@ -537,8 +537,17 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
                       campaign_id: Optional[str] = None,
                       adgroup_id: Optional[str] = None,
                       name_filter: Optional[str] = None,
+                      content_key: Optional[str] = None,
+                      drama_keyword: Optional[str] = None,
+                      language_code: Optional[str] = None,
                       order_by: str = "total_spend",
                       order_dir: str = "desc") -> list[dict]:
+    from repositories._drama_filter import (
+        drama_filter_where,
+        drama_join_for_normalized,
+        drama_select_fields,
+    )
+
     n_filter, n_args = _build_filter_n(platform, account_id)
     attr_sql, attr_args = _attr_subquery("ad", start_date, end_date, platform, account_id)
     order_col = _AD_AGG_ORDER_MAP.get(order_by, "total_spend")
@@ -556,6 +565,15 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
         extra_clauses.append("n.ad_name LIKE %s")
         extra_args.append(f"%{name_filter}%")
     extra_sql = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
+
+    drama_join_sql = drama_join_for_normalized(main_alias="n", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
+    drama_select_sql = drama_select_fields(mapping_alias="m", aggregate=True)
 
     sql = f"""
     SELECT
@@ -592,18 +610,20 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
              ELSE NULL END                          AS cpa,
         CASE WHEN SUM(n.spend) > 0
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
-             ELSE NULL END                          AS roas
+             ELSE NULL END                          AS roas,
+        {drama_select_sql}
     FROM biz_ad_daily_normalized n
     LEFT JOIN ({attr_sql}) a
         ON a.d      = n.stat_date
        AND a.plat   = n.platform
        AND a.acc    = n.account_id
        AND a.key_id = n.ad_id
-    WHERE n.stat_date BETWEEN %s AND %s {n_filter} {extra_sql}
+    {drama_join_sql}
+    WHERE n.stat_date BETWEEN %s AND %s {n_filter} {extra_sql} {drama_where_sql}
     GROUP BY n.platform, n.account_id, n.campaign_id, n.adgroup_id, n.ad_id
     ORDER BY {order_col} {order_dir_l}
     """
-    args = attr_args + [start_date, end_date] + n_args + extra_args
+    args = attr_args + [start_date, end_date] + n_args + extra_args + drama_where_args
     return _query_all(sql, args)
 
 

@@ -14,6 +14,11 @@ from __future__ import annotations
 from typing import Optional
 
 from db import get_biz_conn
+from repositories._drama_filter import (
+    drama_filter_where,
+    drama_join_for_attribution,
+    drama_join_for_normalized,
+)
 
 # attribution.platform=facebook → 输出回 meta（与前端 platform 筛选保持一致）
 _PLATFORM_OUT_EXPR = "CASE WHEN platform = 'facebook' THEN 'meta' ELSE platform END"
@@ -53,41 +58,53 @@ def get_designer_summary(
     *,
     platform: Optional[str] = None,
     keyword: Optional[str] = None,
+    content_key: Optional[str] = None,
+    drama_keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
 ) -> list[dict]:
     """按设计师维度聚合，返回各设计师的消耗/展示/点击等汇总数据"""
-    clauses = ["stat_date BETWEEN %s AND %s"]
+    clauses = ["n.stat_date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
 
     if platform:
-        clauses.append("platform = %s")
+        clauses.append("n.platform = %s")
         params.append(platform)
 
     where = " AND ".join(clauses)
-    expr = _designer_expr()
+    expr = _designer_expr().replace("ad_name", "n.ad_name")
+
+    drama_join_sql = drama_join_for_normalized(main_alias="n", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
 
     sql = f"""
         SELECT
             ({expr})                    AS designer_name,
-            COUNT(DISTINCT ad_id)       AS material_count,
-            SUM(spend)                  AS total_spend,
-            SUM(impressions)            AS impressions,
-            SUM(clicks)                 AS clicks,
-            SUM(installs)               AS installs,
-            SUM(conversions)            AS conversions,
-            SUM(revenue)                AS purchase_value,
-            CASE WHEN SUM(impressions) > 0
-                 THEN ROUND(SUM(clicks)   / SUM(impressions), 6) ELSE NULL END AS ctr,
-            CASE WHEN SUM(spend) > 0
-                 THEN ROUND(SUM(revenue)  / SUM(spend),       4) ELSE NULL END AS roas
-        FROM biz_ad_daily_normalized
-        WHERE {where}
+            COUNT(DISTINCT n.ad_id)     AS material_count,
+            SUM(n.spend)                AS total_spend,
+            SUM(n.impressions)          AS impressions,
+            SUM(n.clicks)               AS clicks,
+            SUM(n.installs)             AS installs,
+            SUM(n.conversions)          AS conversions,
+            SUM(n.revenue)              AS purchase_value,
+            CASE WHEN SUM(n.impressions) > 0
+                 THEN ROUND(SUM(n.clicks)  / SUM(n.impressions), 6) ELSE NULL END AS ctr,
+            CASE WHEN SUM(n.spend) > 0
+                 THEN ROUND(SUM(n.revenue) / SUM(n.spend),       4) ELSE NULL END AS roas
+        FROM biz_ad_daily_normalized n
+        {drama_join_sql}
+        WHERE {where} {drama_where_sql}
         GROUP BY designer_name
         ORDER BY total_spend DESC
     """
 
     with get_biz_conn() as conn:
         cur = conn.cursor()
-        cur.execute(sql, params)
+        cur.execute(sql, params + drama_where_args)
         rows = cur.fetchall()
 
     # keyword 过滤在 Python 侧完成（避免在 HAVING 中重复 CASE 表达式）
@@ -108,47 +125,62 @@ def get_designer_materials(
     designer_name: str,
     *,
     platform: Optional[str] = None,
+    content_key: Optional[str] = None,
+    drama_keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
 ) -> list[dict]:
     """返回某设计师在指定时间范围内的素材明细（按 ad 维度聚合）"""
-    expr = _designer_expr()
+    expr = _designer_expr().replace("ad_name", "n.ad_name")
 
     clauses = [
-        "stat_date BETWEEN %s AND %s",
+        "n.stat_date BETWEEN %s AND %s",
         f"({expr}) = %s",
     ]
     params: list = [start_date, end_date, designer_name]
 
     if platform:
-        clauses.append("platform = %s")
+        clauses.append("n.platform = %s")
         params.append(platform)
 
     where = " AND ".join(clauses)
 
+    drama_join_sql = drama_join_for_normalized(main_alias="n", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
+
     sql = f"""
         SELECT
-            ad_id,
-            MAX(ad_name)            AS ad_name,
-            platform,
-            MAX(campaign_name)      AS campaign_name,
-            SUM(spend)              AS spend,
-            SUM(impressions)        AS impressions,
-            SUM(clicks)             AS clicks,
-            SUM(installs)           AS installs,
-            SUM(conversions)        AS registrations,
-            SUM(revenue)            AS purchase_value,
-            CASE WHEN SUM(impressions) > 0
-                 THEN ROUND(SUM(clicks)  / SUM(impressions), 6) ELSE NULL END AS ctr,
-            CASE WHEN SUM(spend) > 0
-                 THEN ROUND(SUM(revenue) / SUM(spend),       4) ELSE NULL END AS roas
-        FROM biz_ad_daily_normalized
-        WHERE {where}
-        GROUP BY ad_id, platform
+            n.ad_id                 AS ad_id,
+            MAX(n.ad_name)          AS ad_name,
+            n.platform              AS platform,
+            MAX(n.campaign_name)    AS campaign_name,
+            MAX(m.localized_drama_name) AS localized_drama_name,
+            MAX(m.language_code)        AS language_code,
+            MAX(m.content_key)          AS content_key,
+            SUM(n.spend)            AS spend,
+            SUM(n.impressions)      AS impressions,
+            SUM(n.clicks)           AS clicks,
+            SUM(n.installs)         AS installs,
+            SUM(n.conversions)      AS registrations,
+            SUM(n.revenue)          AS purchase_value,
+            CASE WHEN SUM(n.impressions) > 0
+                 THEN ROUND(SUM(n.clicks)  / SUM(n.impressions), 6) ELSE NULL END AS ctr,
+            CASE WHEN SUM(n.spend) > 0
+                 THEN ROUND(SUM(n.revenue) / SUM(n.spend),       4) ELSE NULL END AS roas
+        FROM biz_ad_daily_normalized n
+        {drama_join_sql}
+        WHERE {where} {drama_where_sql}
+        GROUP BY n.ad_id, n.platform
         ORDER BY spend DESC
     """
 
     with get_biz_conn() as conn:
         cur = conn.cursor()
-        cur.execute(sql, params)
+        cur.execute(sql, params + drama_where_args)
         return cur.fetchall()
 
 
@@ -164,44 +196,56 @@ def get_designer_summary_attribution(
     *,
     platform: Optional[str] = None,
     keyword: Optional[str] = None,
+    content_key: Optional[str] = None,
+    drama_keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
 ) -> list[dict]:
     """按设计师维度聚合（attribution 数据源）"""
-    clauses = ["ds_account_local BETWEEN %s AND %s"]
+    clauses = ["a.ds_account_local BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
 
     p = _normalize_platform_for_attribution(platform)
     if p:
-        clauses.append("platform = %s")
+        clauses.append("a.platform = %s")
         params.append(p)
 
     where = " AND ".join(clauses)
-    expr = _designer_expr()
+    expr = _designer_expr().replace("ad_name", "a.ad_name")
+
+    drama_join_sql = drama_join_for_attribution(main_alias="a", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
 
     sql = f"""
         SELECT
             ({expr})                       AS designer_name,
-            COUNT(DISTINCT ad_id)          AS material_count,
-            SUM(spend)                     AS total_spend,
-            SUM(impressions)               AS impressions,
-            SUM(clicks)                    AS clicks,
-            SUM(activation)                AS installs,
-            SUM(registration)              AS conversions,
-            SUM(total_recharge_amount)     AS purchase_value,
-            CASE WHEN SUM(impressions) > 0
-                 THEN ROUND(SUM(clicks) / SUM(impressions), 6)
+            COUNT(DISTINCT a.ad_id)        AS material_count,
+            SUM(a.spend)                   AS total_spend,
+            SUM(a.impressions)             AS impressions,
+            SUM(a.clicks)                  AS clicks,
+            SUM(a.activation)              AS installs,
+            SUM(a.registration)            AS conversions,
+            SUM(a.total_recharge_amount)   AS purchase_value,
+            CASE WHEN SUM(a.impressions) > 0
+                 THEN ROUND(SUM(a.clicks) / SUM(a.impressions), 6)
                  ELSE NULL END                                            AS ctr,
-            CASE WHEN SUM(spend) > 0
-                 THEN ROUND(SUM(total_recharge_amount) / SUM(spend), 4)
+            CASE WHEN SUM(a.spend) > 0
+                 THEN ROUND(SUM(a.total_recharge_amount) / SUM(a.spend), 4)
                  ELSE NULL END                                            AS roas
-        FROM biz_attribution_ad_daily
-        WHERE {where}
+        FROM biz_attribution_ad_daily a
+        {drama_join_sql}
+        WHERE {where} {drama_where_sql}
         GROUP BY designer_name
         ORDER BY total_spend DESC
     """
 
     with get_biz_conn() as conn:
         cur = conn.cursor()
-        cur.execute(sql, params)
+        cur.execute(sql, params + drama_where_args)
         rows = cur.fetchall()
 
     if keyword:
@@ -217,54 +261,71 @@ def get_designer_materials_attribution(
     designer_name: str,
     *,
     platform: Optional[str] = None,
+    content_key: Optional[str] = None,
+    drama_keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
 ) -> list[dict]:
     """返回某设计师在指定时间范围内的素材明细（attribution 数据源）
 
     顺手修原 _legacy 版本的 bug：原来 registrations = SUM(conversions)
     在数仓口径下应为 SUM(registration)。
     """
-    expr = _designer_expr()
+    expr = _designer_expr().replace("ad_name", "a.ad_name")
 
     clauses = [
-        "ds_account_local BETWEEN %s AND %s",
+        "a.ds_account_local BETWEEN %s AND %s",
         f"({expr}) = %s",
     ]
     params: list = [start_date, end_date, designer_name]
 
     p = _normalize_platform_for_attribution(platform)
     if p:
-        clauses.append("platform = %s")
+        clauses.append("a.platform = %s")
         params.append(p)
 
     where = " AND ".join(clauses)
 
+    drama_join_sql = drama_join_for_attribution(main_alias="a", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
+
+    plat_out = "CASE WHEN a.platform = 'facebook' THEN 'meta' ELSE a.platform END"
+
     sql = f"""
         SELECT
-            ad_id,
-            MAX(ad_name)                          AS ad_name,
-            {_PLATFORM_OUT_EXPR}                  AS platform,
-            MAX(campaign_name)                    AS campaign_name,
-            SUM(spend)                            AS spend,
-            SUM(impressions)                      AS impressions,
-            SUM(clicks)                           AS clicks,
-            SUM(activation)                       AS installs,
-            SUM(registration)                     AS registrations,
-            SUM(total_recharge_amount)            AS purchase_value,
-            CASE WHEN SUM(impressions) > 0
-                 THEN ROUND(SUM(clicks) / SUM(impressions), 6)
+            a.ad_id                               AS ad_id,
+            MAX(a.ad_name)                        AS ad_name,
+            {plat_out}                            AS platform,
+            MAX(a.campaign_name)                  AS campaign_name,
+            MAX(m.localized_drama_name)           AS localized_drama_name,
+            MAX(m.language_code)                  AS language_code,
+            MAX(m.content_key)                    AS content_key,
+            SUM(a.spend)                          AS spend,
+            SUM(a.impressions)                    AS impressions,
+            SUM(a.clicks)                         AS clicks,
+            SUM(a.activation)                     AS installs,
+            SUM(a.registration)                   AS registrations,
+            SUM(a.total_recharge_amount)          AS purchase_value,
+            CASE WHEN SUM(a.impressions) > 0
+                 THEN ROUND(SUM(a.clicks) / SUM(a.impressions), 6)
                  ELSE NULL END                                            AS ctr,
-            CASE WHEN SUM(spend) > 0
-                 THEN ROUND(SUM(total_recharge_amount) / SUM(spend), 4)
+            CASE WHEN SUM(a.spend) > 0
+                 THEN ROUND(SUM(a.total_recharge_amount) / SUM(a.spend), 4)
                  ELSE NULL END                                            AS roas
-        FROM biz_attribution_ad_daily
-        WHERE {where}
-        GROUP BY ad_id, platform
+        FROM biz_attribution_ad_daily a
+        {drama_join_sql}
+        WHERE {where} {drama_where_sql}
+        GROUP BY a.ad_id, a.platform
         ORDER BY spend DESC
     """
 
     with get_biz_conn() as conn:
         cur = conn.cursor()
-        cur.execute(sql, params)
+        cur.execute(sql, params + drama_where_args)
         return cur.fetchall()
 
 
@@ -353,6 +414,9 @@ def get_designer_summary_blend(
     *,
     platform: Optional[str] = None,
     keyword: Optional[str] = None,
+    content_key: Optional[str] = None,
+    drama_keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
 ) -> list[dict]:
     """按设计师维度聚合（blend 数据源）"""
     n_clauses = ["n.stat_date BETWEEN %s AND %s"]
@@ -364,6 +428,14 @@ def get_designer_summary_blend(
 
     attr_sql, attr_args = _attr_subquery_ad_grain(start_date, end_date, platform)
     expr = _designer_expr().replace("ad_name", "n.ad_name")
+
+    drama_join_sql = drama_join_for_normalized(main_alias="n", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
 
     sql = f"""
         SELECT
@@ -387,11 +459,12 @@ def get_designer_summary_blend(
            AND a.plat  = n.platform
            AND a.acc   = n.account_id
            AND a.ad_id = n.ad_id
-        WHERE {n_where}
+        {drama_join_sql}
+        WHERE {n_where} {drama_where_sql}
         GROUP BY designer_name
         ORDER BY total_spend DESC
     """
-    args = attr_args + n_params
+    args = attr_args + n_params + drama_where_args
 
     with get_biz_conn() as conn:
         cur = conn.cursor()
@@ -411,6 +484,9 @@ def get_designer_materials_blend(
     designer_name: str,
     *,
     platform: Optional[str] = None,
+    content_key: Optional[str] = None,
+    drama_keyword: Optional[str] = None,
+    language_code: Optional[str] = None,
 ) -> list[dict]:
     """返回某设计师的素材明细（blend 数据源）"""
     expr = _designer_expr().replace("ad_name", "n.ad_name")
@@ -427,12 +503,23 @@ def get_designer_materials_blend(
 
     attr_sql, attr_args = _attr_subquery_ad_grain(start_date, end_date, platform)
 
+    drama_join_sql = drama_join_for_normalized(main_alias="n", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
+
     sql = f"""
         SELECT
             n.ad_id                               AS ad_id,
             MAX(n.ad_name)                        AS ad_name,
             n.platform                            AS platform,
             MAX(n.campaign_name)                  AS campaign_name,
+            MAX(m.localized_drama_name)           AS localized_drama_name,
+            MAX(m.language_code)                  AS language_code,
+            MAX(m.content_key)                    AS content_key,
             SUM(n.spend)                          AS spend,
             SUM(n.impressions)                    AS impressions,
             SUM(n.clicks)                         AS clicks,
@@ -451,11 +538,12 @@ def get_designer_materials_blend(
            AND a.plat  = n.platform
            AND a.acc   = n.account_id
            AND a.ad_id = n.ad_id
-        WHERE {n_where}
+        {drama_join_sql}
+        WHERE {n_where} {drama_where_sql}
         GROUP BY n.ad_id, n.platform
         ORDER BY spend DESC
     """
-    args = attr_args + n_params
+    args = attr_args + n_params + drama_where_args
 
     with get_biz_conn() as conn:
         cur = conn.cursor()

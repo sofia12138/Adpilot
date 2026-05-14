@@ -96,16 +96,18 @@ def _normalize_account_id(account_id: Optional[str]) -> Optional[str]:
 
 
 def _build_filter_extra(platform: Optional[str],
-                        account_id: Optional[str]) -> tuple[str, list]:
+                        account_id: Optional[str],
+                        table_alias: str = "") -> tuple[str, list]:
     parts: list[str] = []
     args: list = []
     p = _normalize_platform(platform)
     a = _normalize_account_id(account_id)
+    prefix = f"{table_alias}." if table_alias else ""
     if p:
-        parts.append("platform = %s")
+        parts.append(f"{prefix}platform = %s")
         args.append(p)
     if a:
-        parts.append("account_id = %s")
+        parts.append(f"{prefix}account_id = %s")
         args.append(a)
     sql_part = (" AND " + " AND ".join(parts)) if parts else ""
     return sql_part, args
@@ -290,66 +292,86 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
                       campaign_id: Optional[str] = None,
                       adgroup_id: Optional[str] = None,
                       name_filter: Optional[str] = None,
+                      content_key: Optional[str] = None,
+                      drama_keyword: Optional[str] = None,
+                      language_code: Optional[str] = None,
                       order_by: str = "total_spend",
                       order_dir: str = "desc") -> list[dict]:
     """ad_id 维度聚合，返回结构与 biz_ad_daily_repository.get_ad_aggregated 兼容"""
-    extra_sql, extra_args = _build_filter_extra(platform, account_id)
+    from repositories._drama_filter import (
+        drama_filter_where,
+        drama_join_for_attribution,
+        drama_select_fields,
+    )
+
+    extra_sql, extra_args = _build_filter_extra(platform, account_id, table_alias="a")
     order_col = _AD_AGG_ORDER_MAP.get(order_by, "total_spend")
     order_dir_l = order_dir.lower() if order_dir.lower() in ("asc", "desc") else "desc"
 
     extra_clauses: list[str] = []
     extra_args2: list = []
     if campaign_id:
-        extra_clauses.append("campaign_id = %s")
+        extra_clauses.append("a.campaign_id = %s")
         extra_args2.append(campaign_id)
     if adgroup_id:
-        extra_clauses.append("adgroup_id = %s")
+        extra_clauses.append("a.adgroup_id = %s")
         extra_args2.append(adgroup_id)
     if name_filter:
-        extra_clauses.append("ad_name LIKE %s")
+        extra_clauses.append("a.ad_name LIKE %s")
         extra_args2.append(f"%{name_filter}%")
     extra2_sql = (" AND " + " AND ".join(extra_clauses)) if extra_clauses else ""
 
+    drama_join_sql = drama_join_for_attribution(main_alias="a", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
+    drama_select_sql = drama_select_fields(mapping_alias="m", aggregate=True)
+
     sql = f"""
         SELECT
-            {_PLATFORM_OUT_EXPR}                 AS platform,
-            account_id,
-            campaign_id,
-            MAX(campaign_name)                   AS campaign_name,
-            adgroup_id,
-            MAX(adgroup_name)                    AS adgroup_name,
-            ad_id,
-            MAX(ad_name)                         AS ad_name,
-            SUM(spend)                           AS total_spend,
-            SUM(total_recharge_amount)           AS total_revenue,
-            SUM(impressions)                     AS total_impressions,
-            SUM(clicks)                          AS total_clicks,
-            SUM(activation)                      AS total_installs,
-            SUM(purchase)                        AS total_conversions,
-            CASE WHEN SUM(impressions) > 0
-                 THEN ROUND(SUM(clicks) / SUM(impressions), 6)
-                 ELSE NULL END                   AS ctr,
-            CASE WHEN SUM(clicks) > 0
-                 THEN ROUND(SUM(spend) / SUM(clicks), 4)
-                 ELSE NULL END                   AS cpc,
-            CASE WHEN SUM(impressions) > 0
-                 THEN ROUND(SUM(spend) / SUM(impressions) * 1000, 4)
-                 ELSE NULL END                   AS cpm,
-            CASE WHEN SUM(activation) > 0
-                 THEN ROUND(SUM(spend) / SUM(activation), 4)
-                 ELSE NULL END                   AS cpi,
-            CASE WHEN SUM(purchase) > 0
-                 THEN ROUND(SUM(spend) / SUM(purchase), 4)
-                 ELSE NULL END                   AS cpa,
-            CASE WHEN SUM(spend) > 0
-                 THEN ROUND(SUM(total_recharge_amount) / SUM(spend), 4)
-                 ELSE NULL END                   AS roas
-        FROM biz_attribution_ad_daily
-        WHERE ds_account_local BETWEEN %s AND %s {extra_sql} {extra2_sql}
-        GROUP BY platform, account_id, campaign_id, adgroup_id, ad_id
+            CASE WHEN a.platform = 'facebook' THEN 'meta' ELSE a.platform END AS platform,
+            a.account_id                          AS account_id,
+            a.campaign_id                         AS campaign_id,
+            MAX(a.campaign_name)                  AS campaign_name,
+            a.adgroup_id                          AS adgroup_id,
+            MAX(a.adgroup_name)                   AS adgroup_name,
+            a.ad_id                               AS ad_id,
+            MAX(a.ad_name)                        AS ad_name,
+            SUM(a.spend)                          AS total_spend,
+            SUM(a.total_recharge_amount)          AS total_revenue,
+            SUM(a.impressions)                    AS total_impressions,
+            SUM(a.clicks)                         AS total_clicks,
+            SUM(a.activation)                     AS total_installs,
+            SUM(a.purchase)                       AS total_conversions,
+            CASE WHEN SUM(a.impressions) > 0
+                 THEN ROUND(SUM(a.clicks) / SUM(a.impressions), 6)
+                 ELSE NULL END                    AS ctr,
+            CASE WHEN SUM(a.clicks) > 0
+                 THEN ROUND(SUM(a.spend) / SUM(a.clicks), 4)
+                 ELSE NULL END                    AS cpc,
+            CASE WHEN SUM(a.impressions) > 0
+                 THEN ROUND(SUM(a.spend) / SUM(a.impressions) * 1000, 4)
+                 ELSE NULL END                    AS cpm,
+            CASE WHEN SUM(a.activation) > 0
+                 THEN ROUND(SUM(a.spend) / SUM(a.activation), 4)
+                 ELSE NULL END                    AS cpi,
+            CASE WHEN SUM(a.purchase) > 0
+                 THEN ROUND(SUM(a.spend) / SUM(a.purchase), 4)
+                 ELSE NULL END                    AS cpa,
+            CASE WHEN SUM(a.spend) > 0
+                 THEN ROUND(SUM(a.total_recharge_amount) / SUM(a.spend), 4)
+                 ELSE NULL END                    AS roas,
+            {drama_select_sql}
+        FROM biz_attribution_ad_daily a
+        {drama_join_sql}
+        WHERE a.ds_account_local BETWEEN %s AND %s {extra_sql} {extra2_sql} {drama_where_sql}
+        GROUP BY platform, a.account_id, a.campaign_id, a.adgroup_id, a.ad_id
         ORDER BY {order_col} {order_dir_l}
     """
-    args = [start_date, end_date] + extra_args + extra_args2
+    args = [start_date, end_date] + extra_args + extra_args2 + drama_where_args
     return _query_all(sql, args)
 
 

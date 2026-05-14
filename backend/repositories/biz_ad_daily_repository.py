@@ -84,23 +84,25 @@ def _build_where(platform: str | None, account_id: str | None,
                  start_date: str, end_date: str,
                  name_filter: str | None = None,
                  campaign_id: str | None = None,
-                 adgroup_id: str | None = None) -> tuple[str, list]:
-    clauses = ["stat_date BETWEEN %s AND %s"]
+                 adgroup_id: str | None = None,
+                 table_alias: str = "") -> tuple[str, list]:
+    prefix = f"{table_alias}." if table_alias else ""
+    clauses = [f"{prefix}stat_date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
     if platform:
-        clauses.append("platform = %s")
+        clauses.append(f"{prefix}platform = %s")
         params.append(platform)
     if account_id:
-        clauses.append("account_id = %s")
+        clauses.append(f"{prefix}account_id = %s")
         params.append(account_id)
     if campaign_id:
-        clauses.append("campaign_id = %s")
+        clauses.append(f"{prefix}campaign_id = %s")
         params.append(campaign_id)
     if adgroup_id:
-        clauses.append("adgroup_id = %s")
+        clauses.append(f"{prefix}adgroup_id = %s")
         params.append(adgroup_id)
     if name_filter:
-        clauses.append("ad_name LIKE %s")
+        clauses.append(f"{prefix}ad_name LIKE %s")
         params.append(f"%{name_filter}%")
     return " AND ".join(clauses), params
 
@@ -157,10 +159,20 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
                       account_id: str | None = None,
                       campaign_id: str | None = None,
                       adgroup_id: str | None = None,
+                      content_key: str | None = None,
+                      drama_keyword: str | None = None,
+                      language_code: str | None = None,
                       order_by: str = "total_spend",
                       order_dir: str = "desc") -> list[dict]:
+    from repositories._drama_filter import (
+        drama_filter_where,
+        drama_join_for_normalized,
+        drama_select_fields,
+    )
+
     where, params = _build_where(platform, account_id, start_date, end_date,
-                                 campaign_id=campaign_id, adgroup_id=adgroup_id)
+                                 campaign_id=campaign_id, adgroup_id=adgroup_id,
+                                 table_alias="n")
     _AGG_ORDER = {
         "total_spend", "total_revenue", "total_impressions", "total_clicks",
         "total_installs", "total_conversions", "ctr", "cpc", "cpm", "cpi", "cpa", "roas",
@@ -169,29 +181,45 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
     order_col = order_by if order_by in _AGG_ORDER else "total_spend"
     if order_dir.lower() not in ("asc", "desc"):
         order_dir = "desc"
+
+    drama_join_sql = drama_join_for_normalized(main_alias="n", mapping_alias="m")
+    drama_where_sql, drama_where_args = drama_filter_where(
+        content_key=content_key,
+        drama_keyword=drama_keyword,
+        language_code=language_code,
+        mapping_alias="m",
+    )
+    drama_select_sql = drama_select_fields(mapping_alias="m", aggregate=True)
+
     sql = f"""
-        SELECT platform, account_id,
-               campaign_id, MAX(campaign_name) AS campaign_name,
-               adgroup_id, MAX(adgroup_name)   AS adgroup_name,
-               ad_id, MAX(ad_name)             AS ad_name,
-               SUM(spend)                      AS total_spend,
-               SUM(revenue)                    AS total_revenue,
-               SUM(impressions)                AS total_impressions,
-               SUM(clicks)                     AS total_clicks,
-               SUM(installs)                   AS total_installs,
-               SUM(conversions)                AS total_conversions,
-               CASE WHEN SUM(impressions)>0 THEN ROUND(SUM(clicks)/SUM(impressions),6) ELSE NULL END AS ctr,
-               CASE WHEN SUM(clicks)>0      THEN ROUND(SUM(spend)/SUM(clicks),4)      ELSE NULL END AS cpc,
-               CASE WHEN SUM(impressions)>0 THEN ROUND(SUM(spend)/SUM(impressions)*1000,4) ELSE NULL END AS cpm,
-               CASE WHEN SUM(installs)>0    THEN ROUND(SUM(spend)/SUM(installs),4)    ELSE NULL END AS cpi,
-               CASE WHEN SUM(conversions)>0 THEN ROUND(SUM(spend)/SUM(conversions),4) ELSE NULL END AS cpa,
-               CASE WHEN SUM(spend)>0       THEN ROUND(SUM(revenue)/SUM(spend),4)     ELSE NULL END AS roas
-        FROM biz_ad_daily_normalized
-        WHERE {where}
-        GROUP BY platform, account_id, campaign_id, adgroup_id, ad_id
+        SELECT n.platform                        AS platform,
+               n.account_id                      AS account_id,
+               n.campaign_id                     AS campaign_id,
+               MAX(n.campaign_name)              AS campaign_name,
+               n.adgroup_id                      AS adgroup_id,
+               MAX(n.adgroup_name)               AS adgroup_name,
+               n.ad_id                           AS ad_id,
+               MAX(n.ad_name)                    AS ad_name,
+               SUM(n.spend)                      AS total_spend,
+               SUM(n.revenue)                    AS total_revenue,
+               SUM(n.impressions)                AS total_impressions,
+               SUM(n.clicks)                     AS total_clicks,
+               SUM(n.installs)                   AS total_installs,
+               SUM(n.conversions)                AS total_conversions,
+               CASE WHEN SUM(n.impressions)>0 THEN ROUND(SUM(n.clicks)/SUM(n.impressions),6) ELSE NULL END AS ctr,
+               CASE WHEN SUM(n.clicks)>0      THEN ROUND(SUM(n.spend)/SUM(n.clicks),4)      ELSE NULL END AS cpc,
+               CASE WHEN SUM(n.impressions)>0 THEN ROUND(SUM(n.spend)/SUM(n.impressions)*1000,4) ELSE NULL END AS cpm,
+               CASE WHEN SUM(n.installs)>0    THEN ROUND(SUM(n.spend)/SUM(n.installs),4)    ELSE NULL END AS cpi,
+               CASE WHEN SUM(n.conversions)>0 THEN ROUND(SUM(n.spend)/SUM(n.conversions),4) ELSE NULL END AS cpa,
+               CASE WHEN SUM(n.spend)>0       THEN ROUND(SUM(n.revenue)/SUM(n.spend),4)     ELSE NULL END AS roas,
+               {drama_select_sql}
+        FROM biz_ad_daily_normalized n
+        {drama_join_sql}
+        WHERE {where} {drama_where_sql}
+        GROUP BY n.platform, n.account_id, n.campaign_id, n.adgroup_id, n.ad_id
         ORDER BY {order_col} {order_dir}
     """
     with get_biz_conn() as conn:
         cur = conn.cursor()
-        cur.execute(sql, params)
+        cur.execute(sql, params + drama_where_args)
         return cur.fetchall()

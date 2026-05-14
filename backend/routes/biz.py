@@ -437,16 +437,29 @@ async def creative_analysis(
     min_spend: float = Query(10, description="低表现榜最小消耗门槛"),
     top_n: int = Query(5, ge=1, le=20),
     source: str = Query("auto", description="数据源: auto/attribution/legacy"),
+    content_key: Optional[str] = Query(None, description="剧内容唯一键（精确匹配某一部剧）"),
+    drama_keyword: Optional[str] = Query(None, description="剧名关键词（模糊匹配 localized_drama_name）"),
+    language_code: Optional[str] = Query(None, description="语言代码筛选，如 EN / ID / TH / unknown"),
 ):
-    """素材分析综合接口 — 基于 ad 维度聚合，返回 overview / top / low / list"""
+    """素材分析综合接口 — 基于 ad 维度聚合，返回 overview / top / low / list
+
+    支持按剧筛选：content_key / drama_keyword / language_code 任意组合
+    （JOIN ad_drama_mapping 实现，未命中映射的素材会被剧筛选过滤掉）。
+    """
     _check_dates(start_date, end_date)
     src = _resolve_source(source)
+    drama_kwargs = {
+        "content_key": content_key,
+        "drama_keyword": drama_keyword,
+        "language_code": language_code,
+    }
     if src == "attribution":
         agg_rows = await asyncio.to_thread(
             biz_attribution_service.get_ad_aggregated,
             start_date, end_date,
             platform=platform,
             order_by="total_spend", order_dir="desc",
+            **drama_kwargs,
         )
     elif src == "blend":
         agg_rows = await asyncio.to_thread(
@@ -454,6 +467,7 @@ async def creative_analysis(
             start_date, end_date,
             platform=platform,
             order_by="total_spend", order_dir="desc",
+            **drama_kwargs,
         )
     else:
         agg_rows = await asyncio.to_thread(
@@ -461,6 +475,7 @@ async def creative_analysis(
             start_date, end_date,
             platform=platform,
             order_by="total_spend", order_dir="desc",
+            **drama_kwargs,
         )
 
     def _float(v):
@@ -482,6 +497,11 @@ async def creative_analysis(
             "conversions": int(r.get("total_conversions") or 0),
             "ctr": _float(r.get("ctr")),
             "roas": _float(r.get("roas")),
+            # 剧维度（来自 ad_drama_mapping JOIN，未命中时返回 None/空串）
+            "content_key": r.get("content_key") or "",
+            "localized_drama_name": r.get("localized_drama_name") or "",
+            "language_code": r.get("language_code") or "",
+            "drama_id": r.get("drama_id") or "",
         })
 
     total_count = len(items)
@@ -521,4 +541,76 @@ async def creative_analysis(
             "list": items,
             "_source": src,
         },
+    }
+
+
+# ═══════════════════════ 剧名筛选选项 ═══════════════════════
+
+@router.get("/creative-analysis/drama-options")
+async def creative_analysis_drama_options(
+    start_date: str = Query(..., description="开始日期 YYYY-MM-DD"),
+    end_date: str = Query(..., description="结束日期 YYYY-MM-DD"),
+    platform: Optional[str] = Query(None, description="平台筛选: tiktok / meta"),
+):
+    """返回该时间窗内有数据的剧列表 + 全部语言代码，供前端筛选下拉框使用。
+
+    剧列表来自：在 [start_date, end_date] 时间段内，biz_ad_daily_normalized
+    中存在投放记录、并且能通过 ad_drama_mapping 关联到的 (content_key, name, language)。
+    """
+    _check_dates(start_date, end_date)
+
+    def _query():
+        from db import get_biz_conn
+        sql_dramas = """
+            SELECT
+                m.content_key                AS content_key,
+                MAX(m.localized_drama_name)  AS localized_drama_name,
+                MAX(m.language_code)         AS language_code,
+                SUM(n.spend)                 AS total_spend
+            FROM biz_ad_daily_normalized n
+            JOIN ad_drama_mapping m
+                ON m.platform    = n.platform
+               AND m.account_id  = n.account_id
+               AND m.campaign_id = n.campaign_id
+            WHERE n.stat_date BETWEEN %s AND %s
+              AND m.content_key <> ''
+        """
+        params: list = [start_date, end_date]
+        if platform:
+            sql_dramas += " AND n.platform = %s"
+            params.append(platform)
+        sql_dramas += " GROUP BY m.content_key ORDER BY total_spend DESC LIMIT 500"
+
+        with get_biz_conn() as conn:
+            cur = conn.cursor()
+            cur.execute(sql_dramas, params)
+            dramas = cur.fetchall()
+            cur.execute(
+                """
+                SELECT DISTINCT language_code
+                FROM ad_drama_mapping
+                WHERE language_code <> ''
+                ORDER BY language_code ASC
+                """
+            )
+            langs = cur.fetchall()
+        return dramas, langs
+
+    dramas, langs = await asyncio.to_thread(_query)
+
+    drama_list = [
+        {
+            "content_key": d.get("content_key", ""),
+            "localized_drama_name": d.get("localized_drama_name", ""),
+            "language_code": d.get("language_code", ""),
+            "total_spend": float(d.get("total_spend") or 0),
+        }
+        for d in dramas
+    ]
+    language_list = [l.get("language_code", "") for l in langs if l.get("language_code")]
+
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {"dramas": drama_list, "languages": language_list},
     }

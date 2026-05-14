@@ -438,6 +438,11 @@ export interface CreativeItem {
   conversions: number
   ctr: number | null
   roas: number | null
+  /** 剧维度：来自 ad_drama_mapping JOIN，未命中则为空串 */
+  content_key?: string
+  localized_drama_name?: string
+  language_code?: string
+  drama_id?: string
 }
 
 export interface CreativeOverview {
@@ -456,10 +461,21 @@ export interface CreativeAnalysisData {
   list: CreativeItem[]
 }
 
-export async function fetchCreativeAnalysis(params: {
-  startDate: string; endDate: string; platform?: string;
-  minSpend?: number; topN?: number
-}): Promise<CreativeAnalysisData> {
+export interface CreativeAnalysisParams {
+  startDate: string
+  endDate: string
+  platform?: string
+  minSpend?: number
+  topN?: number
+  /** 剧筛选三件套（任意组合）*/
+  contentKey?: string
+  dramaKeyword?: string
+  languageCode?: string
+}
+
+export async function fetchCreativeAnalysis(
+  params: CreativeAnalysisParams,
+): Promise<CreativeAnalysisData> {
   const r = await apiFetch<ApiResp<CreativeAnalysisData>>(
     `/api/biz/creative-analysis${qs({
       start_date: params.startDate,
@@ -467,6 +483,38 @@ export async function fetchCreativeAnalysis(params: {
       platform: params.platform,
       min_spend: params.minSpend,
       top_n: params.topN,
+      content_key: params.contentKey,
+      drama_keyword: params.dramaKeyword,
+      language_code: params.languageCode,
+    })}`,
+  )
+  return r.data
+}
+
+// ── 剧名筛选选项 ──
+
+export interface DramaOption {
+  content_key: string
+  localized_drama_name: string
+  language_code: string
+  total_spend: number
+}
+
+export interface DramaOptionsData {
+  dramas: DramaOption[]
+  languages: string[]
+}
+
+export async function fetchCreativeDramaOptions(params: {
+  startDate: string
+  endDate: string
+  platform?: string
+}): Promise<DramaOptionsData> {
+  const r = await apiFetch<ApiResp<DramaOptionsData>>(
+    `/api/biz/creative-analysis/drama-options${qs({
+      start_date: params.startDate,
+      end_date: params.endDate,
+      platform: params.platform,
     })}`,
   )
   return r.data
