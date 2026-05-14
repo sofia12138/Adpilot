@@ -178,9 +178,9 @@ export async function withdrawApplication(id: number): Promise<AnomalyApplicatio
 
 // ─── 工具 ────────────────────────────────────────────────────
 
-function buildQuery(params: Record<string, unknown>): string {
+function buildQuery(params: object): string {
   const search = new URLSearchParams()
-  for (const [key, value] of Object.entries(params)) {
+  for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
     if (value === undefined || value === null || value === '') continue
     search.set(key, String(value))
   }

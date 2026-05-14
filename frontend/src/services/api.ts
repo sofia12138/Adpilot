@@ -14,14 +14,16 @@ export class AuthError extends Error {
  *   - 对象：  HTTPException(detail={code, message}) → message+code 完整携带
  */
 export class ApiError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    public readonly detail: unknown,
-  ) {
+  readonly status: number
+  readonly code: string
+  readonly detail: unknown
+
+  constructor(status: number, code: string, message: string, detail: unknown) {
     super(message)
     this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.detail = detail
   }
 }
 
