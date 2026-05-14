@@ -572,13 +572,14 @@ function todayToList(
   orderDesc: boolean,
   channelDict: Record<string, ChannelInfo> | null,
 ): UserPaymentListResponse {
-  // today 没有 region/oauth_platform/register_time_utc 信息，相关筛选会过滤掉所有；
+  // today 没有 region/oauth_platform 信息，相关筛选会过滤掉所有；
+  // register_time_utc 由后端从 biz_user_payment_summary 反查补齐（命中历史付费用户）。
   // 这里只对 today 自带字段做筛选，避免误杀
   let rows: UserPaymentSummaryRow[] = items.map(u => ({
     user_id: u.user_id,
     region: null,
     oauth_platform: null,
-    register_time_utc: null,
+    register_time_utc: u.register_time_utc ?? null,
     lang: null,
     first_channel_id: u.first_channel_id || '',
     first_os_type: u.first_os_type,

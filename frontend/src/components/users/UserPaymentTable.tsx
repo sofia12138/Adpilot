@@ -43,6 +43,19 @@ function fmtDateTime(s: string | null) {
   return s.replace('T', ' ').slice(0, 16)
 }
 
+/** 注册时间：展示 UTC 日期 + 距今天数，省空间且更直观 */
+function fmtRegister(s: string | null) {
+  if (!s) return { date: '—', ago: '' }
+  const datePart = s.slice(0, 10)
+  // 后端 register_time_utc 是 UTC naive datetime (无时区后缀)，按 UTC 解析
+  const iso = /[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z'
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return { date: datePart, ago: '' }
+  const days = Math.max(0, Math.floor((Date.now() - t) / 86400000))
+  const ago = days === 0 ? '今日' : days === 1 ? '昨日' : `${days}天前`
+  return { date: datePart, ago }
+}
+
 interface SortHeaderProps {
   field: string
   label: string
@@ -79,6 +92,7 @@ export function UserPaymentTable({
           <thead className="bg-gray-50 text-gray-500 border-b border-card-border">
             <tr>
               <SortHeader field="user_id" label="user_id" orderBy={orderBy} orderDesc={orderDesc} onSort={onSort} />
+              <SortHeader field="register_time_utc" label="注册时间" orderBy={orderBy} orderDesc={orderDesc} onSort={onSort} />
               <th className="px-2 py-2 text-left">国家</th>
               <th className="px-2 py-2 text-left">登录</th>
               <th className="px-2 py-2 text-left">首单渠道</th>
@@ -96,10 +110,12 @@ export function UserPaymentTable({
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={13} className="py-10 text-center text-gray-400">无数据</td>
+                <td colSpan={14} className="py-10 text-center text-gray-400">无数据</td>
               </tr>
             )}
-            {rows.map(r => (
+            {rows.map(r => {
+              const reg = fmtRegister(r.register_time_utc)
+              return (
               <tr key={r.user_id} className="border-b border-card-border/50 hover:bg-gray-50/50">
                 <td className="px-2 py-2">
                   <button
@@ -108,6 +124,16 @@ export function UserPaymentTable({
                   >
                     {r.user_id}
                   </button>
+                </td>
+                <td className="px-2 py-2" title={r.register_time_utc || ''}>
+                  {r.register_time_utc ? (
+                    <div className="leading-tight">
+                      <div className="font-mono text-gray-700">{reg.date}</div>
+                      <div className="text-[10px] text-gray-400">{reg.ago}</div>
+                    </div>
+                  ) : (
+                    <span className="text-gray-300">—</span>
+                  )}
                 </td>
                 <td className="px-2 py-2">
                   {r.region ? <span className="font-mono text-gray-700">{r.region}</span> : <span className="text-gray-300">—</span>}
@@ -165,7 +191,8 @@ export function UserPaymentTable({
                   </button>
                 </td>
               </tr>
-            ))}
+              )
+            })}
           </tbody>
         </table>
       </div>

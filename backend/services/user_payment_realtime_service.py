@@ -19,10 +19,11 @@ import logging
 import time
 from datetime import datetime, timedelta
 from threading import Lock
-from typing import Optional
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from db import get_order_conn
+from repositories import biz_user_payment_repository as biz_repo
 from repositories import user_anomaly_application_repository as app_repo
 from repositories import user_anomaly_whitelist_repository as whitelist_repo
 from services.user_payment_service import (
@@ -123,7 +124,13 @@ def _compute_today_tags(row: dict) -> list[str]:
     return tags
 
 
-def _format_row(row: dict, *, pending_set: set[int], whitelist_set: set[int]) -> dict:
+def _format_row(
+    row: dict,
+    *,
+    pending_set: set[int],
+    whitelist_set: set[int],
+    register_map: Optional[dict[int, Any]] = None,
+) -> dict:
     user_id = int(row.get("user_id", 0))
     tags = _compute_today_tags(row)
     if user_id in whitelist_set:
@@ -135,8 +142,11 @@ def _format_row(row: dict, *, pending_set: set[int], whitelist_set: set[int]) ->
     paid_orders = int(row.get("paid_orders") or 0)
     success_rate = (paid_orders / total_orders) if total_orders > 0 else 0.0
 
+    reg_time = (register_map or {}).get(user_id)
+
     return {
         "user_id": user_id,
+        "register_time_utc": reg_time,
         "first_channel_id": (row.get("first_channel_id") or "") if row.get("first_channel_id") else "",
         "first_os_type": int(row.get("first_os_type") or 0),
         "first_pay_type": int(row.get("first_pay_type") or 0),
@@ -176,7 +186,26 @@ def list_today(la_ds: Optional[str] = None, *, force_refresh: bool = False) -> d
     pending_set = set(app_repo.list_pending_target_user_ids())
     whitelist_set = set(whitelist_repo.list_whitelisted_user_ids())
 
-    items = [_format_row(r, pending_set=pending_set, whitelist_set=whitelist_set) for r in rows]
+    # 注册时间反查：从 T+1 维表 biz_user_payment_summary 拿（历史付费用户全覆盖）；
+    # 今日新注册的纯新用户暂时落空（前端展示 "—"），等明日 T+1 同步后补齐。
+    user_ids = [int(r.get("user_id") or 0) for r in rows if r.get("user_id")]
+    register_map: dict[int, Any] = {}
+    if user_ids:
+        try:
+            meta = biz_repo.fetch_summary_meta_by_users(user_ids)
+            register_map = {uid: m.get("register_time_utc") for uid, m in meta.items()}
+        except Exception as e:
+            logger.warning("today register_time_utc enrich 失败，忽略: %s", e)
+
+    items = [
+        _format_row(
+            r,
+            pending_set=pending_set,
+            whitelist_set=whitelist_set,
+            register_map=register_map,
+        )
+        for r in rows
+    ]
 
     payload = {
         "la_ds": ds,

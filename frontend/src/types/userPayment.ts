@@ -97,6 +97,7 @@ export interface OrderListResponse {
 
 export interface TodayUserRow {
   user_id: number
+  register_time_utc: string | null
   first_channel_id: string
   first_os_type: number
   first_pay_type: number
