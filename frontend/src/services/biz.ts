@@ -496,12 +496,14 @@ export async function fetchCreativeAnalysis(
 export interface DramaOption {
   content_key: string
   localized_drama_name: string
-  language_code: string
+  /** 该剧在当前数据窗内涉及的所有语种（去重并按字母序） */
+  language_codes: string[]
   total_spend: number
 }
 
 export interface DramaOptionsData {
   dramas: DramaOption[]
+  /** 当前窗口内出现过投放的所有语种（用于"语种"下拉的全集） */
   languages: string[]
 }
 

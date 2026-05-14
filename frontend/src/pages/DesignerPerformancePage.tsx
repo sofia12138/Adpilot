@@ -283,6 +283,20 @@ export default function DesignerPerformancePage() {
 
   const hasDramaFilter = !!(contentKey || dramaKeyword || languageCode)
 
+  // 选中某剧后，语种下拉只显示该剧实际有的语种
+  const selectedDrama = useMemo(
+    () => dramaOpts?.dramas.find(d => d.content_key === contentKey),
+    [dramaOpts, contentKey],
+  )
+  const availableLanguages = useMemo(() => {
+    if (selectedDrama) return selectedDrama.language_codes
+    return dramaOpts?.languages ?? []
+  }, [selectedDrama, dramaOpts])
+
+  if (selectedDrama && languageCode && !selectedDrama.language_codes.includes(languageCode)) {
+    setTimeout(() => setLanguageCode(''), 0)
+  }
+
   return (
     <div className="max-w-7xl mx-auto">
       <PageHeader title="设计师人效报表" description="按设计师维度汇总素材投放表现，点击设计师行可展开素材明细" />
@@ -306,7 +320,7 @@ export default function DesignerPerformancePage() {
 
           {/* 剧（content_key 精确匹配） */}
           <select
-            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100 max-w-[260px]"
+            className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100 max-w-[300px]"
             value={contentKey}
             onChange={e => setContentKey(e.target.value)}
             title={dramaOpts?.dramas.length ? `共 ${dramaOpts.dramas.length} 部剧（按消耗排序）` : ''}
@@ -315,19 +329,21 @@ export default function DesignerPerformancePage() {
             {(dramaOpts?.dramas ?? []).map(d => (
               <option key={d.content_key} value={d.content_key}>
                 {d.localized_drama_name || d.content_key}
-                {d.language_code ? ` · ${d.language_code}` : ''}
+                {d.language_codes.length > 0 ? ` · ${d.language_codes.join('/')}` : ''}
               </option>
             ))}
           </select>
 
-          {/* 语言 */}
+          {/* 语种（选了剧之后只显示该剧的语种） */}
           <select
             className="text-sm border border-gray-200 rounded-lg px-3 py-1.5 bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-100"
             value={languageCode}
             onChange={e => setLanguageCode(e.target.value)}
           >
-            <option value="">全部语言</option>
-            {(dramaOpts?.languages ?? []).map(l => (
+            <option value="">
+              {selectedDrama ? `全部语种（${availableLanguages.length}）` : '全部语种'}
+            </option>
+            {availableLanguages.map(l => (
               <option key={l} value={l}>{l}</option>
             ))}
           </select>

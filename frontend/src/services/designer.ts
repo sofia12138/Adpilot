@@ -60,7 +60,8 @@ export interface DesignerMaterialsParams {
 export interface DesignerDramaOption {
   content_key: string
   localized_drama_name: string
-  language_code: string
+  /** 该剧在当前数据窗内涉及的所有语种 */
+  language_codes: string[]
   total_spend: number
 }
 

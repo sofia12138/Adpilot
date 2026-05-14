@@ -189,7 +189,7 @@ async def designer_drama_options(
             SELECT
                 m.content_key                AS content_key,
                 MAX(m.localized_drama_name)  AS localized_drama_name,
-                MAX(m.language_code)         AS language_code,
+                GROUP_CONCAT(DISTINCT m.language_code ORDER BY m.language_code) AS language_codes,
                 SUM(n.spend)                 AS total_spend
             FROM biz_ad_daily_normalized n
             JOIN ad_drama_mapping m
@@ -205,18 +205,27 @@ async def designer_drama_options(
             params.append(platform)
         sql_dramas += " GROUP BY m.content_key ORDER BY total_spend DESC LIMIT 500"
 
+        sql_langs = """
+            SELECT DISTINCT m.language_code AS language_code
+            FROM biz_ad_daily_normalized n
+            JOIN ad_drama_mapping m
+                ON m.platform    = n.platform
+               AND m.account_id  = n.account_id
+               AND m.campaign_id = n.campaign_id
+            WHERE n.stat_date BETWEEN %s AND %s
+              AND m.language_code <> ''
+        """
+        lang_params: list = [start_date, end_date]
+        if platform:
+            sql_langs += " AND n.platform = %s"
+            lang_params.append(platform)
+        sql_langs += " ORDER BY m.language_code ASC"
+
         with get_biz_conn() as conn:
             cur = conn.cursor()
             cur.execute(sql_dramas, params)
             dramas = cur.fetchall()
-            cur.execute(
-                """
-                SELECT DISTINCT language_code
-                FROM ad_drama_mapping
-                WHERE language_code <> ''
-                ORDER BY language_code ASC
-                """
-            )
+            cur.execute(sql_langs, lang_params)
             langs = cur.fetchall()
         return dramas, langs
 
@@ -225,7 +234,9 @@ async def designer_drama_options(
         {
             "content_key": d.get("content_key", ""),
             "localized_drama_name": d.get("localized_drama_name", ""),
-            "language_code": d.get("language_code", ""),
+            "language_codes": [
+                lc for lc in (d.get("language_codes") or "").split(",") if lc
+            ],
             "total_spend": float(d.get("total_spend") or 0),
         }
         for d in dramas
