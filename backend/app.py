@@ -265,11 +265,15 @@ async def _sync_ops_polardb_intraday_job():
 
 
 async def _sync_user_payment_job():
-    """Job 9：用户付费面板日同步（每天 1 次，默认回填 90 天活跃用户）
+    """Job 9：用户付费面板「T+1 日同步」（每天 1 次，回填 90 天闭合 LA 日）
 
     数据流：
         PolarDB matrix_order.recharge_order  ─┐
         MaxCompute metis_dw.dim_user_df      ─┴─→ adpilot_biz.biz_user_payment_{summary,order}
+
+    口径（真 T+1）：
+        window_end = today_la - 1（昨日 LA，闭合日）；today_la 当天数据由 Job 9b
+        sync_user_payment_intraday 每 30 分钟刷新，本任务不处理。
 
     无 PolarDB 时跳过；无 DMS AccessKey 时仍可运行（dim_user_df enrich 走空表，
     region/oauth_platform/register_time_utc 字段会留空，由 service 层判定不到游客标签）。
@@ -288,12 +292,38 @@ async def _sync_user_payment_job():
         )
 
     from tasks.sync_user_payment import run as sync_user_payment_run
-    logger.info("用户付费面板同步开始（默认 90 天回填窗口）")
+    logger.info("用户付费面板 T+1 同步开始（默认窗口=[today_la-90, today_la-1]）")
     try:
         result = await asyncio.to_thread(sync_user_payment_run, skip_dim_user=skip_dim_user)
-        logger.info(f"用户付费面板同步完成: {result}")
+        logger.info(f"用户付费面板 T+1 同步完成: {result}")
     except Exception as e:
-        logger.error(f"用户付费面板同步失败: {e}")
+        logger.error(f"用户付费面板 T+1 同步失败: {e}")
+
+
+async def _sync_user_payment_intraday_job():
+    """Job 9b：用户付费面板「实时层同步」（每 30 分钟，今日+昨日 LA）
+
+    数据流：matrix_order.recharge_order (PolarDB) → biz_user_payment_order
+    仅 upsert _order 表；**不动 _summary**（_summary 累计由 Job 9 负责）。
+
+    覆盖 today_la 当天 partial 数据，配合 Job 9（昨日闭合）让前端 by-window
+    路径在任何窗口预设下都能看到接近实时的数据。
+    """
+    import asyncio
+    settings = get_settings()
+    if not settings.order_mysql_database:
+        logger.info("用户付费实时同步：ORDER_MYSQL_DATABASE 未配置，跳过本次")
+        return
+
+    skip_dim_user = not (settings.dms_access_key_id or settings.odps_access_key_id)
+
+    from tasks.sync_user_payment_intraday import run as sync_run
+    logger.info("用户付费实时同步开始（窗口=今天+昨天 LA，skip_summary=True）")
+    try:
+        result = await asyncio.to_thread(sync_run, skip_dim_user=skip_dim_user)
+        logger.info(f"用户付费实时同步完成: {result}")
+    except Exception as e:
+        logger.error(f"用户付费实时同步失败: {e}")
 
 
 async def _sync_attribution_intraday_job():
@@ -433,12 +463,24 @@ async def lifespan(application: FastAPI):
     # Job 9：用户付费面板日同步（每天 LA 03:30 ≈ 北京 18:30；夏令时 17:30 / 18:30 / 19:30 都可接受）
     # 拉 PolarDB recharge_order + MaxCompute dim_user_df → biz_user_payment_{summary, order}
     # 在 sync_ops_daily 之后跑，让 user 侧 dim 表有可能已经刷到最新分区
+    # T+1 口径：window_end = today_la - 1（昨日闭合），today_la 当天交给 Job 9b
     _scheduler.add_job(
         _sync_user_payment_job,
         trigger="cron",
         hour=18, minute=30,  # Asia/Shanghai 18:30 ≈ LA 03:30 / 02:30（看夏令时）
         id="sync_user_payment",
         replace_existing=True,
+    )
+
+    # Job 9b：用户付费面板实时同步（每 30 分钟，今日+昨日 LA → 仅 _order 表）
+    # 与 Job 8 / Job 11 同节奏，让前端 by-window 路径下 today_la 也接近实时
+    _scheduler.add_job(
+        _sync_user_payment_intraday_job,
+        trigger="interval",
+        minutes=30,
+        id="sync_user_payment_intraday",
+        replace_existing=True,
+        next_run_time=now + timedelta(minutes=3),  # 启动后 3 分钟立刻跑首次
     )
 
     # Job 4：CK D0 实时归因同步（默认 disabled；ENABLE_CK_INTRADAY_SYNC=true 开启）

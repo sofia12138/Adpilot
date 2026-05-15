@@ -1,23 +1,32 @@
-"""sync_user_payment.py — 用户付费面板日同步任务
+"""sync_user_payment.py — 用户付费面板「T+1 日同步」任务
 
 数据流：
     PolarDB matrix_order.recharge_order ─┐
     MaxCompute metis_dw.dim_user_df     ─┼─→ adpilot_biz.biz_user_payment_order
                                           └─→ adpilot_biz.biz_user_payment_summary
 
-口径：
+口径（重要）：
+- 真 T+1：默认 window_end = today_la - 1，即"昨日 LA"，**不再触碰 today_la 当天数据**
+  （today_la 的数据由 sync_user_payment_intraday 每 30min 刷新，参见同目录该文件）
 - LA 日 90 天滚动窗口；窗口外的行物理清理
-- 订单按 LA 日落库（biz_user_payment_order.la_ds）
-- 用户聚合按全期累计（截止 snapshot_ds=今日 LA）
+- 订单按 LA 日落库（biz_user_payment_order.la_ds），主键 (la_ds, order_id)
+- 用户聚合按全期累计（截止 snapshot_ds=window_end）；主键 (user_id)
+  ⚠️ summary 是 90 天滚动累计，单日 backfill 会让累计被"窗口内聚合"覆盖；
+     run() 在 (end_ds - start_ds + 1) < 30 天时会**自动跳过 summary 重算**保护累计。
+     需要强制重算时显式传 skip_summary=False（或不显式给 start_ds/end_ds 走默认 90 天）。
 - 异常标签按"单日聚合"判定（suspect_brush / payment_loop），再合并到该用户的总标签里
 - pending_whitelist / whitelisted 不写入持久标签，由 service 层运行时叠加
 
-调度：每日 LA 03:30，apscheduler 在 app.py 注册
+调度：每日 BJ 18:30 (≈ LA 03:30)，apscheduler 在 app.py 注册
 
 CLI:
-    python -m tasks.sync_user_payment                       # 默认回填 90 天
-    python -m tasks.sync_user_payment --backfill 30
+    python -m tasks.sync_user_payment                              # 默认 90 天回填到昨日 LA
+    python -m tasks.sync_user_payment --backfill 30                # 最近 30 天到昨日 LA
     python -m tasks.sync_user_payment --start-ds 2026-04-10 --end-ds 2026-05-13
+    python -m tasks.sync_user_payment --start-ds 2026-05-14 --end-ds 2026-05-14
+        # 单日 backfill 仅写 _order 表，自动跳过 _summary 重算保护累计
+    python -m tasks.sync_user_payment --start-ds 2026-05-14 --end-ds 2026-05-14 --force-summary
+        # 强制重算 summary（基于该窗口订单），用于明确知道副作用时
 """
 from __future__ import annotations
 
@@ -39,6 +48,7 @@ from integrations.dms_client import (
 )
 from repositories import biz_sync_log_repository as sync_log_repo
 from repositories import biz_user_payment_repository as repo
+from services.user_payment_dedupe import dedupe_orders_by_trade_no
 from services.user_payment_service import (
     ANOMALY_BRUSH,
     ANOMALY_BURST,
@@ -51,6 +61,8 @@ logger = logging.getLogger(__name__)
 LA_TZ = ZoneInfo("America/Los_Angeles")
 TASK_NAME = "sync_user_payment"
 DEFAULT_WINDOW_DAYS = 90
+# 显式窗口短于该天数时，自动跳过 summary 重算以保护 90 天累计不被覆盖
+_SUMMARY_AUTO_SKIP_THRESHOLD_DAYS = 30
 
 
 # ─────────────────────────────────────────────────────────────
@@ -98,10 +110,12 @@ _POLARDB_ORDER_SQL = """
         refund_amount                                          AS refund_amount_cents,
         product_id,
         is_subscribe,
+        first_subscribe,
         stall_group,
         channel_id,
         drama_id,
-        episode_id
+        episode_id,
+        trade_no
     FROM recharge_order
     WHERE app_id = 1
       AND created_at >= %s AND created_at < %s
@@ -131,6 +145,11 @@ def _fetch_orders_from_polardb(window_start_la: date, window_end_la: date) -> li
             r["la_ds"] = la_ds
             out.append(r)
     logger.info("PolarDB 订单 %d 行（窗口外过滤前 %d）", len(out), len(rows))
+
+    # 按 trade_no 去重已支付订单（应对 IAP 续订回调重复写入 / user_id 错位的脏数据）
+    out, dropped = dedupe_orders_by_trade_no(out)
+    if dropped:
+        logger.warning("sync_user_payment 本次去重剔除 %d 笔虚增订单", dropped)
     return out
 
 
@@ -375,21 +394,38 @@ def run(
     end_ds: Optional[str] = None,
     backfill_days: int = DEFAULT_WINDOW_DAYS,
     skip_dim_user: bool = False,
+    skip_summary: Optional[bool] = None,
 ) -> dict:
-    """同步主入口。
+    """同步主入口（T+1 口径）。
 
     Args:
-        start_ds / end_ds: 显式 LA 日窗口（YYYY-MM-DD）
+        start_ds / end_ds: 显式 LA 日窗口（YYYY-MM-DD）；不指定时默认窗口=
+                           [today_la - backfill_days, today_la - 1]，即真 T+1。
+                           today_la 当天数据由 sync_user_payment_intraday 处理。
         backfill_days:     未指定窗口时回填最近 N 天，默认 90
         skip_dim_user:     跳过 MaxCompute enrich（仅用于离线调试 / DMS 不可用时）
+        skip_summary:      是否跳过 biz_user_payment_summary 重算（保护 90 天累计）。
+                           None=自动判定：显式窗口 < 30 天时自动跳过；其他情况重算。
+                           True/False 显式覆盖自动判定。
     """
     if start_ds and end_ds:
         window_start = datetime.strptime(start_ds, "%Y-%m-%d").date()
         window_end = datetime.strptime(end_ds, "%Y-%m-%d").date()
     else:
         today = _today_la()
-        window_end = today
-        window_start = today - timedelta(days=backfill_days - 1)
+        # 真 T+1：window_end = 昨日 LA。today_la 当天由 intraday 任务负责。
+        window_end = today - timedelta(days=1)
+        window_start = window_end - timedelta(days=backfill_days - 1)
+
+    # 决定是否重算 summary（90 天累计聚合表）
+    window_span = (window_end - window_start).days + 1
+    if skip_summary is None:
+        skip_summary = window_span < _SUMMARY_AUTO_SKIP_THRESHOLD_DAYS
+        if skip_summary:
+            logger.warning(
+                "窗口 %d 天 < %d 天阈值，自动跳过 _summary 重算以保护累计指标（仅 upsert _order）",
+                window_span, _SUMMARY_AUTO_SKIP_THRESHOLD_DAYS,
+            )
 
     log_id = sync_log_repo.create(task_name=TASK_NAME, sync_date=window_end.strftime("%Y-%m-%d"))
     started = datetime.now(timezone.utc)
@@ -442,14 +478,17 @@ def run(
                 logger.warning("MaxCompute enrich 失败，将使用空 enrich 继续: %s", e)
                 dim_user = {}
 
-        # 4) 聚合 + 异常标签
-        snapshot_ds = window_end
-        summary_rows = _compute_user_summary(orders, dim_user, snapshot_ds)
-        if summary_rows:
-            for i in range(0, len(summary_rows), 500):
-                repo.upsert_summary_batch(summary_rows[i:i + 500])
-            user_rows = len(summary_rows)
-        logger.info("用户聚合 upsert %d 行", user_rows)
+        # 4) 聚合 + 异常标签（受 skip_summary 控制）
+        if skip_summary:
+            logger.info("跳过 biz_user_payment_summary 重算（窗口聚合可能覆盖累计，保护数据）")
+        else:
+            snapshot_ds = window_end
+            summary_rows = _compute_user_summary(orders, dim_user, snapshot_ds)
+            if summary_rows:
+                for i in range(0, len(summary_rows), 500):
+                    repo.upsert_summary_batch(summary_rows[i:i + 500])
+                user_rows = len(summary_rows)
+            logger.info("用户聚合 upsert %d 行", user_rows)
 
         # 5) 物理清理超 90 天的行
         cutoff = (_today_la() - timedelta(days=DEFAULT_WINDOW_DAYS + 1)).strftime("%Y-%m-%d")
@@ -487,6 +526,16 @@ def _parse_args():
     parser.add_argument("--end-ds")
     parser.add_argument("--backfill", type=int, default=DEFAULT_WINDOW_DAYS)
     parser.add_argument("--skip-dim-user", action="store_true")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--skip-summary", dest="skip_summary", action="store_true",
+        default=None,
+        help="强制跳过 _summary 重算（保护 90 天累计）",
+    )
+    group.add_argument(
+        "--force-summary", dest="skip_summary", action="store_false",
+        help="强制重算 _summary（即便窗口很短；明确知道后果时使用）",
+    )
     return parser.parse_args()
 
 
@@ -501,5 +550,6 @@ if __name__ == "__main__":
         end_ds=args.end_ds,
         backfill_days=args.backfill,
         skip_dim_user=args.skip_dim_user,
+        skip_summary=args.skip_summary,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))

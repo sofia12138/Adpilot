@@ -61,7 +61,12 @@ def _resolve_la_ds(la_ds: Optional[str]) -> str:
 
 
 def _fetch_polardb(la_ds: str) -> list[dict]:
-    """直查 PolarDB，按 LA 日聚合所有"尝试过下单"的用户。"""
+    """直查 PolarDB，按 LA 日聚合所有"尝试过下单"的用户。
+
+    去重口径（与 sync 任务 user_payment_dedupe 一致）：
+      - 同一 trade_no 的已支付订单只保留一行：first_subscribe=1 优先，否则 id 最小
+      - 待支付/取消/退款/支付失败行 trade_no 多为空，原样保留
+    """
     sql = """
         SELECT
             user_id,
@@ -84,9 +89,21 @@ def _fetch_polardb(la_ds: str) -> list[dict]:
             MIN(CONVERT_TZ(created_at, '+08:00', 'America/Los_Angeles')) AS first_created_la,
             MAX(CONVERT_TZ(created_at, '+08:00', 'America/Los_Angeles')) AS last_action_la,
             MIN(CASE WHEN order_status = 1 THEN CONVERT_TZ(pay_time, '+08:00', 'America/Los_Angeles') END) AS first_pay_la
-        FROM recharge_order
-        WHERE app_id = 1
-          AND DATE(CONVERT_TZ(created_at, '+08:00', 'America/Los_Angeles')) = %s
+        FROM recharge_order o
+        WHERE o.app_id = 1
+          AND DATE(CONVERT_TZ(o.created_at, '+08:00', 'America/Los_Angeles')) = %s
+          AND (
+                o.order_status <> 1
+             OR COALESCE(o.trade_no, '') = ''
+             OR o.id = (
+                  SELECT o2.id FROM recharge_order o2
+                  WHERE o2.app_id = o.app_id
+                    AND o2.trade_no = o.trade_no
+                    AND o2.order_status = 1
+                  ORDER BY o2.first_subscribe DESC, o2.id ASC
+                  LIMIT 1
+                )
+          )
         GROUP BY user_id
         ORDER BY total_orders DESC, paid_orders DESC
         LIMIT %s
