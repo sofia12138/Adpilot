@@ -1676,6 +1676,92 @@ _BIZ_TABLES_SQL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     COMMENT='用户付费面板 · 白名单申请工单（审批流）'
     """,
+    """
+    -- 区域渠道分析 · 注册侧日报（按 LA 日 × 国家 × 渠道分类聚合）
+    -- 由 tasks/sync_ops_region_daily.py T+1 写入，30 天回填
+    -- 数据源：MaxCompute dim_user_df（注册全量） + PolarDB channel_user（非自然量命中）
+    -- channel_kind: 0=organic / 1=tiktok / 2=meta / 3=other
+    --   organic = dim_user_df 中存在但不在 channel_user 中（含真自然量+SEO+品牌词）
+    --   非 organic 按 channel_user.ad_platform 拆分
+    -- 注：注册侧没有 OS 维度（dim_user_df 不带设备字段）
+    CREATE TABLE IF NOT EXISTS biz_ops_region_register_daily (
+        id              BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        ds              DATE         NOT NULL COMMENT '统计日 LA',
+        region          VARCHAR(8)   NOT NULL DEFAULT 'UNK' COMMENT 'ISO 国家码，缺失填 UNK',
+        channel_kind    TINYINT      NOT NULL COMMENT '0=organic 1=tiktok 2=meta 3=other',
+        register_uv     INT          NOT NULL DEFAULT 0 COMMENT '当日新注册 UV',
+        synced_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_ds_region_kind (ds, region, channel_kind),
+        KEY idx_ds (ds)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='区域渠道分析 · 注册侧日报（T+1，30 天回填）'
+    """,
+    """
+    -- 区域渠道分析 · 注册侧实时层（仅含今日+昨日 LA，30min 覆盖刷新）
+    -- 由 tasks/sync_ops_region_intraday.py 写入；schema 与 _daily 对齐
+    -- API 智能路由：今/昨日 LA 读这张表，其余日期读 biz_ops_region_register_daily
+    CREATE TABLE IF NOT EXISTS biz_ops_region_register_intraday (
+        id              BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        ds              DATE         NOT NULL COMMENT '统计日 LA（仅今日+昨日）',
+        region          VARCHAR(8)   NOT NULL DEFAULT 'UNK',
+        channel_kind    TINYINT      NOT NULL,
+        register_uv     INT          NOT NULL DEFAULT 0,
+        synced_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_ds_region_kind (ds, region, channel_kind),
+        KEY idx_ds (ds)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='区域渠道分析 · 注册侧实时层（今/昨日 LA，30min 覆盖）'
+    """,
+    """
+    -- 区域渠道分析 · 充值侧日报（按 LA 日 × 国家 × 渠道分类 × OS 聚合）
+    -- 由 tasks/sync_ops_region_daily.py T+1 写入，30 天回填
+    -- 数据源：PolarDB matrix_order.recharge_order（自带 channel_id + os_type）
+    --        + MaxCompute dim_user_df enrich region
+    -- channel_kind 判定：channel_id IN ('','0') → organic；其余按 get_channel_dict() 拆分
+    CREATE TABLE IF NOT EXISTS biz_ops_region_revenue_daily (
+        id                 BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        ds                 DATE         NOT NULL COMMENT '统计日 LA',
+        region             VARCHAR(8)   NOT NULL DEFAULT 'UNK',
+        channel_kind       TINYINT      NOT NULL COMMENT '0=organic 1=tiktok 2=meta 3=other',
+        os_type            TINYINT      NOT NULL COMMENT '1=Android 2=iOS',
+        payer_uv           INT          NOT NULL DEFAULT 0 COMMENT '当日付费 UV (按 user_id 去重)',
+        order_cnt          INT          NOT NULL DEFAULT 0 COMMENT '当日成功订单数',
+        revenue_cents      BIGINT       NOT NULL DEFAULT 0 COMMENT '当日总充值(美分)',
+        sub_revenue_cents  BIGINT       NOT NULL DEFAULT 0 COMMENT '订阅充值(美分)',
+        iap_revenue_cents  BIGINT       NOT NULL DEFAULT 0 COMMENT '内购充值(美分)',
+        synced_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_ds_region_kind_os (ds, region, channel_kind, os_type),
+        KEY idx_ds (ds)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='区域渠道分析 · 充值侧日报（T+1，30 天回填）'
+    """,
+    """
+    -- 区域渠道分析 · 充值侧实时层（今/昨日 LA，30min 刷新）
+    CREATE TABLE IF NOT EXISTS biz_ops_region_revenue_intraday (
+        id                 BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        ds                 DATE         NOT NULL,
+        region             VARCHAR(8)   NOT NULL DEFAULT 'UNK',
+        channel_kind       TINYINT      NOT NULL,
+        os_type            TINYINT      NOT NULL,
+        payer_uv           INT          NOT NULL DEFAULT 0,
+        order_cnt          INT          NOT NULL DEFAULT 0,
+        revenue_cents      BIGINT       NOT NULL DEFAULT 0,
+        sub_revenue_cents  BIGINT       NOT NULL DEFAULT 0,
+        iap_revenue_cents  BIGINT       NOT NULL DEFAULT 0,
+        synced_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at         DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_ds_region_kind_os (ds, region, channel_kind, os_type),
+        KEY idx_ds (ds)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    COMMENT='区域渠道分析 · 充值侧实时层（今/昨日 LA，30min 覆盖）'
+    """,
 ]
 
 

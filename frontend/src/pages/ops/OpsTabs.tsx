@@ -50,6 +50,19 @@ export function OpsTabs() {
           </span>
         )}
       </NavLink>
+      <NavLink
+        to="/dashboard/ops/region-channel"
+        className={({ isActive }) =>
+          cn(
+            'px-4 py-1.5 rounded-md transition-colors',
+            isActive
+              ? 'bg-white text-gray-900 shadow-sm font-medium'
+              : 'text-muted-foreground hover:text-gray-700',
+          )
+        }
+      >
+        区域渠道分析
+      </NavLink>
     </div>
   )
 }

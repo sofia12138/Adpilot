@@ -134,8 +134,9 @@ def _attr_subquery(grain: str,
     输出列：
         d, plat, acc, key_id,
         attr_conversions, attr_registrations, attr_revenue,
-        attr_spend  -- attribution 数仓侧自报的 spend，用于"无归因覆盖"判定
-                       （normalized 端 spend > 0 但 attr_spend = 0 → 数仓未采集该账号）
+        attr_spend,  -- attribution 数仓侧自报的 spend，用于"无归因覆盖"判定
+        attr_cum_d0, attr_cum_d7, attr_cum_d30
+            -- cohort 窗口累计充值（来自 daily 行；intraday 兜底行仅 attr_cum_d0≈实时充值，D7/D30 为 NULL）
 
     Args:
         grain: "campaign" | "adgroup" | "ad"
@@ -168,7 +169,10 @@ def _attr_subquery(grain: str,
             purchase                AS attr_conversions,
             registration            AS attr_registrations,
             total_recharge_amount   AS attr_revenue,
-            spend                   AS attr_spend
+            spend                   AS attr_spend,
+            cum_recharge_1d         AS attr_cum_d0,
+            cum_recharge_7d         AS attr_cum_d7,
+            cum_recharge_30d        AS attr_cum_d30
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s
           AND {daily_grain_col} <> '' {a_filter_d}
@@ -185,7 +189,10 @@ def _attr_subquery(grain: str,
                 i.purchase              AS attr_conversions,
                 i.registration          AS attr_registrations,
                 i.total_recharge_amount AS attr_revenue,
-                i.spend                 AS attr_spend
+                i.spend                 AS attr_spend,
+                i.total_recharge_amount AS attr_cum_d0,
+                CAST(NULL AS DECIMAL(18,4)) AS attr_cum_d7,
+                CAST(NULL AS DECIMAL(18,4)) AS attr_cum_d30
             FROM biz_attribution_ad_intraday i
             LEFT JOIN biz_attribution_ad_daily d
                 ON d.ds_account_local = i.ds_account_local
@@ -208,7 +215,10 @@ def _attr_subquery(grain: str,
                 i.purchase              AS attr_conversions,
                 i.registration          AS attr_registrations,
                 i.total_recharge_amount AS attr_revenue,
-                i.spend                 AS attr_spend
+                i.spend                 AS attr_spend,
+                i.total_recharge_amount AS attr_cum_d0,
+                CAST(NULL AS DECIMAL(14,4)) AS attr_cum_d7,
+                CAST(NULL AS DECIMAL(14,4)) AS attr_cum_d30
             FROM biz_attribution_ad_intraday i
             INNER JOIN biz_ad_daily_normalized n
                 ON n.stat_date  = i.ds_account_local
@@ -231,7 +241,10 @@ def _attr_subquery(grain: str,
             SUM(attr_conversions)   AS attr_conversions,
             SUM(attr_registrations) AS attr_registrations,
             SUM(attr_revenue)       AS attr_revenue,
-            SUM(attr_spend)         AS attr_spend
+            SUM(attr_spend)         AS attr_spend,
+            SUM(attr_cum_d0)        AS attr_cum_d0,
+            SUM(attr_cum_d7)        AS attr_cum_d7,
+            SUM(attr_cum_d30)       AS attr_cum_d30
         FROM (
             {daily_part}
             UNION ALL
@@ -267,7 +280,10 @@ def get_overview(start_date: str, end_date: str, *,
         COALESCE(SUM(a.attr_conversions), 0)    AS total_conversions,
         COALESCE(SUM(a.attr_registrations), 0)  AS total_registrations,
         COALESCE(SUM(a.attr_revenue), 0)        AS total_revenue,
-        COALESCE(SUM(a.attr_spend), 0)          AS attribution_spend
+        COALESCE(SUM(a.attr_spend), 0)          AS attribution_spend,
+        COALESCE(SUM(a.attr_cum_d0), 0)         AS total_cum_d0,
+        COALESCE(SUM(a.attr_cum_d7), 0)         AS total_cum_d7,
+        COALESCE(SUM(a.attr_cum_d30), 0)        AS total_cum_d30
     FROM biz_campaign_daily_normalized n
     LEFT JOIN ({attr_sql}) a
         ON a.d      = n.stat_date
@@ -287,6 +303,9 @@ def get_overview(start_date: str, end_date: str, *,
     reg = int(row.get("total_registrations") or 0)
     rv  = float(row.get("total_revenue") or 0)
     attr_s = float(row.get("attribution_spend") or 0)
+    c0 = float(row.get("total_cum_d0") or 0)
+    c7 = float(row.get("total_cum_d7") or 0)
+    c30 = float(row.get("total_cum_d30") or 0)
 
     return {
         "total_spend":         s,
@@ -303,6 +322,9 @@ def get_overview(start_date: str, end_date: str, *,
         "avg_cpi":  _safe_div(s, ins),
         "avg_cpa":  _safe_div(s, cv),
         "avg_roas": _safe_div(rv, s),
+        "avg_roi_d0":  _safe_div(c0, s),
+        "avg_roi_d7":  _safe_div(c7, s),
+        "avg_roi_d30": _safe_div(c30, s),
     }
 
 
@@ -318,6 +340,12 @@ _TOP_CAMPAIGN_METRIC_EXPR = {
     "conversions": "COALESCE(SUM(a.attr_conversions), 0)",
     "roas":        "CASE WHEN SUM(n.spend) > 0 "
                    "THEN COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend) ELSE 0 END",
+    "roi_d0":      "CASE WHEN SUM(n.spend) > 0 "
+                   "THEN COALESCE(SUM(a.attr_cum_d0), 0) / SUM(n.spend) ELSE 0 END",
+    "roi_d7":      "CASE WHEN SUM(n.spend) > 0 "
+                   "THEN COALESCE(SUM(a.attr_cum_d7), 0) / SUM(n.spend) ELSE 0 END",
+    "roi_d30":     "CASE WHEN SUM(n.spend) > 0 "
+                   "THEN COALESCE(SUM(a.attr_cum_d30), 0) / SUM(n.spend) ELSE 0 END",
 }
 
 
@@ -347,7 +375,16 @@ def get_top_campaigns(start_date: str, end_date: str, *,
         COALESCE(SUM(a.attr_spend), 0)             AS attribution_spend,
         CASE WHEN SUM(n.spend) > 0
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
-             ELSE NULL END                          AS avg_roas
+             ELSE NULL END                          AS avg_roas,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d0), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d0,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d7), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d7,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d30), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d30
     FROM biz_campaign_daily_normalized n
     LEFT JOIN ({attr_sql}) a
         ON a.d      = n.stat_date
@@ -376,6 +413,7 @@ _CAMPAIGN_AGG_ORDER = {
     "total_conversions": "total_conversions",
     "ctr":  "ctr", "cpc":  "cpc", "cpm":  "cpm",
     "cpi":  "cpi", "cpa":  "cpa", "roas": "roas",
+    "roi_d0": "roi_d0", "roi_d7": "roi_d7", "roi_d30": "roi_d30",
     "campaign_name": "campaign_name",
 }
 
@@ -428,7 +466,16 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
              ELSE NULL END                          AS cpa,
         CASE WHEN SUM(n.spend) > 0
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
-             ELSE NULL END                          AS roas
+             ELSE NULL END                          AS roas,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d0), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d0,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d7), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d7,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d30), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d30
     FROM biz_campaign_daily_normalized n
     LEFT JOIN ({attr_sql}) a
         ON a.d      = n.stat_date
@@ -499,7 +546,16 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
              ELSE NULL END                          AS cpa,
         CASE WHEN SUM(n.spend) > 0
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
-             ELSE NULL END                          AS roas
+             ELSE NULL END                          AS roas,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d0), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d0,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d7), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d7,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d30), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d30
     FROM biz_adgroup_daily_normalized n
     LEFT JOIN ({attr_sql}) a
         ON a.d      = n.stat_date
@@ -527,6 +583,7 @@ _AD_AGG_ORDER_MAP = {
     "total_conversions": "total_conversions",
     "ctr":   "ctr",   "cpc": "cpc",  "cpm": "cpm",
     "cpi":   "cpi",   "cpa": "cpa",  "roas": "roas",
+    "roi_d0": "roi_d0", "roi_d7": "roi_d7", "roi_d30": "roi_d30",
     "ad_name": "ad_name",
 }
 
@@ -611,6 +668,15 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
         CASE WHEN SUM(n.spend) > 0
              THEN ROUND(COALESCE(SUM(a.attr_revenue), 0) / SUM(n.spend), 4)
              ELSE NULL END                          AS roas,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d0), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d0,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d7), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d7,
+        CASE WHEN SUM(n.spend) > 0
+             THEN ROUND(COALESCE(SUM(a.attr_cum_d30), 0) / SUM(n.spend), 4)
+             ELSE NULL END                          AS roi_d30,
         {drama_select_sql}
     FROM biz_ad_daily_normalized n
     LEFT JOIN ({attr_sql}) a
@@ -643,6 +709,7 @@ _CAMPAIGN_DAILY_ORDER_MAP = {
     "revenue":       "revenue",
     "ctr":  "ctr", "cpc": "cpc", "cpm": "cpm",
     "cpi":  "cpi", "cpa": "cpa", "roas": "roas",
+    "roi_d0": "roi_d0", "roi_d7": "roi_d7", "roi_d30": "roi_d30",
 }
 
 
@@ -703,7 +770,16 @@ def get_campaign_daily_list(start_date: str, end_date: str, *,
                  ELSE NULL END                          AS cpa,
             CASE WHEN n.spend > 0
                  THEN ROUND(COALESCE(a.attr_revenue, 0) / n.spend, 4)
-                 ELSE NULL END                          AS roas
+                 ELSE NULL END                          AS roas,
+            CASE WHEN n.spend > 0
+                 THEN ROUND(COALESCE(a.attr_cum_d0, 0) / n.spend, 4)
+                 ELSE NULL END                          AS roi_d0,
+            CASE WHEN n.spend > 0
+                 THEN ROUND(COALESCE(a.attr_cum_d7, 0) / n.spend, 4)
+                 ELSE NULL END                          AS roi_d7,
+            CASE WHEN n.spend > 0
+                 THEN ROUND(COALESCE(a.attr_cum_d30, 0) / n.spend, 4)
+                 ELSE NULL END                          AS roi_d30
         FROM biz_campaign_daily_normalized n
         LEFT JOIN ({attr_sql}) a
             ON a.d      = n.stat_date

@@ -52,6 +52,9 @@ export default function AdsPage() {
   const totalRevenue = ovAll?.total_revenue ?? 0
   const totalRoas = ovAll?.avg_roas ?? 0
 
+  const fmtRoi = (v: number | null | undefined) =>
+    v != null && v > 0 ? v.toFixed(2) : '-'
+
   const topColumns: Column<BizTopCampaign>[] = [
     { key: 'campaign_name', title: 'Campaign', render: (r) => (
       <span className="font-medium text-gray-800 text-xs">{r.campaign_name || r.campaign_id}</span>
@@ -63,6 +66,9 @@ export default function AdsPage() {
         {r.avg_roas != null ? r.avg_roas.toFixed(2) : '-'}
       </span>
     )},
+    { key: 'roi_d0', title: 'D0', align: 'right', render: (r) => <span className="text-xs tabular-nums">{fmtRoi(r.roi_d0)}</span> },
+    { key: 'roi_d7', title: 'D7', align: 'right', render: (r) => <span className="text-xs tabular-nums">{fmtRoi(r.roi_d7)}</span> },
+    { key: 'roi_d30', title: 'D30', align: 'right', render: (r) => <span className="text-xs tabular-nums">{fmtRoi(r.roi_d30)}</span> },
   ]
 
   return (
@@ -88,11 +94,14 @@ export default function AdsPage() {
       ) : (
         <>
           {/* ===== 指标区 ===== */}
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
             <StatCard label="总消耗" value={fmtUsd(totalSpend)} icon={DollarSign} />
             <StatCard label="总收入" value={fmtUsd(totalRevenue)} icon={TrendingUp} />
             <StatCard label="整体 ROAS" value={totalRoas > 0 ? totalRoas.toFixed(2) : '-'} icon={BarChart3}
               className={totalRoas > 0 && totalRoas < roiThreshold ? 'border-red-200 bg-red-50/40' : ''} />
+            <StatCard label="D0 ROI" value={fmtRoi(ovAll?.avg_roi_d0)} icon={BarChart3} />
+            <StatCard label="D7 ROI" value={fmtRoi(ovAll?.avg_roi_d7)} icon={BarChart3} />
+            <StatCard label="D30 ROI" value={fmtRoi(ovAll?.avg_roi_d30)} icon={BarChart3} />
           </div>
 
           {/* ===== 渠道卡片 ===== */}

@@ -143,7 +143,10 @@ SELECT
     COALESCE(SUM(clicks), 0)                 AS total_clicks,
     COALESCE(SUM(activation), 0)             AS total_installs,
     COALESCE(SUM(purchase), 0)               AS total_conversions,
-    COALESCE(SUM(total_recharge_amount), 0)  AS total_revenue
+    COALESCE(SUM(total_recharge_amount), 0)  AS total_revenue,
+    COALESCE(SUM(cum_recharge_1d), 0)        AS total_cum_d0,
+    COALESCE(SUM(cum_recharge_7d), 0)        AS total_cum_d7,
+    COALESCE(SUM(cum_recharge_30d), 0)       AS total_cum_d30
 FROM biz_attribution_ad_daily
 WHERE ds_account_local BETWEEN %s AND %s
 """
@@ -174,6 +177,9 @@ def get_overview(start_date: str, end_date: str, *,
         "total_installs": 0,
         "total_conversions": 0,
         "total_revenue": 0.0,
+        "total_cum_d0": 0.0,
+        "total_cum_d7": 0.0,
+        "total_cum_d30": 0.0,
     }
 
     if daily_w:
@@ -187,6 +193,9 @@ def get_overview(start_date: str, end_date: str, *,
         agg["total_installs"]    += int(row.get("total_installs") or 0)
         agg["total_conversions"] += int(row.get("total_conversions") or 0)
         agg["total_revenue"]     += float(row.get("total_revenue") or 0)
+        agg["total_cum_d0"]      += float(row.get("total_cum_d0") or 0)
+        agg["total_cum_d7"]      += float(row.get("total_cum_d7") or 0)
+        agg["total_cum_d30"]     += float(row.get("total_cum_d30") or 0)
 
     if intra_w:
         row = _query_one(
@@ -206,6 +215,9 @@ def get_overview(start_date: str, end_date: str, *,
     ins = agg["total_installs"]
     cv  = agg["total_conversions"]
     rv  = agg["total_revenue"]
+    c0  = agg["total_cum_d0"]
+    c7  = agg["total_cum_d7"]
+    c30 = agg["total_cum_d30"]
 
     agg["avg_ctr"]  = _safe_div(cl, im)
     agg["avg_cpc"]  = _safe_div(s, cl)
@@ -213,6 +225,9 @@ def get_overview(start_date: str, end_date: str, *,
     agg["avg_cpi"]  = _safe_div(s, ins)
     agg["avg_cpa"]  = _safe_div(s, cv)
     agg["avg_roas"] = _safe_div(rv, s)
+    agg["avg_roi_d0"] = _safe_div(c0, s)
+    agg["avg_roi_d7"] = _safe_div(c7, s)
+    agg["avg_roi_d30"] = _safe_div(c30, s)
     return agg
 
 
@@ -228,6 +243,12 @@ _TOP_CAMPAIGN_METRIC_EXPR = {
     "conversions": "SUM(purchase)",
     "roas":        "CASE WHEN SUM(spend) > 0 "
                    "THEN SUM(total_recharge_amount) / SUM(spend) ELSE 0 END",
+    "roi_d0":      "CASE WHEN SUM(spend) > 0 "
+                   "THEN SUM(cum_recharge_1d) / SUM(spend) ELSE 0 END",
+    "roi_d7":      "CASE WHEN SUM(spend) > 0 "
+                   "THEN SUM(cum_recharge_7d) / SUM(spend) ELSE 0 END",
+    "roi_d30":     "CASE WHEN SUM(spend) > 0 "
+                   "THEN SUM(cum_recharge_30d) / SUM(spend) ELSE 0 END",
 }
 
 
@@ -254,7 +275,16 @@ def get_top_campaigns(start_date: str, end_date: str, *,
         COALESCE(SUM(total_recharge_amount), 0)   AS total_revenue,
         CASE WHEN SUM(spend) > 0
              THEN ROUND(SUM(total_recharge_amount) / SUM(spend), 4)
-             ELSE NULL END                         AS avg_roas
+             ELSE NULL END                         AS avg_roas,
+        CASE WHEN SUM(spend) > 0
+             THEN ROUND(SUM(cum_recharge_1d) / SUM(spend), 4)
+             ELSE NULL END                         AS roi_d0,
+        CASE WHEN SUM(spend) > 0
+             THEN ROUND(SUM(cum_recharge_7d) / SUM(spend), 4)
+             ELSE NULL END                         AS roi_d7,
+        CASE WHEN SUM(spend) > 0
+             THEN ROUND(SUM(cum_recharge_30d) / SUM(spend), 4)
+             ELSE NULL END                         AS roi_d30
     FROM biz_attribution_ad_daily
     WHERE ds_account_local BETWEEN %s AND %s {extra_sql}
     GROUP BY platform, account_id, campaign_id
@@ -282,6 +312,9 @@ _AD_AGG_ORDER_MAP = {
     "cpi":               "cpi",
     "cpa":               "cpa",
     "roas":              "roas",
+    "roi_d0":            "roi_d0",
+    "roi_d7":            "roi_d7",
+    "roi_d30":           "roi_d30",
     "ad_name":           "ad_name",
 }
 
@@ -364,6 +397,15 @@ def get_ad_aggregated(start_date: str, end_date: str, *,
             CASE WHEN SUM(a.spend) > 0
                  THEN ROUND(SUM(a.total_recharge_amount) / SUM(a.spend), 4)
                  ELSE NULL END                    AS roas,
+            CASE WHEN SUM(a.spend) > 0
+                 THEN ROUND(SUM(a.cum_recharge_1d) / SUM(a.spend), 4)
+                 ELSE NULL END                    AS roi_d0,
+            CASE WHEN SUM(a.spend) > 0
+                 THEN ROUND(SUM(a.cum_recharge_7d) / SUM(a.spend), 4)
+                 ELSE NULL END                    AS roi_d7,
+            CASE WHEN SUM(a.spend) > 0
+                 THEN ROUND(SUM(a.cum_recharge_30d) / SUM(a.spend), 4)
+                 ELSE NULL END                    AS roi_d30,
             {drama_select_sql}
         FROM biz_attribution_ad_daily a
         {drama_join_sql}
@@ -388,6 +430,7 @@ _CAMPAIGN_AGG_ORDER = {
     "total_conversions": "total_conversions",
     "ctr":  "ctr", "cpc":  "cpc", "cpm":  "cpm",
     "cpi":  "cpi", "cpa":  "cpa", "roas": "roas",
+    "roi_d0": "roi_d0", "roi_d7": "roi_d7", "roi_d30": "roi_d30",
     "campaign_name": "campaign_name",
 }
 
@@ -438,7 +481,16 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
                  ELSE NULL END                    AS cpa,
             CASE WHEN SUM(spend) > 0
                  THEN ROUND(SUM(total_recharge_amount) / SUM(spend), 4)
-                 ELSE NULL END                    AS roas
+                 ELSE NULL END                    AS roas,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_1d) / SUM(spend), 4)
+                 ELSE NULL END                    AS roi_d0,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_7d) / SUM(spend), 4)
+                 ELSE NULL END                    AS roi_d7,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_30d) / SUM(spend), 4)
+                 ELSE NULL END                    AS roi_d30
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s {extra_sql} {name_sql}
         GROUP BY platform, account_id, campaign_id
@@ -498,7 +550,16 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
                  ELSE NULL END                    AS cpa,
             CASE WHEN SUM(spend) > 0
                  THEN ROUND(SUM(total_recharge_amount) / SUM(spend), 4)
-                 ELSE NULL END                    AS roas
+                 ELSE NULL END                    AS roas,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_1d) / SUM(spend), 4)
+                 ELSE NULL END                    AS roi_d0,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_7d) / SUM(spend), 4)
+                 ELSE NULL END                    AS roi_d7,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_30d) / SUM(spend), 4)
+                 ELSE NULL END                    AS roi_d30
         FROM biz_attribution_ad_daily
         WHERE ds_account_local BETWEEN %s AND %s {extra_sql} {cid_sql}
         GROUP BY platform, account_id, campaign_id, adgroup_id
@@ -529,6 +590,9 @@ _CAMPAIGN_DAILY_ORDER_MAP = {
     "cpi":           "cpi",
     "cpa":           "cpa",
     "roas":          "roas",
+    "roi_d0":        "roi_d0",
+    "roi_d7":        "roi_d7",
+    "roi_d30":       "roi_d30",
 }
 
 
@@ -595,7 +659,16 @@ def get_campaign_daily_list(start_date: str, end_date: str, *,
                  ELSE NULL END                       AS cpa,
             CASE WHEN SUM(spend) > 0
                  THEN ROUND(SUM(total_recharge_amount) / SUM(spend), 4)
-                 ELSE NULL END                       AS roas
+                 ELSE NULL END                       AS roas,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_1d) / SUM(spend), 4)
+                 ELSE NULL END                       AS roi_d0,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_7d) / SUM(spend), 4)
+                 ELSE NULL END                       AS roi_d7,
+            CASE WHEN SUM(spend) > 0
+                 THEN ROUND(SUM(cum_recharge_30d) / SUM(spend), 4)
+                 ELSE NULL END                       AS roi_d30
         FROM biz_attribution_ad_daily
         {base_where_sql}
         GROUP BY platform, account_id, campaign_id, ds_account_local

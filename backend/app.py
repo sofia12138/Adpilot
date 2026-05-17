@@ -326,6 +326,56 @@ async def _sync_user_payment_intraday_job():
         logger.error(f"用户付费实时同步失败: {e}")
 
 
+async def _sync_ops_region_daily_job():
+    """Job 10：区域渠道分析 T+1 同步（每天 1 次，默认回填 30 天）
+
+    数据流：
+        PolarDB matrix_advertise.channel_user  ─┐
+        PolarDB matrix_order.recharge_order    ─┼─→ adpilot_biz.biz_ops_region_register_daily
+        MaxCompute metis_dw.dim_user_df         ─┘   adpilot_biz.biz_ops_region_revenue_daily
+
+    依赖：
+        - PolarDB 必需（注册侧 channel_user 命中 + 充值侧订单）
+        - MaxCompute (DMS) 必需（拉 dim_user_df 注册时间和 region）
+    缺任一上游则该侧聚合结果为空（任务不会崩，但数据缺）。
+    """
+    import asyncio
+    settings = get_settings()
+    if not settings.order_mysql_database:
+        logger.info("区域渠道 T+1 同步：ORDER_MYSQL_DATABASE 未配置，跳过本次")
+        return
+    if not (settings.dms_access_key_id or settings.odps_access_key_id):
+        logger.warning(
+            "区域渠道 T+1 同步：缺少 AccessKey，注册侧无法拉 dim_user_df，"
+            "充值侧 region 也将退化为 UNK；继续运行"
+        )
+
+    from tasks.sync_ops_region_daily import run as sync_run
+    logger.info("区域渠道 T+1 同步开始（默认 30 天回刷窗口）")
+    try:
+        result = await asyncio.to_thread(sync_run)
+        logger.info(f"区域渠道 T+1 同步完成: {result}")
+    except Exception as e:
+        logger.error(f"区域渠道 T+1 同步失败: {e}")
+
+
+async def _sync_ops_region_intraday_job():
+    """Job 11：区域渠道分析实时同步（每 30 分钟，今/昨日 LA → _intraday 表）"""
+    import asyncio
+    settings = get_settings()
+    if not settings.order_mysql_database:
+        logger.info("区域渠道实时同步：ORDER_MYSQL_DATABASE 未配置，跳过本次")
+        return
+
+    from tasks.sync_ops_region_intraday import run as sync_run
+    logger.info("区域渠道实时同步开始（窗口=今天+昨天 LA）")
+    try:
+        result = await asyncio.to_thread(sync_run)
+        logger.info(f"区域渠道实时同步完成: {result}")
+    except Exception as e:
+        logger.error(f"区域渠道实时同步失败: {e}")
+
+
 async def _sync_attribution_intraday_job():
     """Job 4：CK D0 实时归因同步 (默认窗口=今天+昨天 LA)
 
@@ -483,6 +533,27 @@ async def lifespan(application: FastAPI):
         next_run_time=now + timedelta(minutes=3),  # 启动后 3 分钟立刻跑首次
     )
 
+    # Job 10：区域渠道分析 T+1 同步（每天 LA 04:00 ≈ 北京 19:00；与 Job 9 错开 30min）
+    # 拉 PolarDB channel_user/recharge_order + MaxCompute dim_user_df → biz_ops_region_*_daily
+    _scheduler.add_job(
+        _sync_ops_region_daily_job,
+        trigger="cron",
+        hour=19, minute=0,  # Asia/Shanghai 19:00 ≈ LA 04:00 / 03:00
+        id="sync_ops_region_daily",
+        replace_existing=True,
+    )
+
+    # Job 11：区域渠道分析实时同步（每 30 分钟，今/昨日 LA → _intraday 表）
+    # 与 Job 6 / Job 8 同节奏，给运营面板今日数据 ≤ 30min 延迟
+    _scheduler.add_job(
+        _sync_ops_region_intraday_job,
+        trigger="interval",
+        minutes=30,
+        id="sync_ops_region_intraday",
+        replace_existing=True,
+        next_run_time=now + timedelta(minutes=15),  # 启动后 15min 首次（错开 Job 6/8）
+    )
+
     # Job 4：CK D0 实时归因同步（默认 disabled；ENABLE_CK_INTRADAY_SYNC=true 开启）
     # 启用后每 30 分钟拉 metis.dwd_*_rt 当天 + 昨天 LA 数据，覆盖到 biz_attribution_ad_intraday
     _settings = get_settings()
@@ -499,14 +570,15 @@ async def lifespan(application: FastAPI):
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
             "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟 | "
             "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟 | "
-            "用户付费每日 18:30 | CK 实时每 30 分钟）"
+            "用户付费每日 18:30 | 区域渠道每日 19:00 + 实时每 30 分钟 | "
+            "CK 实时每 30 分钟）"
         )
     else:
         logger.info(
             "定时同步调度器已启动（全量每 20 分钟 | 日报错开 10 分钟 | "
             "归因每日 02:30 | 运营每 2 小时 | 运营付费侧每 30 分钟 | "
             "PolarDB 运营 T+1 每 2 小时 | PolarDB 运营实时每 10 分钟 | "
-            "用户付费每日 18:30）"
+            "用户付费每日 18:30 | 区域渠道每日 19:00 + 实时每 30 分钟）"
             "—— CK 实时同步未启用 (ENABLE_CK_INTRADAY_SYNC=false)"
         )
 

@@ -24,9 +24,19 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from db import get_biz_conn
+
+
+_LA_TZ = ZoneInfo("America/Los_Angeles")
+
+
+def _la_cutoff_ds(days_before: int) -> str:
+    """返回 LA 时区 today - days_before 的 YYYY-MM-DD。"""
+    return (datetime.now(_LA_TZ).date() - timedelta(days=days_before)).strftime("%Y-%m-%d")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -280,6 +290,9 @@ def query_drama_summary(
             SUM(installs)                   AS installs,
             SUM(registrations)              AS registrations,
             SUM(purchase_value)             AS purchase_value,
+            NULL                            AS cum_d0,
+            NULL                            AS cum_d7,
+            NULL                            AS cum_d30,
             COUNT(DISTINCT language_code)   AS language_count
         FROM fact_drama_daily
         WHERE {where}
@@ -317,6 +330,9 @@ def query_drama_summary(
             "ctr": round(clicks / impressions * 100, 4) if impressions else 0,
             "cpc": round(spend / clicks, 4) if clicks else 0,
             "roas": round(purchase / spend, 4) if spend else 0,
+            "roi_d0": None,
+            "roi_d7": None,
+            "roi_d30": None,
             "language_count": int(r["language_count"] or 0),
         })
 
@@ -378,7 +394,10 @@ def query_locale_breakdown(
             SUM(clicks)                     AS clicks,
             SUM(installs)                   AS installs,
             SUM(registrations)              AS registrations,
-            SUM(purchase_value)             AS purchase_value
+            SUM(purchase_value)             AS purchase_value,
+            NULL                            AS cum_d0,
+            NULL                            AS cum_d7,
+            NULL                            AS cum_d30
         FROM fact_drama_daily
         WHERE {where}
         GROUP BY language_code
@@ -402,6 +421,9 @@ def query_locale_breakdown(
             "registrations": int(r["registrations"] or 0),
             "purchase_value": round(purchase, 4),
             "roas": round(purchase / spend, 4) if spend else 0,
+            "roi_d0": None,
+            "roi_d7": None,
+            "roi_d30": None,
         })
     return result
 
@@ -580,6 +602,9 @@ def query_drama_summary_attribution(
             SUM(a.activation)                      AS installs,
             SUM(a.registration)                    AS registrations,
             SUM(a.total_recharge_amount)           AS purchase_value,
+            SUM(a.cum_recharge_1d)                 AS cum_d0,
+            SUM(a.cum_recharge_7d)                 AS cum_d7,
+            SUM(a.cum_recharge_30d)                AS cum_d30,
             COUNT(DISTINCT m.language_code)        AS language_count
         FROM biz_attribution_ad_daily a
         JOIN ad_drama_mapping m {join_on}
@@ -603,6 +628,9 @@ def query_drama_summary_attribution(
     for r in rows:
         spend = float(r["spend"] or 0)
         purchase = float(r["purchase_value"] or 0)
+        c0 = float(r["cum_d0"] or 0)
+        c7 = float(r["cum_d7"] or 0)
+        c30 = float(r["cum_d30"] or 0)
         clicks = int(r["clicks"] or 0)
         impressions = int(r["impressions"] or 0)
         result.append({
@@ -619,6 +647,9 @@ def query_drama_summary_attribution(
             "ctr": round(clicks / impressions * 100, 4) if impressions else 0,
             "cpc": round(spend / clicks, 4) if clicks else 0,
             "roas": round(purchase / spend, 4) if spend else 0,
+            "roi_d0": round(c0 / spend, 4) if spend else None,
+            "roi_d7": round(c7 / spend, 4) if spend else None,
+            "roi_d30": round(c30 / spend, 4) if spend else None,
             "language_count": int(r["language_count"] or 0),
         })
 
@@ -674,7 +705,10 @@ def query_locale_breakdown_attribution(
             SUM(a.clicks)                          AS clicks,
             SUM(a.activation)                      AS installs,
             SUM(a.registration)                    AS registrations,
-            SUM(a.total_recharge_amount)           AS purchase_value
+            SUM(a.total_recharge_amount)           AS purchase_value,
+            SUM(a.cum_recharge_1d)                 AS cum_d0,
+            SUM(a.cum_recharge_7d)                 AS cum_d7,
+            SUM(a.cum_recharge_30d)                AS cum_d30
         FROM biz_attribution_ad_daily a
         JOIN ad_drama_mapping m
           ON m.campaign_id = a.campaign_id
@@ -698,6 +732,9 @@ def query_locale_breakdown_attribution(
     for r in rows:
         spend = float(r["spend"] or 0)
         purchase = float(r["purchase_value"] or 0)
+        c0 = float(r["cum_d0"] or 0)
+        c7 = float(r["cum_d7"] or 0)
+        c30 = float(r["cum_d30"] or 0)
         result.append({
             "language_code": r["language_code"],
             "localized_drama_name": r["localized_drama_name"] or "",
@@ -707,6 +744,9 @@ def query_locale_breakdown_attribution(
             "registrations": int(r["registrations"] or 0),
             "purchase_value": round(purchase, 4),
             "roas": round(purchase / spend, 4) if spend else 0,
+            "roi_d0": round(c0 / spend, 4) if spend else None,
+            "roi_d7": round(c7 / spend, 4) if spend else None,
+            "roi_d30": round(c30 / spend, 4) if spend else None,
         })
     return result
 
@@ -818,8 +858,13 @@ def query_drama_summary_blend(
     page_size: int = 50,
     optimizer: Optional[str] = None,
 ) -> dict:
-    """剧级总览（blend：normalized 全量 spend + attribution 真值 reg/rev）"""
+    """剧级总览（blend：normalized 全量 spend + attribution 真值 reg/rev）。
+
+    D7 ROI 特殊口径：截止到 LA T-2（含）计算，避免 intraday 兜底天数拉低 D7。
+    """
     from services.biz_blend_service import _attr_subquery
+
+    d7_cutoff_ds = _la_cutoff_ds(2)
 
     n_clauses = ["n.stat_date BETWEEN %s AND %s"]
     n_params: list = [start_date, end_date]
@@ -881,6 +926,11 @@ def query_drama_summary_blend(
             SUM(n.installs)                        AS installs,
             COALESCE(SUM(a.attr_registrations), 0) AS registrations,
             COALESCE(SUM(a.attr_revenue), 0)       AS purchase_value,
+            COALESCE(SUM(a.attr_cum_d0), 0)        AS cum_d0,
+            COALESCE(SUM(CASE WHEN n.stat_date <= %s THEN a.attr_cum_d7 ELSE 0 END), 0) AS cum_d7,
+            COALESCE(SUM(a.attr_cum_d30), 0)       AS cum_d30,
+            COALESCE(SUM(CASE WHEN n.stat_date <= %s THEN a.attr_revenue ELSE 0 END), 0) AS revenue_d7_cutoff,
+            SUM(CASE WHEN n.stat_date <= %s THEN n.spend ELSE 0 END) AS spend_d7_cutoff,
             COUNT(DISTINCT m.language_code)        AS language_count
         {join_block}
         GROUP BY m.content_key
@@ -894,13 +944,18 @@ def query_drama_summary_blend(
             cur.execute(count_sql, attr_args + n_params)
             total = cur.fetchone()["total"]
 
-            cur.execute(data_sql, attr_args + n_params + [page_size, offset])
+            cur.execute(data_sql, [d7_cutoff_ds, d7_cutoff_ds, d7_cutoff_ds] + attr_args + n_params + [page_size, offset])
             rows = cur.fetchall()
 
     result = []
     for r in rows:
         spend = float(r["spend"] or 0)
         purchase = float(r["purchase_value"] or 0)
+        c0 = float(r["cum_d0"] or 0)
+        c7 = float(r["cum_d7"] or 0)
+        c30 = float(r["cum_d30"] or 0)
+        rv_d7 = float(r["revenue_d7_cutoff"] or 0)
+        spend_d7 = float(r["spend_d7_cutoff"] or 0)
         clicks = int(r["clicks"] or 0)
         impressions = int(r["impressions"] or 0)
         result.append({
@@ -917,6 +972,9 @@ def query_drama_summary_blend(
             "ctr": round(clicks / impressions * 100, 4) if impressions else 0,
             "cpc": round(spend / clicks, 4) if clicks else 0,
             "roas": round(purchase / spend, 4) if spend else 0,
+            "roi_d0": round(c0 / spend, 4) if spend else None,
+            "roi_d7": round((c7 if c7 > 0 else rv_d7) / spend_d7, 4) if spend_d7 else None,
+            "roi_d30": round(c30 / spend, 4) if spend else None,
             "language_count": int(r["language_count"] or 0),
         })
 
@@ -934,8 +992,13 @@ def query_locale_breakdown_blend(
     country: Optional[str] = None,
     optimizer: Optional[str] = None,
 ) -> list[dict]:
-    """语言版本明细（blend）"""
+    """语言版本明细（blend）。
+
+    D7 ROI 特殊口径：截止到 LA T-2（含）计算，避免 intraday 兜底天数拉低 D7。
+    """
     from services.biz_blend_service import _attr_subquery
+
+    d7_cutoff_ds = _la_cutoff_ds(2)
 
     n_clauses = ["n.stat_date BETWEEN %s AND %s"]
     n_params: list = [start_date, end_date]
@@ -974,7 +1037,12 @@ def query_locale_breakdown_blend(
             SUM(n.clicks)                          AS clicks,
             SUM(n.installs)                        AS installs,
             COALESCE(SUM(a.attr_registrations), 0) AS registrations,
-            COALESCE(SUM(a.attr_revenue), 0)       AS purchase_value
+            COALESCE(SUM(a.attr_revenue), 0)       AS purchase_value,
+            COALESCE(SUM(a.attr_cum_d0), 0)        AS cum_d0,
+            COALESCE(SUM(CASE WHEN n.stat_date <= %s THEN a.attr_cum_d7 ELSE 0 END), 0) AS cum_d7,
+            COALESCE(SUM(a.attr_cum_d30), 0)       AS cum_d30,
+            COALESCE(SUM(CASE WHEN n.stat_date <= %s THEN a.attr_revenue ELSE 0 END), 0) AS revenue_d7_cutoff,
+            SUM(CASE WHEN n.stat_date <= %s THEN n.spend ELSE 0 END) AS spend_d7_cutoff
         FROM biz_campaign_daily_normalized n
         JOIN ad_drama_mapping m
           ON m.platform    = n.platform
@@ -996,13 +1064,18 @@ def query_locale_breakdown_blend(
 
     with get_biz_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, attr_args + n_params)
+            cur.execute(sql, [d7_cutoff_ds, d7_cutoff_ds, d7_cutoff_ds] + attr_args + n_params)
             rows = cur.fetchall()
 
     result = []
     for r in rows:
         spend = float(r["spend"] or 0)
         purchase = float(r["purchase_value"] or 0)
+        c0 = float(r["cum_d0"] or 0)
+        c7 = float(r["cum_d7"] or 0)
+        c30 = float(r["cum_d30"] or 0)
+        rv_d7 = float(r["revenue_d7_cutoff"] or 0)
+        spend_d7 = float(r["spend_d7_cutoff"] or 0)
         result.append({
             "language_code": r["language_code"],
             "localized_drama_name": r["localized_drama_name"] or "",
@@ -1012,6 +1085,9 @@ def query_locale_breakdown_blend(
             "registrations": int(r["registrations"] or 0),
             "purchase_value": round(purchase, 4),
             "roas": round(purchase / spend, 4) if spend else 0,
+            "roi_d0": round(c0 / spend, 4) if spend else None,
+            "roi_d7": round((c7 if c7 > 0 else rv_d7) / spend_d7, 4) if spend_d7 else None,
+            "roi_d30": round(c30 / spend, 4) if spend else None,
         })
     return result
 

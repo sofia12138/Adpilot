@@ -137,12 +137,30 @@ export default function OverviewPage() {
 
       {!isLoading && !isError && (
         <>
-          <div className="grid grid-cols-3 gap-4 mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
             <StatCard label="总消耗" value={hasData ? fmtUsd(overview.total_spend) : '-'} icon={DollarSign} href={buildAdsLink(apiPlatform, dateRange)} />
             <StatCard label="总收入" value={hasData ? fmtUsd(overview.total_revenue) : '-'} icon={TrendingUp} href={buildAdsLink(apiPlatform, dateRange)} />
             <StatCard
               label="综合 ROAS"
               value={hasData && overview.avg_roas ? overview.avg_roas.toFixed(2) : '-'}
+              icon={BarChart3}
+              href={buildAdsLink(apiPlatform, dateRange)}
+            />
+            <StatCard
+              label="D0 ROI（cohort）"
+              value={hasData && overview.avg_roi_d0 != null ? overview.avg_roi_d0.toFixed(2) : '-'}
+              icon={BarChart3}
+              href={buildAdsLink(apiPlatform, dateRange)}
+            />
+            <StatCard
+              label="D7 ROI（cohort）"
+              value={hasData && overview.avg_roi_d7 != null ? overview.avg_roi_d7.toFixed(2) : '-'}
+              icon={BarChart3}
+              href={buildAdsLink(apiPlatform, dateRange)}
+            />
+            <StatCard
+              label="D30 ROI（cohort）"
+              value={hasData && overview.avg_roi_d30 != null ? overview.avg_roi_d30.toFixed(2) : '-'}
               icon={BarChart3}
               href={buildAdsLink(apiPlatform, dateRange)}
             />

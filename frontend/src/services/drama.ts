@@ -26,6 +26,9 @@ export interface DramaSummaryRow {
   ctr: number
   cpc: number
   roas: number
+  roi_d0?: number | null
+  roi_d7?: number | null
+  roi_d30?: number | null
   language_count: number
 }
 
@@ -45,6 +48,9 @@ export interface LocaleBreakdownRow {
   registrations: number
   purchase_value: number
   roas: number
+  roi_d0?: number | null
+  roi_d7?: number | null
+  roi_d30?: number | null
 }
 
 export interface DramaTrendRow {

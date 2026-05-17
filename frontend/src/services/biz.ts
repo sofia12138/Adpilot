@@ -51,6 +51,12 @@ export interface BizOverview {
   avg_cpi: number | null
   avg_cpa: number | null
   avg_roas: number | null
+  /** cohort：cum_recharge_1d / 总 spend（与数仓 D0 定义一致；legacy 源为 null） */
+  avg_roi_d0?: number | null
+  /** cohort：cum_recharge_7d（D0–D6）/ 总 spend */
+  avg_roi_d7?: number | null
+  /** cohort：cum_recharge_30d（D0–D29）/ 总 spend */
+  avg_roi_d30?: number | null
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +76,9 @@ export interface BizTopCampaign {
   total_registrations?: number
   total_revenue: number
   avg_roas: number | null
+  roi_d0?: number | null
+  roi_d7?: number | null
+  roi_d30?: number | null
 }
 
 export interface TopCampaignsParams extends BizDateRange {
@@ -100,6 +109,9 @@ export interface BizCampaignDaily {
   cpi: number | null
   cpa: number | null
   roas: number | null
+  roi_d0?: number | null
+  roi_d7?: number | null
+  roi_d30?: number | null
 }
 
 export interface CampaignDailyParams extends BizDateRange {
@@ -214,6 +226,9 @@ export interface AggRow {
   cpi: number | null
   cpa: number | null
   roas: number | null
+  roi_d0?: number | null
+  roi_d7?: number | null
+  roi_d30?: number | null
 }
 
 export interface AggParams extends BizDateRange {

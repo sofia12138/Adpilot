@@ -233,13 +233,16 @@ def get_overview(start_date: str, end_date: str,
     row["avg_cpi"]  = _safe_div(s, ins)
     row["avg_cpa"]  = _safe_div(s, cv)
     row["avg_roas"] = _safe_div(rv, s)
+    row["avg_roi_d0"] = None
+    row["avg_roi_d7"] = None
+    row["avg_roi_d30"] = None
     return row
 
 
 _ALLOWED_ORDER_COLS = {
     "stat_date", "platform", "campaign_name", "spend", "impressions",
     "clicks", "installs", "conversions", "revenue", "ctr", "cpc",
-    "cpm", "cpi", "cpa", "roas",
+    "cpm", "cpi", "cpa", "roas", "roi_d0", "roi_d7", "roi_d30",
 }
 
 
@@ -267,7 +270,10 @@ def get_campaign_daily_list(start_date: str, end_date: str, *,
         sql = f"""
             SELECT platform, account_id, campaign_id, campaign_name,
                    stat_date, spend, impressions, clicks, installs,
-                   conversions, revenue, ctr, cpc, cpm, cpi, cpa, roas
+                   conversions, revenue, ctr, cpc, cpm, cpi, cpa, roas,
+                   CAST(NULL AS DECIMAL(18,4)) AS roi_d0,
+                   CAST(NULL AS DECIMAL(18,4)) AS roi_d7,
+                   CAST(NULL AS DECIMAL(18,4)) AS roi_d30
             FROM biz_campaign_daily_normalized
             WHERE {where}
             ORDER BY {order_by} {order_dir}
@@ -307,7 +313,10 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
                CASE WHEN SUM(impressions)>0 THEN ROUND(SUM(spend)/SUM(impressions)*1000,4) ELSE NULL END AS cpm,
                CASE WHEN SUM(installs)>0    THEN ROUND(SUM(spend)/SUM(installs),4)    ELSE NULL END AS cpi,
                CASE WHEN SUM(conversions)>0 THEN ROUND(SUM(spend)/SUM(conversions),4) ELSE NULL END AS cpa,
-               CASE WHEN SUM(spend)>0       THEN ROUND(SUM(revenue)/SUM(spend),4)     ELSE NULL END AS roas
+               CASE WHEN SUM(spend)>0       THEN ROUND(SUM(revenue)/SUM(spend),4)     ELSE NULL END AS roas,
+               CAST(NULL AS DECIMAL(18,4)) AS roi_d0,
+               CAST(NULL AS DECIMAL(18,4)) AS roi_d7,
+               CAST(NULL AS DECIMAL(18,4)) AS roi_d30
         FROM biz_campaign_daily_normalized
         WHERE {where}
         GROUP BY platform, account_id, campaign_id
@@ -322,10 +331,14 @@ def get_campaign_aggregated(start_date: str, end_date: str, *,
 _AGG_ORDER = {
     "total_spend", "total_revenue", "total_impressions", "total_clicks",
     "total_installs", "total_conversions", "ctr", "cpc", "cpm", "cpi", "cpa", "roas",
+    "roi_d0", "roi_d7", "roi_d30",
     "campaign_name",
 }
 
-_ALLOWED_METRICS = {"spend", "revenue", "clicks", "installs", "conversions", "roas"}
+_ALLOWED_METRICS = {
+    "spend", "revenue", "clicks", "installs", "conversions", "roas",
+    "roi_d0", "roi_d7", "roi_d30",
+}
 
 
 def get_top_campaigns(start_date: str, end_date: str, *,
@@ -340,6 +353,8 @@ def get_top_campaigns(start_date: str, end_date: str, *,
     limit = min(max(limit, 1), 100)
 
     if metric == "roas":
+        order_expr = "CASE WHEN SUM(spend) > 0 THEN SUM(revenue)/SUM(spend) ELSE 0 END"
+    elif metric in ("roi_d0", "roi_d7", "roi_d30"):
         order_expr = "CASE WHEN SUM(spend) > 0 THEN SUM(revenue)/SUM(spend) ELSE 0 END"
     else:
         order_expr = f"SUM({metric})"
@@ -358,7 +373,10 @@ def get_top_campaigns(start_date: str, end_date: str, *,
             SUM(revenue)                   AS total_revenue,
             CASE WHEN SUM(spend) > 0
                  THEN ROUND(SUM(revenue)/SUM(spend), 4)
-                 ELSE NULL END             AS avg_roas
+                 ELSE NULL END             AS avg_roas,
+            CAST(NULL AS DECIMAL(18,4))     AS roi_d0,
+            CAST(NULL AS DECIMAL(18,4))     AS roi_d7,
+            CAST(NULL AS DECIMAL(18,4))     AS roi_d30
         FROM biz_campaign_daily_normalized
         WHERE {where}
         GROUP BY platform, account_id, campaign_id

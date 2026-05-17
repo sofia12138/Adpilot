@@ -40,8 +40,9 @@ export const menuConfig: MenuItem[] = [
     icon: BarChart2,
     panelKey: 'ops_dashboard',
     children: [
-      { id: 'ops-overview', label: '运营总览', icon: BarChart2, path: '/dashboard/ops', panelKey: 'ops_dashboard' },
-      { id: 'ops-users',    label: '用户付费', icon: Wallet,    path: '/dashboard/ops/users', panelKey: 'ops_dashboard' },
+      { id: 'ops-overview',       label: '运营总览',     icon: BarChart2, path: '/dashboard/ops',                panelKey: 'ops_dashboard' },
+      { id: 'ops-users',          label: '用户付费',     icon: Wallet,    path: '/dashboard/ops/users',          panelKey: 'ops_dashboard' },
+      { id: 'ops-region-channel', label: '区域渠道分析', icon: Globe,     path: '/dashboard/ops/region-channel', panelKey: 'ops_dashboard' },
     ],
   },
   {

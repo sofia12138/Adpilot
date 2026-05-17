@@ -211,7 +211,10 @@ async def biz_top_campaigns(
     end_date: str = Query(...),
     platform: Optional[str] = Query(None),
     account_id: Optional[str] = Query(None),
-    metric: str = Query("spend", description="排序指标: spend/revenue/clicks/installs/conversions/roas"),
+    metric: str = Query(
+        "spend",
+        description="排序指标: spend/revenue/clicks/installs/conversions/roas/roi_d0/roi_d7/roi_d30",
+    ),
     limit: int = Query(20, ge=1, le=100),
     source: str = Query("auto", description="数据源: auto/attribution/legacy"),
 ):

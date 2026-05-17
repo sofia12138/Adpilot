@@ -154,6 +154,7 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
     _AGG_ORDER = {
         "total_spend", "total_revenue", "total_impressions", "total_clicks",
         "total_installs", "total_conversions", "ctr", "cpc", "cpm", "cpi", "cpa", "roas",
+        "roi_d0", "roi_d7", "roi_d30",
         "adgroup_name",
     }
     order_col = order_by if order_by in _AGG_ORDER else "total_spend"
@@ -173,7 +174,10 @@ def get_adgroup_aggregated(start_date: str, end_date: str, *,
                CASE WHEN SUM(impressions)>0 THEN ROUND(SUM(spend)/SUM(impressions)*1000,4) ELSE NULL END AS cpm,
                CASE WHEN SUM(installs)>0    THEN ROUND(SUM(spend)/SUM(installs),4)    ELSE NULL END AS cpi,
                CASE WHEN SUM(conversions)>0 THEN ROUND(SUM(spend)/SUM(conversions),4) ELSE NULL END AS cpa,
-               CASE WHEN SUM(spend)>0       THEN ROUND(SUM(revenue)/SUM(spend),4)     ELSE NULL END AS roas
+               CASE WHEN SUM(spend)>0       THEN ROUND(SUM(revenue)/SUM(spend),4)     ELSE NULL END AS roas,
+               CAST(NULL AS DECIMAL(18,4)) AS roi_d0,
+               CAST(NULL AS DECIMAL(18,4)) AS roi_d7,
+               CAST(NULL AS DECIMAL(18,4)) AS roi_d30
         FROM biz_adgroup_daily_normalized
         WHERE {where}
         GROUP BY platform, account_id, campaign_id, adgroup_id

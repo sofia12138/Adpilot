@@ -34,7 +34,13 @@ export default function BizAnalysisPage() {
     spend: c.total_spend,
     revenue: c.total_revenue,
     roas: c.avg_roas ?? 0,
+    roi_d0: c.roi_d0,
+    roi_d7: c.roi_d7,
+    roi_d30: c.roi_d30,
   }))
+
+  const fmtRoi = (v: number | null | undefined) =>
+    v != null && v > 0 ? v.toFixed(2) : '-'
 
   const columns: Column<typeof campaigns[number]>[] = [
     { key: 'name', title: 'Campaign', render: (r) => <span className="text-sm text-gray-800 font-medium truncate max-w-[180px] block">{r.name}</span> },
@@ -50,8 +56,10 @@ export default function BizAnalysisPage() {
         {r.roas > 0 ? r.roas.toFixed(2) : '-'}
       </span>
     )},
+    { key: 'roi_d0', title: 'D0 ROI', align: 'right', render: (r) => <span className="tabular-nums text-xs">{fmtRoi(r.roi_d0)}</span> },
+    { key: 'roi_d7', title: 'D7 ROI', align: 'right', render: (r) => <span className="tabular-nums text-xs">{fmtRoi(r.roi_d7)}</span> },
+    { key: 'roi_d30', title: 'D30 ROI', align: 'right', render: (r) => <span className="tabular-nums text-xs">{fmtRoi(r.roi_d30)}</span> },
   ]
-
   return (
     <div className="max-w-7xl mx-auto">
       <PageHeader title="业务分析" description="分析业务核心指标与 Campaign 表现" />
@@ -67,10 +75,13 @@ export default function BizAnalysisPage() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-4 mb-6">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
             <StatCard label="总消耗" value={overview ? fmtUsd(overview.total_spend) : '-'} icon={DollarSign} />
             <StatCard label="总收入" value={overview ? fmtUsd(overview.total_revenue) : '-'} icon={TrendingUp} />
             <StatCard label="ROAS" value={overview?.avg_roas ? overview.avg_roas.toFixed(2) : '-'} icon={BarChart3} />
+            <StatCard label="D0 ROI" value={overview?.avg_roi_d0 != null ? overview.avg_roi_d0.toFixed(2) : '-'} icon={BarChart3} />
+            <StatCard label="D7 ROI" value={overview?.avg_roi_d7 != null ? overview.avg_roi_d7.toFixed(2) : '-'} icon={BarChart3} />
+            <StatCard label="D30 ROI" value={overview?.avg_roi_d30 != null ? overview.avg_roi_d30.toFixed(2) : '-'} icon={BarChart3} />
           </div>
 
           <SectionCard title="Top 10 Campaigns" noPadding className="mb-6">

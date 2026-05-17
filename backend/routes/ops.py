@@ -17,13 +17,14 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from auth import User, get_current_user
-from services import ops_service, panel_service
+from services import ops_region_service, ops_service, panel_service
 
 router = APIRouter(prefix="/ops", tags=["运营数据"])
 
 _OPS_PANEL_KEY = "ops_dashboard"
 _MAX_RANGE_DAYS = 90
 _VALID_SOURCES = {"auto", "dwd", "polardb"}
+_VALID_REGION_SOURCES = {"auto", "daily", "intraday"}
 
 
 def _require_ops_panel(user: User = Depends(get_current_user)) -> User:
@@ -90,3 +91,47 @@ async def hourly_revenue(
         raise HTTPException(status_code=400, detail="区间过大，最多 31 天")
 
     return ops_service.query_hourly_revenue(s, e)
+
+
+# ─────────────────────────────────────────────────────────────
+#  区域渠道分析子面板
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/region-channel/daily-stats")
+async def region_channel_daily_stats(
+    start_date: str = Query(..., description="起始日期 YYYY-MM-DD（含），LA 时区"),
+    end_date: str = Query(..., description="结束日期 YYYY-MM-DD（含），LA 时区"),
+    source: str = Query("auto", description="数据源: auto | daily | intraday"),
+    _: User = Depends(_require_ops_panel),
+):
+    """区域渠道分析：返回 [start_date, end_date] 区间的注册/充值聚合行。
+
+    返回结构（前端在内存 reshape 出 KPI / 趋势 / 国家表）:
+      {
+        "register_rows": [
+          { ds, region, channel_kind: 'organic'|'tiktok'|'meta'|'other',
+            register_uv, data_source: 'daily'|'intraday' }
+        ],
+        "revenue_rows": [
+          { ds, region, channel_kind, os_type: 1|2,
+            payer_uv, order_cnt,
+            revenue_usd, sub_revenue_usd, iap_revenue_usd, data_source }
+        ],
+        "data_source": "auto" | "daily" | "intraday"
+      }
+    """
+    s = _parse_date(start_date, "start_date")
+    e = _parse_date(end_date, "end_date")
+    if s > e:
+        raise HTTPException(status_code=400, detail="start_date 不能晚于 end_date")
+    if source not in _VALID_REGION_SOURCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"source 参数非法，必须是 {sorted(_VALID_REGION_SOURCES)}",
+        )
+
+    days = (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(s, "%Y-%m-%d")).days + 1
+    if days > _MAX_RANGE_DAYS:
+        raise HTTPException(status_code=400, detail=f"区间过大，最多 {_MAX_RANGE_DAYS} 天")
+
+    return ops_region_service.query_daily_stats(s, e, source=source)

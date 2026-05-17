@@ -55,7 +55,7 @@ function isMissingAttribution(row: Pick<AggRow, 'total_spend' | 'attribution_spe
 // Column defs for hierarchical table (aggregated data)
 // ---------------------------------------------------------------------------
 
-type SortKey = 'total_spend' | 'total_revenue' | 'roas' | 'ctr' | 'cpc' | 'total_registrations' | 'total_installs' | 'total_clicks' | 'total_impressions' | 'total_conversions' | 'cpi' | 'cpa' | 'cpm'
+type SortKey = 'total_spend' | 'total_revenue' | 'roas' | 'roi_d0' | 'roi_d7' | 'roi_d30' | 'ctr' | 'cpc' | 'total_registrations' | 'total_installs' | 'total_clicks' | 'total_impressions' | 'total_conversions' | 'cpi' | 'cpa' | 'cpm'
 
 interface ColDef {
   key: string
@@ -71,6 +71,9 @@ const AGG_COLUMNS: ColDef[] = [
   { key: 'total_spend',         label: '消耗', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
   { key: 'total_revenue',       label: '收入', group: 'core',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
   { key: 'roas',                label: 'ROI',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtRatio, sortable: true },
+  { key: 'roi_d0',              label: 'D0 ROI', group: 'performance', defaultVisible: true,  align: 'right', format: fmtRatio, sortable: true },
+  { key: 'roi_d7',              label: 'D7 ROI', group: 'performance', defaultVisible: true,  align: 'right', format: fmtRatio, sortable: true },
+  { key: 'roi_d30',             label: 'D30 ROI', group: 'performance', defaultVisible: true,  align: 'right', format: fmtRatio, sortable: true },
   { key: 'ctr',                 label: 'CTR',  group: 'performance', defaultVisible: true,  align: 'right', format: fmtPct,   sortable: true },
   { key: 'cpc',                 label: 'CPC',  group: 'cost',        defaultVisible: true,  align: 'right', format: fmtUsd2,  sortable: true },
   { key: 'total_registrations', label: '注册', group: 'performance', defaultVisible: true,  align: 'right', format: fmtNum,   sortable: true },
@@ -205,7 +208,7 @@ const LEVEL_BADGE: Record<RowLevel, { label: string; cls: string }> = {
 // Column persistence
 // ---------------------------------------------------------------------------
 
-function colStorageKey(platform: string) { return `console_hier_cols_v2_${platform}` }
+function colStorageKey(platform: string) { return `console_hier_cols_v3_${platform}` }
 function loadVisibleCols(platform: string): string[] {
   try {
     const raw = localStorage.getItem(colStorageKey(platform))
@@ -668,6 +671,9 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
     { label: '总消耗', value: fmtUsd2(ov?.total_spend ?? null), icon: DollarSign },
     { label: '总收入', value: fmtUsd2(ov?.total_revenue ?? null), icon: TrendingUp },
     { label: 'ROI', value: fmtRatio(ov?.avg_roas ?? null), icon: BarChart3, warn: ov?.avg_roas != null && ov.avg_roas < roiThreshold },
+    { label: 'D0 ROI', value: fmtRatio(ov?.avg_roi_d0 ?? null), icon: BarChart3 },
+    { label: 'D7 ROI', value: fmtRatio(ov?.avg_roi_d7 ?? null), icon: BarChart3 },
+    { label: 'D30 ROI', value: fmtRatio(ov?.avg_roi_d30 ?? null), icon: BarChart3 },
     { label: 'CTR', value: fmtPct(ov?.avg_ctr ?? null), icon: MousePointerClick },
     { label: 'CPC', value: fmtUsd2(ov?.avg_cpc ?? null), icon: Target },
     { label: 'CVR', value: ov?.total_clicks ? `${((ov.total_conversions / ov.total_clicks) * 100).toFixed(2)}%` : '-', icon: BarChart3 },
@@ -681,7 +687,7 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
       {Toast}
 
       {/* Header */}
-      <PageHeader title={title} description={`${platformLabel} 投放数据操作台 — 分层查看 Campaign → Adset → Ad`} />
+      <PageHeader title={title} description={`${platformLabel} 投放数据操作台 — 分层查看 Campaign → Adset → Ad；D0/D7/D30 为 cohort 窗口充值 / 总消耗（blend 下近实时日 D7/D30 可能因仅 intraday 而偏低）`} />
 
       {/* 同步状态栏：显示最近同步时间，支持手动刷新 */}
       <GlobalSyncBar />
@@ -692,7 +698,7 @@ export function AdConsole({ platform, title }: AdConsoleProps) {
       </FilterBar>
 
       {/* KPIs */}
-      <div className="grid grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-3 sm:grid-cols-3 lg:grid-cols-9 gap-3">
         {kpis.map(k => (
           <StatCard key={k.label} label={k.label} value={k.value} icon={k.icon}
             className={k.warn ? 'border-red-200 bg-red-50/40' : ''} />

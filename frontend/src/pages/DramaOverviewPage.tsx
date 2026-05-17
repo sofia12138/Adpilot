@@ -66,6 +66,11 @@ function fmtRoas(v: number): string {
   return `${v.toFixed(2)}x`
 }
 
+function fmtRatio(v?: number | null): string {
+  if (v == null) return '—'
+  return `${v.toFixed(2)}x`
+}
+
 const LANG_LABEL: Record<string, string> = {
   en: 'English',
   es: 'Español',
@@ -163,6 +168,9 @@ function LocaleRows({
           <td className="px-4 py-2.5 text-right text-xs font-medium text-emerald-600">
             {fmtRoas(r.roas)}
           </td>
+          <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtRatio(r.roi_d0)}</td>
+          <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtRatio(r.roi_d7)}</td>
+          <td className="px-4 py-2.5 text-right text-xs text-gray-700">{fmtRatio(r.roi_d30)}</td>
           <td className="px-4 py-2.5 text-right text-xs text-gray-400">—</td>
         </tr>
       ))}
@@ -263,7 +271,7 @@ export default function DramaOverviewPage() {
   const totalPages = Math.ceil(total / PAGE_SIZE)
 
   // ── 列数（含展开箭头列）─────────────────────────────────────
-  const COL_COUNT = 8
+  const COL_COUNT = 11
 
   return (
     <div className="max-w-[1400px] mx-auto space-y-5">
@@ -415,6 +423,9 @@ export default function DramaOverviewPage() {
                 <th className="text-right px-4 py-3">注册</th>
                 <th className="text-right px-4 py-3">收入</th>
                 <th className="text-right px-4 py-3">ROAS</th>
+                <th className="text-right px-4 py-3">D0 ROI</th>
+                <th className="text-right px-4 py-3">D7 ROI</th>
+                <th className="text-right px-4 py-3">D30 ROI</th>
                 <th className="text-right px-4 py-3 min-w-[80px]">语言版本</th>
               </tr>
             </thead>
@@ -499,6 +510,15 @@ export default function DramaOverviewPage() {
                         >
                           {fmtRoas(row.roas)}
                         </span>
+                      </td>
+                      <td className="px-4 py-3 text-right text-gray-700">
+                        {fmtRatio(row.roi_d0)}
+                      </td>
+                      <td className="px-4 py-3 text-right text-gray-700">
+                        {fmtRatio(row.roi_d7)}
+                      </td>
+                      <td className="px-4 py-3 text-right text-gray-700">
+                        {fmtRatio(row.roi_d30)}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <span className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-600 rounded-full px-2 py-0.5">
