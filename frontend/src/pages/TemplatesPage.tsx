@@ -66,15 +66,6 @@ function isTikTokMinisBasic(t: Template): boolean {
   return t.platform === 'tiktok' && t.template_type === 'tiktok_minis_basic'
 }
 
-function isTikTokWebToApp(t: Template): boolean {
-  return t.platform === 'tiktok' && t.template_type === 'tiktok_web_to_app'
-}
-
-/** 是否支持从模板管理页跳转到新建广告页直接使用 */
-function canLaunchFromTemplatesPage(t: Template): boolean {
-  return isTikTokMinisBasic(t) || isTikTokWebToApp(t)
-}
-
 /* ═══════════════════════════════════════════════════
    固定枚举
    ═══════════════════════════════════════════════════ */
@@ -772,7 +763,6 @@ export default function TemplatesPage() {
         >
           <div className="divide-y divide-gray-100">
             {systemTemplates.map(t => {
-              const canLaunch = canLaunchFromTemplatesPage(t)
               const platformLabel = t.platform === 'tiktok' ? 'TikTok' : t.platform === 'meta' ? 'Meta' : String(t.platform)
               const platformBg = t.platform === 'tiktok' ? 'bg-pink-50 text-pink-600' : 'bg-indigo-50 text-indigo-600'
               return (
@@ -791,15 +781,6 @@ export default function TemplatesPage() {
                     </p>
                   </div>
                   <div className="flex items-center gap-2 ml-4">
-                    {canLaunch && (
-                      <button
-                        onClick={() => navigate(`/ads/create?template_id=${encodeURIComponent(t.id)}`)}
-                        className="flex items-center gap-1.5 px-3 py-2 text-xs text-white bg-pink-500 rounded-lg hover:bg-pink-600 transition font-medium"
-                        title="使用此模板创建 TikTok 广告"
-                      >
-                        <Send className="w-3.5 h-3.5" /> 用此模板新建广告
-                      </button>
-                    )}
                     <button
                       onClick={() => isMetaW2aConv(t) ? openView(t) : setSystemPreview(t)}
                       className="flex items-center gap-1.5 px-3 py-2 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 transition"
